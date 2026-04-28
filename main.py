@@ -5,6 +5,7 @@ from datetime import timedelta
 import os
 import json
 import time
+import sqlite3
 from flask import Flask
 from threading import Thread
 
@@ -46,7 +47,7 @@ COLOR_GREEN = discord.Color.green()
 COLOR_BLUE = discord.Color.blue()
 
 WARNINGS_FILE = "warnings.json"
-APPLICATIONS_FILE = "applications.json"
+DB_FILE = "applications.db"
 
 user_message_times = {}
 protection_enabled = True
@@ -66,20 +67,142 @@ bad_words = [
 ]
 
 
+# =========================
+# SQLite Database
+# =========================
+
+def db_connect():
+    return sqlite3.connect(DB_FILE)
+
+
+def init_db():
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS applications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_id TEXT UNIQUE,
+            user_id INTEGER,
+            message_id INTEGER,
+            channel_id INTEGER,
+            status TEXT,
+            name TEXT,
+            age TEXT,
+            daily_time TEXT,
+            experience TEXT,
+            why_you TEXT,
+            reviewer_id INTEGER,
+            reject_reason TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def create_application(user_id, channel_id, name, age, daily_time, experience, why_you):
+    conn = db_connect()
+    cur = conn.cursor()
+
+    now = discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    cur.execute("""
+        INSERT INTO applications (
+            app_id, user_id, message_id, channel_id, status,
+            name, age, daily_time, experience, why_you,
+            reviewer_id, reject_reason, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        "TEMP", user_id, None, channel_id, "pending",
+        name, age, daily_time, experience, why_you,
+        None, None, now, now
+    ))
+
+    app_number = cur.lastrowid
+    app_id = f"SUP-{app_number:04d}"
+
+    cur.execute("UPDATE applications SET app_id = ? WHERE id = ?", (app_id, app_number))
+
+    conn.commit()
+    conn.close()
+
+    return app_id
+
+
+def update_application_message(app_id, message_id):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE applications SET message_id = ?, updated_at = ? WHERE app_id = ?",
+        (message_id, discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), app_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_active_application(user_id):
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT app_id, status FROM applications
+        WHERE user_id = ? AND status IN ('pending', 'accepted')
+        ORDER BY id DESC LIMIT 1
+    """, (user_id,))
+
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def update_application_status(app_id, status, reviewer_id=None, reject_reason=None):
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE applications
+        SET status = ?, reviewer_id = ?, reject_reason = ?, updated_at = ?
+        WHERE app_id = ?
+    """, (
+        status,
+        reviewer_id,
+        reject_reason,
+        discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
+        app_id
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def get_unfinished_applications():
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT app_id, user_id, message_id, status
+        FROM applications
+        WHERE status IN ('pending', 'accepted')
+        AND message_id IS NOT NULL
+    """)
+
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+# =========================
+# JSON Warnings
+# =========================
+
 def load_json(file_name, default):
     try:
         with open(file_name, "r", encoding="utf-8") as file:
-            data = json.load(file)
-
-        if file_name == APPLICATIONS_FILE:
-            if not isinstance(data, dict):
-                return default
-            if "counter" not in data:
-                data["counter"] = 0
-            if "users" not in data:
-                data["users"] = {}
-
-        return data
+            return json.load(file)
     except:
         return default
 
@@ -90,15 +213,10 @@ def save_json(file_name, data):
 
 
 warnings = load_json(WARNINGS_FILE, {})
-applications_data = load_json(APPLICATIONS_FILE, {"counter": 0, "users": {}})
 
 
 def save_warnings():
     save_json(WARNINGS_FILE, warnings)
-
-
-def save_applications():
-    save_json(APPLICATIONS_FILE, applications_data)
 
 
 def is_admin(member):
@@ -115,6 +233,10 @@ async def on_guild_join(guild):
     if guild.id != ALLOWED_GUILD_ID:
         await guild.leave()
 
+
+# =========================
+# Logs / Protection
+# =========================
 
 async def send_app_log(guild, title, description, color):
     channel = guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
@@ -206,7 +328,7 @@ async def handle_violation(message, reason):
 
 
 # =========================
-# نظام التقديم الجديد
+# Application System
 # =========================
 
 class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفني"):
@@ -250,12 +372,11 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفن�
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
 
-        user_id = str(interaction.user.id)
-        user_app = applications_data["users"].get(user_id)
+        active_app = get_active_application(interaction.user.id)
 
-        if user_app and user_app.get("status") in ["pending", "accepted"]:
+        if active_app:
             await interaction.followup.send(
-                "❌ عندك تقديم سابق قيد المراجعة أو مقبول مبدئيًا.",
+                f"❌ عندك تقديم سابق مفتوح.\nرقم الطلب: `{active_app[0]}`\nالحالة: `{active_app[1]}`",
                 ephemeral=True
             )
             return
@@ -266,20 +387,23 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفن�
             await interaction.followup.send("❌ روم التقديمات غير موجود.", ephemeral=True)
             return
 
-        applications_data["counter"] += 1
-        app_id = f"SUP-{applications_data['counter']:04d}"
-
-        applications_data["users"][user_id] = {
-            "app_id": app_id,
-            "status": "pending",
-            "message_id": None,
-            "created_at": discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-        }
-        save_applications()
+        app_id = create_application(
+            user_id=interaction.user.id,
+            channel_id=APPLICATION_CHANNEL_ID,
+            name=str(self.name),
+            age=str(self.age),
+            daily_time=str(self.daily_time),
+            experience=str(self.experience),
+            why_you=str(self.why_you)
+        )
 
         embed = discord.Embed(
             title="📋 تقديم دعم فني جديد",
-            description=f"رقم الطلب: `{app_id}`\nالحالة: ⏳ قيد المراجعة",
+            description=(
+                f"**رقم الطلب:** `{app_id}`\n"
+                f"**الحالة:** ⏳ قيد المراجعة\n\n"
+                "يرجى مراجعة بيانات المتقدم بعناية قبل القبول أو الرفض."
+            ),
             color=COLOR_YELLOW
         )
 
@@ -300,8 +424,7 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفن�
             view=SupportReviewView(interaction.user.id, app_id)
         )
 
-        applications_data["users"][user_id]["message_id"] = msg.id
-        save_applications()
+        update_application_message(app_id, msg.id)
 
         await interaction.followup.send(
             f"✅ تم إرسال تقديمك بنجاح.\nرقم طلبك: `{app_id}`\nانتظر مراجعة الإدارة.",
@@ -311,9 +434,14 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفن�
 
 class SupportApplyView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=300)
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="بدء التقديم", style=discord.ButtonStyle.green, emoji="📝")
+    @discord.ui.button(
+        label="بدء التقديم",
+        style=discord.ButtonStyle.green,
+        emoji="📝",
+        custom_id="support_apply_start_button"
+    )
     async def support_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(SupportApplyModal())
 
@@ -352,15 +480,23 @@ class RejectReasonModal(discord.ui.Modal, title="سبب رفض التقديم"):
             except:
                 pass
 
-        applications_data["users"].setdefault(str(self.user_id), {})
-        applications_data["users"][str(self.user_id)]["status"] = "rejected"
-        save_applications()
+        update_application_status(
+            app_id=self.app_id,
+            status="rejected",
+            reviewer_id=interaction.user.id,
+            reject_reason=reason_text
+        )
 
         embed = interaction.message.embeds[0]
         embed.color = COLOR_RED
         embed.add_field(
             name="❌ نتيجة الطلب",
-            value=f"تم رفض الطلب\nالمتقدم: <@{self.user_id}>\nبواسطة: {interaction.user.mention}\nالسبب: {reason_text}",
+            value=(
+                f"تم رفض الطلب\n"
+                f"المتقدم: <@{self.user_id}>\n"
+                f"بواسطة: {interaction.user.mention}\n"
+                f"السبب: {reason_text}"
+            ),
             inline=False
         )
 
@@ -386,7 +522,12 @@ class SupportReviewView(discord.ui.View):
         self.user_id = user_id
         self.app_id = app_id
 
-    @discord.ui.button(label="قبول مبدئي", style=discord.ButtonStyle.green, emoji="✅")
+    @discord.ui.button(
+        label="قبول مبدئي",
+        style=discord.ButtonStyle.green,
+        emoji="✅",
+        custom_id="support_review_accept_button"
+    )
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
@@ -413,9 +554,11 @@ class SupportReviewView(discord.ui.View):
             except:
                 pass
 
-        applications_data["users"].setdefault(str(self.user_id), {})
-        applications_data["users"][str(self.user_id)]["status"] = "accepted"
-        save_applications()
+        update_application_status(
+            app_id=self.app_id,
+            status="accepted",
+            reviewer_id=interaction.user.id
+        )
 
         embed = interaction.message.embeds[0]
         embed.color = COLOR_GREEN
@@ -440,7 +583,12 @@ class SupportReviewView(discord.ui.View):
 
         await interaction.followup.send("✅ تم قبول الطلب وإرسال رسالة للمتقدم.", ephemeral=True)
 
-    @discord.ui.button(label="رفض", style=discord.ButtonStyle.red, emoji="❌")
+    @discord.ui.button(
+        label="رفض",
+        style=discord.ButtonStyle.red,
+        emoji="❌",
+        custom_id="support_review_reject_button"
+    )
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
@@ -455,7 +603,12 @@ class InterviewDoneView(discord.ui.View):
         self.user_id = user_id
         self.app_id = app_id
 
-    @discord.ui.button(label="تمت المقابلة", style=discord.ButtonStyle.blurple, emoji="🎙️")
+    @discord.ui.button(
+        label="تمت المقابلة",
+        style=discord.ButtonStyle.blurple,
+        emoji="🎙️",
+        custom_id="support_interview_done_button"
+    )
     async def interview_done(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
 
@@ -463,9 +616,11 @@ class InterviewDoneView(discord.ui.View):
             await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
             return
 
-        applications_data["users"].setdefault(str(self.user_id), {})
-        applications_data["users"][str(self.user_id)]["status"] = "interview_done"
-        save_applications()
+        update_application_status(
+            app_id=self.app_id,
+            status="interview_done",
+            reviewer_id=interaction.user.id
+        )
 
         embed = interaction.message.embeds[0]
         embed.color = COLOR_BLUE
@@ -514,8 +669,28 @@ def keep_alive():
 
 @bot.event
 async def on_ready():
+    init_db()
+
+    try:
+        bot.add_view(SupportApplyView())
+    except Exception as e:
+        print(f"Apply View Error: {e}")
+
+    for app_id, user_id, message_id, status in get_unfinished_applications():
+        try:
+            if status == "pending":
+                bot.add_view(SupportReviewView(user_id, app_id), message_id=message_id)
+            elif status == "accepted":
+                bot.add_view(InterviewDoneView(user_id, app_id), message_id=message_id)
+        except Exception as e:
+            print(f"Restore View Error {app_id}: {e}")
+
     print(f"Bot is online: {bot.user}")
 
+
+# =========================
+# Events
+# =========================
 
 @bot.event
 async def on_member_remove(member):
@@ -633,6 +808,10 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+
+# =========================
+# Commands
+# =========================
 
 @bot.command(name="بنق", aliases=["ping"])
 async def ping(ctx):
