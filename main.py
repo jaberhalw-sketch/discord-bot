@@ -4,31 +4,6 @@ import random
 from datetime import timedelta
 import os
 import json
-from flask import Flask
-from threading import Thread
-
-TOKEN = os.getenv("TOKEN")
-
-SUPPORT_WAITING_VOICE_ID = 1300051682809483294
-SUPPORT_CHAT_ID = 1498683004703215796
-ADMIN_ROLE_ID = 1300049199332720652
-LEAVE_LOG_CHANNEL_ID = 1498690187427844137
-
-intents = discord.Intents.default()
-intents.message_content = True
-intents.members = True
-intents.voice_states = True
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-bad_words = ["قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك", "طيزي", "اه", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch", "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة", "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه", "bitch"]
-
-import discord
-from discord.ext import commands
-import random
-from datetime import timedelta
-import os
-import json
 import time
 from flask import Flask
 from threading import Thread
