@@ -23,6 +23,20 @@ LEAVE_LOG_CHANNEL_ID = 1498690187427844137
 PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 
 # =========================
+# رتب الإدارة
+# =========================
+STAFF_MAIN_ROLE_ID = 1300049199332720652  # طاقم اداره مقاطعة رسك
+
+STAFF_ROLE_IDS = {
+    1300049171860164658: "ادمن +",
+    1300049176545067161: "ادمن",
+    1300049177769807882: "مشرف +",
+    1300049179426426932: "مشرف",
+    1494466779915878494: "مشرف متدرب",
+    1300049180877787136: "دعم فني"
+}
+
+# =========================
 # إعدادات الحماية
 # =========================
 ANTI_LINKS = True
@@ -30,9 +44,6 @@ SPAM_LIMIT = 10
 SPAM_SECONDS = 5
 MASS_MENTION_LIMIT = 10
 
-# =========================
-# ألوان البوت
-# =========================
 COLOR_YELLOW = discord.Color.gold()
 COLOR_GREY = discord.Color.dark_grey()
 COLOR_RED = discord.Color.red()
@@ -46,7 +57,6 @@ intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 bad_words = ["قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك", "طيزي", "اه", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch", "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة", "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه", "bitch"]
-
 WARNINGS_FILE = "warnings.json"
 
 user_message_times = {}
@@ -78,19 +88,12 @@ async def send_protection_log(guild, member, violation, message_text, punishment
     if not log_channel:
         return
 
-    embed = discord.Embed(
-        title="🛡️ سجل مخالفة حماية",
-        color=COLOR_YELLOW
-    )
+    embed = discord.Embed(title="🛡️ سجل مخالفة حماية", color=COLOR_YELLOW)
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.id}`", inline=False)
     embed.add_field(name="⚠️ المخالفة", value=violation, inline=True)
     embed.add_field(name="🔨 العقوبة", value=punishment, inline=True)
     embed.add_field(name="💬 الرسالة", value=f"```{message_text[:900]}```", inline=False)
-    embed.add_field(
-        name="🕒 الوقت",
-        value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>",
-        inline=False
-    )
+    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
     embed.set_thumbnail(url=member.display_avatar.url)
 
     await log_channel.send(embed=embed)
@@ -229,10 +232,7 @@ async def on_member_remove(member):
     roles = [role.mention for role in member.roles if role.name != "@everyone"]
     roles_text = "\n".join(roles) if roles else "ما كان معه رولات"
 
-    embed = discord.Embed(
-        title="📤 عضو خرج من السيرفر",
-        color=COLOR_GREY
-    )
+    embed = discord.Embed(title="📤 عضو خرج من السيرفر", color=COLOR_GREY)
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.name}`", inline=False)
     embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=False)
     embed.add_field(name="🚪 طريقة الخروج", value=reason, inline=True)
@@ -423,6 +423,56 @@ async def unlock(ctx):
         color=COLOR_GREEN
     )
     await ctx.send(embed=embed)
+
+
+# =========================
+# أمر عرض الإدارة
+# =========================
+@bot.command(name="الادارة", aliases=["staff"])
+@commands.has_permissions(administrator=True)
+async def staff_list(ctx, role: discord.Role):
+    if role.id == STAFF_MAIN_ROLE_ID:
+        text = ""
+
+        for staff_role_id, staff_role_name in STAFF_ROLE_IDS.items():
+            staff_role = ctx.guild.get_role(staff_role_id)
+
+            if staff_role and staff_role.members:
+                text += f"\n**{staff_role_name}** {staff_role.mention}\n"
+
+                for member in staff_role.members:
+                    if not member.bot:
+                        text += f"• {member.mention} — {staff_role_name}\n"
+
+        if text == "":
+            text = "مافي أحد معه رتب إدارية."
+
+        embed = discord.Embed(
+            title="📋 طاقم إدارة مقاطعة رسك",
+            description=text[:4000],
+            color=COLOR_YELLOW
+        )
+
+        await ctx.send(content=role.mention, embed=embed)
+        return
+
+    members = [member for member in role.members if not member.bot]
+
+    if not members:
+        await ctx.send(f"مافي أحد معه رتبة {role.mention}")
+        return
+
+    text = ""
+    for member in members:
+        text += f"• {member.mention} — {role.name}\n"
+
+    embed = discord.Embed(
+        title=f"📋 أعضاء رتبة {role.name}",
+        description=text[:4000],
+        color=COLOR_YELLOW
+    )
+
+    await ctx.send(content=role.mention, embed=embed)
 
 
 # =========================
