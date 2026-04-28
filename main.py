@@ -3,12 +3,17 @@ from discord.ext import commands
 import random
 from datetime import timedelta
 import os
+import json
+from flask import Flask
+from threading import Thread
 
 TOKEN = os.getenv("TOKEN")
 
+# عدل هذي IDs
 SUPPORT_WAITING_VOICE_ID = 123456789012345678
 SUPPORT_CHAT_ID = 123456789012345678
 ADMIN_ROLE_ID = 123456789012345678
+LEAVE_LOG_CHANNEL_ID = 123456789012345678
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -17,21 +22,33 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-bad_words = ["سب"]
-warnings = {}
+bad_words = ["قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك", "طيزي", "اه", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch", "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة", "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه", "bitch"]
 
-from flask import Flask
-from threading import Thread
+WARNINGS_FILE = "warnings.json"
 
-app = Flask('')
+def load_warnings():
+    try:
+        with open(WARNINGS_FILE, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except:
+        return {}
 
-@app.route('/')
+def save_warnings():
+    with open(WARNINGS_FILE, "w", encoding="utf-8") as file:
+        json.dump(warnings, file, indent=4, ensure_ascii=False)
+
+warnings = load_warnings()
+
+# Keep alive
+app = Flask("")
+
+@app.route("/")
 def home():
     return "I'm alive"
 
 def run():
     port = int(os.getenv("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
     t = Thread(target=run)
@@ -41,6 +58,73 @@ def keep_alive():
 async def on_ready():
     print(f"Bot is online: {bot.user}")
 
+# لوق خروج العضو
+@bot.event
+async def on_member_remove(member):
+    log_channel = bot.get_channel(LEAVE_LOG_CHANNEL_ID)
+    if not log_channel:
+        return
+
+    reason = "خرج من نفسه"
+    executor = "غير معروف"
+
+    try:
+        async for entry in member.guild.audit_logs(limit=5):
+            if entry.target and entry.target.id == member.id:
+                if entry.action == discord.AuditLogAction.ban:
+                    reason = "باند"
+                    executor = entry.user.mention
+                    break
+                elif entry.action == discord.AuditLogAction.kick:
+                    reason = "طرد"
+                    executor = entry.user.mention
+                    break
+    except:
+        pass
+
+    roles = [role.mention for role in member.roles if role.name != "@everyone"]
+    roles_text = "\n".join(roles) if roles else "ما كان معه رولات"
+
+    embed = discord.Embed(
+        title="📤 عضو خرج من السيرفر",
+        color=discord.Color.red()
+    )
+
+    embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.name}`", inline=False)
+    embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=False)
+    embed.add_field(name="🚪 طريقة الخروج", value=reason, inline=True)
+    embed.add_field(name="👮 بواسطة", value=executor, inline=True)
+    embed.add_field(name="🎭 الرولات", value=roles_text, inline=False)
+
+    if member.joined_at:
+        embed.add_field(
+            name="📅 دخل السيرفر",
+            value=f"<t:{int(member.joined_at.timestamp())}:F>",
+            inline=False
+        )
+
+    embed.set_thumbnail(url=member.display_avatar.url)
+    await log_channel.send(embed=embed)
+
+# دعم فني صوتي
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.bot:
+        return
+
+    if after.channel and after.channel.id == SUPPORT_WAITING_VOICE_ID:
+        support_chat = bot.get_channel(SUPPORT_CHAT_ID)
+        admin_role = member.guild.get_role(ADMIN_ROLE_ID)
+
+        if support_chat and admin_role:
+            await support_chat.send(
+                f"{admin_role.mention}\n"
+                f"🚨 في شخص دخل انتظار الدعم الفني!\n"
+                f"👤 العضو: {member.mention}\n"
+                f"🎧 الروم: {after.channel.mention}"
+            )
+
+# مراقبة الرسائل
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -52,14 +136,26 @@ async def on_message(message):
         if word in content:
             await message.delete()
 
-            user_id = message.author.id
+            user_id = str(message.author.id)
             warnings[user_id] = warnings.get(user_id, 0) + 1
+            save_warnings()
+
             count = warnings[user_id]
 
             await message.channel.send(
-                f"{message.author.mention} تحذير رقم {count} 🚫",
-                delete_after=5
+                f"{message.author.mention} أخذت تحذير رقم {count} 🚫",
+                delete_after=6
             )
+
+            try:
+                if count == 2:
+                    await message.author.timeout(discord.utils.utcnow() + timedelta(minutes=5))
+                elif count == 3:
+                    await message.author.timeout(discord.utils.utcnow() + timedelta(minutes=30))
+                elif count >= 4:
+                    await message.author.timeout(discord.utils.utcnow() + timedelta(days=1))
+            except:
+                pass
 
             return
 
@@ -68,27 +164,83 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-@bot.command()
+# أوامر عامة
+@bot.command(name="بنق", aliases=["ping"])
 async def ping(ctx):
     await ctx.send("Pong 👑")
 
-@bot.command()
+@bot.command(name="هلا", aliases=["hello"])
 async def hello(ctx):
     await ctx.send(f"هلا والله {ctx.author.mention} 🔥")
 
-@bot.command()
+@bot.command(name="طقطق", aliases=["roast"])
 async def roast(ctx, member: discord.Member = None):
     if member is None:
         member = ctx.author
 
-    roasts = ["😂😂", "💀💀"]
+    roasts = [
+        "ذكاء اصطناعي وأنا مستغرب منك 😂",
+        "وجودك لحاله حدث نادر 💀",
+        "ياخي أنت glitch في الحياة 😂",
+        "لو الكسل بطولة كان أخذت المركز الأول 👑",
+        "حتى البوت احتار كيف يرد عليك 💀"
+    ]
 
     await ctx.send(f"{member.mention} {random.choice(roasts)}")
 
-@bot.command()
+@bot.command(name="تقييم", aliases=["rate"])
+async def rate(ctx, *, thing="أنت"):
+    await ctx.send(f"تقييمي لـ {thing}: {random.randint(1, 10)}/10 😂")
+
+# أوامر الإدارة
+@bot.command(name="مسح", aliases=["clear"])
 @commands.has_permissions(administrator=True)
 async def clear(ctx, amount: int = 5):
     await ctx.channel.purge(limit=amount + 1)
+    await ctx.send(f"تم حذف {amount} رسالة ✅", delete_after=3)
+
+@bot.command(name="قفل", aliases=["lock"])
+@commands.has_permissions(administrator=True)
+async def lock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
+    await ctx.send("تم قفل الروم 🔒")
+
+@bot.command(name="فتح", aliases=["unlock"])
+@commands.has_permissions(administrator=True)
+async def unlock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+    await ctx.send("تم فتح الروم 🔓")
+
+# نظام التحذيرات
+@bot.command(name="تحذير", aliases=["warn"])
+@commands.has_permissions(administrator=True)
+async def warn(ctx, member: discord.Member, *, reason="بدون سبب"):
+    user_id = str(member.id)
+    warnings[user_id] = warnings.get(user_id, 0) + 1
+    save_warnings()
+
+    count = warnings[user_id]
+
+    await ctx.send(
+        f"{member.mention} أخذ تحذير 🚫\n"
+        f"السبب: {reason}\n"
+        f"عدد التحذيرات: {count}"
+    )
+
+@bot.command(name="تحذيرات", aliases=["warnings"])
+@commands.has_permissions(administrator=True)
+async def warnings_count(ctx, member: discord.Member):
+    user_id = str(member.id)
+    count = warnings.get(user_id, 0)
+    await ctx.send(f"{member.mention} عنده {count} تحذير 🚫")
+
+@bot.command(name="تصفير", aliases=["resetwarnings"])
+@commands.has_permissions(administrator=True)
+async def resetwarnings(ctx, member: discord.Member):
+    user_id = str(member.id)
+    warnings[user_id] = 0
+    save_warnings()
+    await ctx.send(f"تم تصفير إنذارات {member.mention} ✅")
 
 keep_alive()
 bot.run(TOKEN)
