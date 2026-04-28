@@ -21,11 +21,11 @@ SUPPORT_ROLE_ID = 1300049212553302109
 LEAVE_LOG_CHANNEL_ID = 1498690187427844137
 PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 
-# روم التقديمات يروح له الطلب
-APPLICATION_CHANNEL_ID = 1498683004703215796
+# روم التقديمات الجديد
+APPLICATION_CHANNEL_ID = 1498758805914259587
 
-# روم انتظار المقابلة
-INTERVIEW_WAITING_ROOM_ID = 1498756261691265155
+# روم انتظار المقابلة الصوتي
+INTERVIEW_VOICE_ROOM_ID = 1498759006024368289
 
 STAFF_MAIN_ROLE_ID = 1300049199332720652
 
@@ -257,7 +257,7 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم دعم فني 🎧")
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
 
         await app_channel.send(
-            content=f"📥 تقديم جديد من {interaction.user.mention}",
+            content=f"📥 تقديم دعم فني جديد من {interaction.user.mention}",
             embed=embed,
             view=SupportReviewView(interaction.user.id)
         )
@@ -299,8 +299,8 @@ class SupportReviewView(discord.ui.View):
             try:
                 await member.send(
                     f"✅ تم قبول تقديمك مبدئيًا كدعم فني 🎧\n\n"
-                    f"يرجى التوجه إلى روم انتظار المقابلة لإكمال المقابلة.\n"
-                    f"توجه هنا: <#{INTERVIEW_WAITING_ROOM_ID}>"
+                    f"يرجى التوجه إلى روم انتظار المقابلة الصوتي لإكمال المقابلة.\n"
+                    f"توجه هنا: <#{INTERVIEW_VOICE_ROOM_ID}>"
                 )
             except:
                 pass
@@ -593,10 +593,6 @@ async def unlock(ctx):
     await ctx.send(embed=embed)
 
 
-# =========================
-# إرسال رسالة زر التقديم
-# =========================
-
 @bot.command(name="ارسال_التقديم")
 @commands.has_permissions(administrator=True)
 async def send_support_apply(ctx):
@@ -605,7 +601,7 @@ async def send_support_apply(ctx):
         description=(
             "اضغط الزر بالأسفل وعبّ نموذج التقديم.\n\n"
             "بعد إرسال التقديم، الإدارة بتراجعه وإذا تم قبولك مبدئيًا "
-            "بتوصلك رسالة بالخاص للتوجه إلى روم انتظار المقابلة."
+            "بتوصلك رسالة بالخاص للتوجه إلى روم انتظار المقابلة الصوتي."
         ),
         color=COLOR_YELLOW
     )
