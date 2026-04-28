@@ -11,6 +11,11 @@ from threading import Thread
 TOKEN = os.getenv("TOKEN")
 
 # =========================
+# السيرفر المسموح فقط
+# =========================
+ALLOWED_GUILD_ID = 1300038159446441985
+
+# =========================
 # IDs عدلها حسب سيرفرك
 # =========================
 SUPPORT_WAITING_VOICE_ID = 1300051682809483294
@@ -25,7 +30,7 @@ PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 # =========================
 # رتب الإدارة
 # =========================
-STAFF_MAIN_ROLE_ID = 1300049199332720652  # طاقم اداره مقاطعة رسك
+STAFF_MAIN_ROLE_ID = 1300049199332720652
 
 STAFF_ROLE_IDS = {
     1300049171860164658: "ادمن +",
@@ -63,6 +68,24 @@ user_message_times = {}
 protection_enabled = True
 
 
+# =========================
+# منع البوت من السيرفرات الثانية
+# =========================
+@bot.check
+async def restrict_guild(ctx):
+    return ctx.guild and ctx.guild.id == ALLOWED_GUILD_ID
+
+
+@bot.event
+async def on_guild_join(guild):
+    if guild.id != ALLOWED_GUILD_ID:
+        print(f"❌ Unauthorized server: {guild.name}")
+        await guild.leave()
+
+
+# =========================
+# نظام حفظ التحذيرات
+# =========================
 def load_warnings():
     try:
         with open(WARNINGS_FILE, "r", encoding="utf-8") as file:
@@ -88,7 +111,10 @@ async def send_protection_log(guild, member, violation, message_text, punishment
     if not log_channel:
         return
 
-    embed = discord.Embed(title="🛡️ سجل مخالفة حماية", color=COLOR_YELLOW)
+    embed = discord.Embed(
+        title="🛡️ سجل مخالفة حماية",
+        color=COLOR_YELLOW
+    )
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.id}`", inline=False)
     embed.add_field(name="⚠️ المخالفة", value=violation, inline=True)
     embed.add_field(name="🔨 العقوبة", value=punishment, inline=True)
@@ -232,7 +258,10 @@ async def on_member_remove(member):
     roles = [role.mention for role in member.roles if role.name != "@everyone"]
     roles_text = "\n".join(roles) if roles else "ما كان معه رولات"
 
-    embed = discord.Embed(title="📤 عضو خرج من السيرفر", color=COLOR_GREY)
+    embed = discord.Embed(
+        title="📤 عضو خرج من السيرفر",
+        color=COLOR_GREY
+    )
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.name}`", inline=False)
     embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=False)
     embed.add_field(name="🚪 طريقة الخروج", value=reason, inline=True)
@@ -284,6 +313,9 @@ async def on_message(message):
     global protection_enabled
 
     if message.author.bot:
+        return
+
+    if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
         return
 
     content = message.content.lower()
