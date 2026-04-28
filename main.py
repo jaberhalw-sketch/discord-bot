@@ -10,14 +10,8 @@ from threading import Thread
 
 TOKEN = os.getenv("TOKEN")
 
-# =========================
-# السيرفر المسموح فقط
-# =========================
 ALLOWED_GUILD_ID = 1300038159446441985
 
-# =========================
-# IDs عدلها حسب سيرفرك
-# =========================
 SUPPORT_WAITING_VOICE_ID = 1300051682809483294
 SUPPORT_CHAT_ID = 1498683004703215796
 
@@ -27,9 +21,12 @@ SUPPORT_ROLE_ID = 1300049212553302109
 LEAVE_LOG_CHANNEL_ID = 1498690187427844137
 PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 
-# =========================
-# رتب الإدارة
-# =========================
+# روم التقديمات يروح له الطلب
+APPLICATION_CHANNEL_ID = 1498683004703215796
+
+# روم انتظار المقابلة
+INTERVIEW_WAITING_ROOM_ID = 1498756261691265155
+
 STAFF_MAIN_ROLE_ID = 1300049199332720652
 
 STAFF_ROLE_IDS = {
@@ -41,9 +38,6 @@ STAFF_ROLE_IDS = {
     1300049180877787136: "دعم فني"
 }
 
-# =========================
-# إعدادات الحماية
-# =========================
 ANTI_LINKS = True
 SPAM_LIMIT = 10
 SPAM_SECONDS = 5
@@ -61,16 +55,18 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-bad_words = ["قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك", "طيزي", "اه", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch", "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة", "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه", "bitch"]
-WARNINGS_FILE = "warnings.json"
+bad_words = [
+    "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك",
+    "طيزي", "اه", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch",
+    "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة",
+    "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه"
+]
 
+WARNINGS_FILE = "warnings.json"
 user_message_times = {}
 protection_enabled = True
 
 
-# =========================
-# منع البوت من السيرفرات الثانية
-# =========================
 @bot.check
 async def restrict_guild(ctx):
     return ctx.guild and ctx.guild.id == ALLOWED_GUILD_ID
@@ -83,9 +79,6 @@ async def on_guild_join(guild):
         await guild.leave()
 
 
-# =========================
-# نظام حفظ التحذيرات
-# =========================
 def load_warnings():
     try:
         with open(WARNINGS_FILE, "r", encoding="utf-8") as file:
@@ -111,10 +104,7 @@ async def send_protection_log(guild, member, violation, message_text, punishment
     if not log_channel:
         return
 
-    embed = discord.Embed(
-        title="🛡️ سجل مخالفة حماية",
-        color=COLOR_YELLOW
-    )
+    embed = discord.Embed(title="🛡️ سجل مخالفة حماية", color=COLOR_YELLOW)
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.id}`", inline=False)
     embed.add_field(name="⚠️ المخالفة", value=violation, inline=True)
     embed.add_field(name="🔨 العقوبة", value=punishment, inline=True)
@@ -204,8 +194,151 @@ async def handle_violation(message, reason):
 
 
 # =========================
+# نظام تقديم دعم فني بزر
+# =========================
+
+class SupportApplyModal(discord.ui.Modal, title="تقديم دعم فني 🎧"):
+    real_name = discord.ui.TextInput(
+        label="اسمك",
+        placeholder="اكتب اسمك",
+        required=True,
+        max_length=50
+    )
+
+    age = discord.ui.TextInput(
+        label="عمرك",
+        placeholder="مثال: 18",
+        required=True,
+        max_length=10
+    )
+
+    active_time = discord.ui.TextInput(
+        label="كم ساعة تتواجد؟",
+        placeholder="مثال: 4 ساعات يومياً",
+        required=True,
+        max_length=50
+    )
+
+    experience = discord.ui.TextInput(
+        label="خبرتك بالدعم الفني",
+        placeholder="اكتب خبرتك",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    reason = discord.ui.TextInput(
+        label="ليش تبي تصير دعم فني؟",
+        placeholder="اكتب السبب",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        app_channel = interaction.guild.get_channel(APPLICATION_CHANNEL_ID)
+
+        if not app_channel:
+            await interaction.response.send_message("❌ روم التقديمات غير موجود.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="📨 تقديم دعم فني جديد",
+            color=COLOR_YELLOW
+        )
+
+        embed.add_field(name="👤 المتقدم", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=False)
+        embed.add_field(name="📝 الاسم", value=str(self.real_name), inline=True)
+        embed.add_field(name="🎂 العمر", value=str(self.age), inline=True)
+        embed.add_field(name="⏰ التواجد", value=str(self.active_time), inline=False)
+        embed.add_field(name="🧠 الخبرة", value=str(self.experience), inline=False)
+        embed.add_field(name="❓ السبب", value=str(self.reason), inline=False)
+        embed.add_field(name="🕒 وقت التقديم", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+
+        await app_channel.send(
+            content=f"📥 تقديم جديد من {interaction.user.mention}",
+            embed=embed,
+            view=SupportReviewView(interaction.user.id)
+        )
+
+        await interaction.response.send_message(
+            "✅ تم إرسال تقديمك بنجاح، انتظر رد الإدارة.",
+            ephemeral=True
+        )
+
+
+class SupportApplyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="تقديم دعم فني",
+        style=discord.ButtonStyle.green,
+        emoji="🎧",
+        custom_id="support_apply_button"
+    )
+    async def support_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SupportApplyModal())
+
+
+class SupportReviewView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="قبول مبدئي", style=discord.ButtonStyle.green, emoji="✅")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(self.user_id)
+
+        if member:
+            try:
+                await member.send(
+                    f"✅ تم قبول تقديمك مبدئيًا كدعم فني 🎧\n\n"
+                    f"يرجى التوجه إلى روم انتظار المقابلة لإكمال المقابلة.\n"
+                    f"توجه هنا: <#{INTERVIEW_WAITING_ROOM_ID}>"
+                )
+            except:
+                pass
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message("✅ تم إرسال رسالة القبول المبدئي للمتقدم.", ephemeral=True)
+
+    @discord.ui.button(label="رفض", style=discord.ButtonStyle.red, emoji="❌")
+    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(self.user_id)
+
+        if member:
+            try:
+                await member.send(
+                    "❌ تم رفض تقديمك للدعم الفني.\n"
+                    "نتمنى لك التوفيق."
+                )
+            except:
+                pass
+
+        for item in self.children:
+            item.disabled = True
+
+        await interaction.message.edit(view=self)
+        await interaction.response.send_message("❌ تم إرسال رسالة الرفض للمتقدم.", ephemeral=True)
+
+
+# =========================
 # keep alive
 # =========================
+
 app = Flask("")
 
 
@@ -226,12 +359,14 @@ def keep_alive():
 
 @bot.event
 async def on_ready():
+    bot.add_view(SupportApplyView())
     print(f"Bot is online: {bot.user}")
 
 
 # =========================
 # لوق خروج العضو
 # =========================
+
 @bot.event
 async def on_member_remove(member):
     log_channel = bot.get_channel(LEAVE_LOG_CHANNEL_ID)
@@ -258,10 +393,7 @@ async def on_member_remove(member):
     roles = [role.mention for role in member.roles if role.name != "@everyone"]
     roles_text = "\n".join(roles) if roles else "ما كان معه رولات"
 
-    embed = discord.Embed(
-        title="📤 عضو خرج من السيرفر",
-        color=COLOR_GREY
-    )
+    embed = discord.Embed(title="📤 عضو خرج من السيرفر", color=COLOR_GREY)
     embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.name}`", inline=False)
     embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=False)
     embed.add_field(name="🚪 طريقة الخروج", value=reason, inline=True)
@@ -282,6 +414,7 @@ async def on_member_remove(member):
 # =========================
 # دعم فني صوتي
 # =========================
+
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot:
@@ -308,6 +441,7 @@ async def on_voice_state_update(member, before, after):
 # =========================
 # مراقبة الرسائل
 # =========================
+
 @bot.event
 async def on_message(message):
     global protection_enabled
@@ -367,6 +501,7 @@ async def on_message(message):
 # =========================
 # أوامر عامة
 # =========================
+
 @bot.command(name="بنق", aliases=["ping"])
 async def ping(ctx):
     embed = discord.Embed(
@@ -421,6 +556,7 @@ async def rate(ctx, *, thing="أنت"):
 # =========================
 # أوامر الإدارة
 # =========================
+
 @bot.command(name="مسح", aliases=["clear"])
 @commands.has_permissions(administrator=True)
 async def clear(ctx, amount: int = 5):
@@ -458,8 +594,29 @@ async def unlock(ctx):
 
 
 # =========================
+# إرسال رسالة زر التقديم
+# =========================
+
+@bot.command(name="ارسال_التقديم")
+@commands.has_permissions(administrator=True)
+async def send_support_apply(ctx):
+    embed = discord.Embed(
+        title="🎧 التقديم على الدعم الفني",
+        description=(
+            "اضغط الزر بالأسفل وعبّ نموذج التقديم.\n\n"
+            "بعد إرسال التقديم، الإدارة بتراجعه وإذا تم قبولك مبدئيًا "
+            "بتوصلك رسالة بالخاص للتوجه إلى روم انتظار المقابلة."
+        ),
+        color=COLOR_YELLOW
+    )
+
+    await ctx.send(embed=embed, view=SupportApplyView())
+
+
+# =========================
 # أمر عرض الإدارة
 # =========================
+
 @bot.command(name="الادارة", aliases=["staff"])
 @commands.has_permissions(administrator=True)
 async def staff_list(ctx, role: discord.Role):
@@ -510,6 +667,7 @@ async def staff_list(ctx, role: discord.Role):
 # =========================
 # نظام التحذيرات
 # =========================
+
 @bot.command(name="تحذير", aliases=["warn"])
 @commands.has_permissions(administrator=True)
 async def warn(ctx, member: discord.Member, *, reason="بدون سبب"):
@@ -595,6 +753,7 @@ async def resetwarnings(ctx, member: discord.Member):
 # =========================
 # أوامر الحماية
 # =========================
+
 @bot.command(name="حماية", aliases=["protection"])
 @commands.has_permissions(administrator=True)
 async def protection(ctx, mode=None):
@@ -623,10 +782,7 @@ async def protection(ctx, mode=None):
 @bot.command(name="اعدادات", aliases=["settings"])
 @commands.has_permissions(administrator=True)
 async def settings(ctx):
-    embed = discord.Embed(
-        title="⚙️ إعدادات الحماية",
-        color=COLOR_GREY
-    )
+    embed = discord.Embed(title="⚙️ إعدادات الحماية", color=COLOR_GREY)
     embed.add_field(name="Anti-Link", value="شغال ✅" if ANTI_LINKS else "مغلق ❌", inline=True)
     embed.add_field(name="Spam", value=f"{SPAM_LIMIT} رسائل / {SPAM_SECONDS} ثواني", inline=True)
     embed.add_field(name="Mass Mention", value=f"{MASS_MENTION_LIMIT} منشن", inline=True)
