@@ -15,7 +15,10 @@ TOKEN = os.getenv("TOKEN")
 # =========================
 SUPPORT_WAITING_VOICE_ID = 1300051682809483294
 SUPPORT_CHAT_ID = 1498683004703215796
+
 ADMIN_ROLE_ID = 1300049199332720652
+SUPPORT_ROLE_ID = 1300049212553302109
+
 LEAVE_LOG_CHANNEL_ID = 1498690187427844137
 PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 
@@ -28,7 +31,7 @@ SPAM_SECONDS = 5
 MASS_MENTION_LIMIT = 10
 
 # =========================
-# ثيم البوت: رصاصي + أصفر
+# ألوان البوت
 # =========================
 COLOR_YELLOW = discord.Color.gold()
 COLOR_GREY = discord.Color.dark_grey()
@@ -257,18 +260,20 @@ async def on_voice_state_update(member, before, after):
 
     if after.channel and after.channel.id == SUPPORT_WAITING_VOICE_ID:
         support_chat = bot.get_channel(SUPPORT_CHAT_ID)
-        admin_role = member.guild.get_role(ADMIN_ROLE_ID)
+        support_role = member.guild.get_role(SUPPORT_ROLE_ID)
 
-        if support_chat and admin_role:
+        if support_chat and support_role:
             embed = discord.Embed(
                 title="🎧 طلب دعم فني",
                 description="في شخص دخل انتظار الدعم الفني",
                 color=COLOR_YELLOW
             )
             embed.add_field(name="👤 العضو", value=member.mention, inline=True)
-            embed.add_field(name="🎧 الروم", value=after.channel.mention, inline=True)
+            embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
+            embed.add_field(name="🎧 الروم", value=after.channel.mention, inline=False)
+            embed.set_thumbnail(url=member.display_avatar.url)
 
-            await support_chat.send(content=admin_role.mention, embed=embed)
+            await support_chat.send(content=support_role.mention, embed=embed)
 
 
 # =========================
@@ -285,20 +290,17 @@ async def on_message(message):
 
     if protection_enabled and not is_admin(message.author):
 
-        # Anti bad words
         for word in bad_words:
             if word in content:
                 await handle_violation(message, "كلمة ممنوعة / سب")
                 return
 
-        # Anti links
         if ANTI_LINKS:
             link_words = ["http://", "https://", "discord.gg", ".com", ".net", ".gg"]
             if any(link in content for link in link_words):
                 await handle_violation(message, "إرسال رابط ممنوع")
                 return
 
-        # Anti mass mention
         mentions_count = len(message.mentions) + len(message.role_mentions)
         if message.mention_everyone:
             mentions_count += 10
@@ -307,7 +309,6 @@ async def on_message(message):
             await handle_violation(message, f"منشن كثير ({mentions_count})")
             return
 
-        # Anti spam
         user_id = message.author.id
         now = time.time()
 
