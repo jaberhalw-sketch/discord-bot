@@ -21,11 +21,9 @@ SUPPORT_ROLE_ID = 1300049212553302109
 LEAVE_LOG_CHANNEL_ID = 1498690187427844137
 PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
 
-# روم التقديمات الجديد
 APPLICATION_CHANNEL_ID = 1498758805914259587
-
-# روم انتظار المقابلة الصوتي
 INTERVIEW_VOICE_ROOM_ID = 1498759006024368289
+APPLICATION_LOG_CHANNEL_ID = 1498762366962368512
 
 STAFF_MAIN_ROLE_ID = 1300049199332720652
 
@@ -47,6 +45,13 @@ COLOR_YELLOW = discord.Color.gold()
 COLOR_GREY = discord.Color.dark_grey()
 COLOR_RED = discord.Color.red()
 COLOR_GREEN = discord.Color.green()
+COLOR_BLUE = discord.Color.blue()
+
+WARNINGS_FILE = "warnings.json"
+APPLICATIONS_FILE = "applications.json"
+
+user_message_times = {}
+protection_enabled = True
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -62,10 +67,6 @@ bad_words = [
     "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه"
 ]
 
-WARNINGS_FILE = "warnings.json"
-user_message_times = {}
-protection_enabled = True
-
 
 @bot.check
 async def restrict_guild(ctx):
@@ -79,24 +80,55 @@ async def on_guild_join(guild):
         await guild.leave()
 
 
-def load_warnings():
+def load_json(file_name, default):
     try:
-        with open(WARNINGS_FILE, "r", encoding="utf-8") as file:
+        with open(file_name, "r", encoding="utf-8") as file:
             return json.load(file)
     except:
-        return {}
+        return default
+
+
+def save_json(file_name, data):
+    with open(file_name, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4, ensure_ascii=False)
+
+
+warnings = load_json(WARNINGS_FILE, {})
+applications_data = load_json(APPLICATIONS_FILE, {
+    "counter": 0,
+    "users": {}
+})
 
 
 def save_warnings():
-    with open(WARNINGS_FILE, "w", encoding="utf-8") as file:
-        json.dump(warnings, file, indent=4, ensure_ascii=False)
+    save_json(WARNINGS_FILE, warnings)
 
 
-warnings = load_warnings()
+def save_applications():
+    save_json(APPLICATIONS_FILE, applications_data)
 
 
 def is_admin(member):
     return member.guild_permissions.administrator
+
+
+async def send_app_log(guild, title, description, color):
+    channel = guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color
+    )
+    embed.add_field(
+        name="🕒 الوقت",
+        value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>",
+        inline=False
+    )
+
+    await channel.send(embed=embed)
 
 
 async def send_protection_log(guild, member, violation, message_text, punishment):
@@ -194,7 +226,7 @@ async def handle_violation(message, reason):
 
 
 # =========================
-# نظام تقديم دعم فني بزر
+# نظام تقديم دعم فني احترافي
 # =========================
 
 class SupportApplyModal(discord.ui.Modal, title="تقديم دعم فني 🎧"):
@@ -221,29 +253,54 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم دعم فني 🎧")
 
     experience = discord.ui.TextInput(
         label="خبرتك بالدعم الفني",
-        placeholder="اكتب خبرتك",
+        placeholder="اكتب خبرتك في الدعم الفني أو الإدارة",
         required=True,
         style=discord.TextStyle.paragraph,
-        max_length=500
+        max_length=700
     )
 
-    reason = discord.ui.TextInput(
-        label="ليش تبي تصير دعم فني؟",
-        placeholder="اكتب السبب",
+    rules_confirm = discord.ui.TextInput(
+        label="هل قرأت القوانين؟",
+        placeholder="اكتب: نعم قرأت القوانين",
         required=True,
-        style=discord.TextStyle.paragraph,
-        max_length=500
+        max_length=100
     )
 
     async def on_submit(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        user_app = applications_data["users"].get(user_id)
+
+        if user_app and user_app.get("status") in ["pending", "accepted"]:
+            await interaction.response.send_message(
+                "❌ عندك تقديم سابق مفتوح أو مقبول، ما تقدر تقدم مرة ثانية.",
+                ephemeral=True
+            )
+            return
+
         app_channel = interaction.guild.get_channel(APPLICATION_CHANNEL_ID)
 
         if not app_channel:
             await interaction.response.send_message("❌ روم التقديمات غير موجود.", ephemeral=True)
             return
 
+        applications_data["counter"] += 1
+        app_number = applications_data["counter"]
+        app_id = f"SUP-{app_number:04d}"
+
+        applications_data["users"][user_id] = {
+            "app_id": app_id,
+            "status": "pending",
+            "message_id": None,
+            "created_at": discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+        }
+        save_applications()
+
         embed = discord.Embed(
-            title="📨 تقديم دعم فني جديد",
+            title=f"📨 تقديم دعم فني جديد | {app_id}",
+            description=(
+                "طلب جديد يحتاج مراجعة الإدارة.\n"
+                "استخدم الأزرار بالأسفل لقبول الطلب مبدئيًا أو رفضه."
+            ),
             color=COLOR_YELLOW
         )
 
@@ -252,20 +309,95 @@ class SupportApplyModal(discord.ui.Modal, title="تقديم دعم فني 🎧")
         embed.add_field(name="🎂 العمر", value=str(self.age), inline=True)
         embed.add_field(name="⏰ التواجد", value=str(self.active_time), inline=False)
         embed.add_field(name="🧠 الخبرة", value=str(self.experience), inline=False)
-        embed.add_field(name="❓ السبب", value=str(self.reason), inline=False)
+        embed.add_field(name="📘 قراءة القوانين", value=str(self.rules_confirm), inline=False)
+        embed.add_field(name="📌 حالة الطلب", value="⏳ قيد المراجعة", inline=False)
         embed.add_field(name="🕒 وقت التقديم", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text=f"Application ID: {app_id}")
 
-        await app_channel.send(
-            content=f"📥 تقديم دعم فني جديد من {interaction.user.mention}",
+        msg = await app_channel.send(
+            content=f"📥 تقديم دعم فني جديد من {interaction.user.mention} | `{app_id}`",
             embed=embed,
-            view=SupportReviewView(interaction.user.id)
+            view=SupportReviewView(interaction.user.id, app_id)
         )
+
+        applications_data["users"][user_id]["message_id"] = msg.id
+        save_applications()
 
         await interaction.response.send_message(
-            "✅ تم إرسال تقديمك بنجاح، انتظر رد الإدارة.",
+            f"✅ تم إرسال تقديمك بنجاح.\nرقم طلبك: `{app_id}`\nانتظر رد الإدارة.",
             ephemeral=True
         )
+
+
+class RejectReasonModal(discord.ui.Modal, title="سبب رفض التقديم ❌"):
+    def __init__(self, user_id: int, app_id: str, old_view):
+        super().__init__()
+        self.user_id = user_id
+        self.app_id = app_id
+        self.old_view = old_view
+
+    reason = discord.ui.TextInput(
+        label="سبب الرفض",
+        placeholder="اكتب سبب الرفض للمتقدم",
+        required=True,
+        style=discord.TextStyle.paragraph,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        member = interaction.guild.get_member(self.user_id)
+        reason_text = str(self.reason)
+
+        if member:
+            try:
+                dm_embed = discord.Embed(
+                    title="❌ تم رفض تقديمك للدعم الفني",
+                    description="نشكر لك رغبتك في الانضمام لفريق الدعم الفني.",
+                    color=COLOR_RED
+                )
+                dm_embed.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
+                dm_embed.add_field(name="📝 سبب الرفض", value=reason_text, inline=False)
+                dm_embed.add_field(name="🤝 ملاحظة", value="نتمنى لك التوفيق.", inline=False)
+                await member.send(embed=dm_embed)
+            except:
+                pass
+
+        applications_data["users"][str(self.user_id)]["status"] = "rejected"
+        save_applications()
+
+        embed = interaction.message.embeds[0]
+        embed.color = COLOR_RED
+        embed.add_field(
+            name="❌ حالة الطلب",
+            value=(
+                f"تم رفض الطلب\n"
+                f"المتقدم: <@{self.user_id}>\n"
+                f"بواسطة: {interaction.user.mention}\n"
+                f"سبب الرفض: {reason_text}"
+            ),
+            inline=False
+        )
+
+        for item in self.old_view.children:
+            item.disabled = True
+
+        await interaction.message.edit(
+            content=f"❌ تم رفض الطلب الخاص بـ <@{self.user_id}> | `{self.app_id}`",
+            embed=embed,
+            view=self.old_view
+        )
+
+        await send_app_log(
+            interaction.guild,
+            "❌ تم رفض تقديم دعم فني",
+            f"المتقدم: <@{self.user_id}>\nرقم الطلب: `{self.app_id}`\nبواسطة: {interaction.user.mention}\nالسبب: {reason_text}",
+            COLOR_RED
+        )
+
+        await interaction.followup.send("❌ تم رفض الطلب وإرسال السبب للمتقدم.", ephemeral=True)
 
 
 class SupportApplyView(discord.ui.View):
@@ -283,33 +415,70 @@ class SupportApplyView(discord.ui.View):
 
 
 class SupportReviewView(discord.ui.View):
-    def __init__(self, user_id: int):
+    def __init__(self, user_id: int, app_id: str):
         super().__init__(timeout=None)
         self.user_id = user_id
+        self.app_id = app_id
 
     @discord.ui.button(label="قبول مبدئي", style=discord.ButtonStyle.green, emoji="✅")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
         if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+            await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
             return
 
         member = interaction.guild.get_member(self.user_id)
 
         if member:
             try:
-                await member.send(
-                    f"✅ تم قبول تقديمك مبدئيًا كدعم فني 🎧\n\n"
-                    f"يرجى التوجه إلى روم انتظار المقابلة الصوتي لإكمال المقابلة.\n"
-                    f"توجه هنا: <#{INTERVIEW_VOICE_ROOM_ID}>"
+                dm_embed = discord.Embed(
+                    title="✅ تم قبول تقديمك مبدئيًا كدعم فني 🎧",
+                    description=(
+                        "تمت مراجعة طلبك وقبولك مبدئيًا.\n\n"
+                        "يرجى التوجه إلى روم انتظار المقابلة الصوتي لإكمال المقابلة."
+                    ),
+                    color=COLOR_GREEN
                 )
+                dm_embed.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
+                dm_embed.add_field(name="🎙️ روم انتظار المقابلة", value=f"<#{INTERVIEW_VOICE_ROOM_ID}>", inline=False)
+                dm_embed.add_field(name="⚠️ تنبيه", value="القبول مبدئي فقط، والقرار النهائي بعد المقابلة.", inline=False)
+                await member.send(embed=dm_embed)
             except:
                 pass
+
+        applications_data["users"][str(self.user_id)]["status"] = "accepted"
+        save_applications()
+
+        embed = interaction.message.embeds[0]
+        embed.color = COLOR_GREEN
+        embed.add_field(
+            name="✅ حالة الطلب",
+            value=(
+                f"تم قبول الطلب مبدئيًا\n"
+                f"المتقدم: <@{self.user_id}>\n"
+                f"بواسطة: {interaction.user.mention}"
+            ),
+            inline=False
+        )
 
         for item in self.children:
             item.disabled = True
 
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message("✅ تم إرسال رسالة القبول المبدئي للمتقدم.", ephemeral=True)
+        await interaction.message.edit(
+            content=f"✅ تم قبول الطلب الخاص بـ <@{self.user_id}> | `{self.app_id}`",
+            embed=embed,
+            view=InterviewDoneView(self.user_id, self.app_id)
+        )
+
+        await send_app_log(
+            interaction.guild,
+            "✅ تم قبول تقديم دعم فني مبدئيًا",
+            f"المتقدم: <@{self.user_id}>\nرقم الطلب: `{self.app_id}`\nبواسطة: {interaction.user.mention}\nروم المقابلة: <#{INTERVIEW_VOICE_ROOM_ID}>",
+            COLOR_GREEN
+        )
+
+        await interaction.followup.send("✅ تم قبول الطلب وإرسال رسالة للمتقدم.", ephemeral=True)
 
     @discord.ui.button(label="رفض", style=discord.ButtonStyle.red, emoji="❌")
     async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -317,22 +486,51 @@ class SupportReviewView(discord.ui.View):
             await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
             return
 
-        member = interaction.guild.get_member(self.user_id)
+        await interaction.response.send_modal(RejectReasonModal(self.user_id, self.app_id, self))
 
-        if member:
-            try:
-                await member.send(
-                    "❌ تم رفض تقديمك للدعم الفني.\n"
-                    "نتمنى لك التوفيق."
-                )
-            except:
-                pass
+
+class InterviewDoneView(discord.ui.View):
+    def __init__(self, user_id: int, app_id: str):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.app_id = app_id
+
+    @discord.ui.button(label="تمت المقابلة", style=discord.ButtonStyle.blurple, emoji="🎙️")
+    async def interview_done(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+            return
+
+        applications_data["users"][str(self.user_id)]["status"] = "interview_done"
+        save_applications()
+
+        embed = interaction.message.embeds[0]
+        embed.color = COLOR_BLUE
+        embed.add_field(
+            name="🎙️ المقابلة",
+            value=f"تم تسجيل أن المقابلة تمت بواسطة {interaction.user.mention}",
+            inline=False
+        )
 
         for item in self.children:
             item.disabled = True
 
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message("❌ تم إرسال رسالة الرفض للمتقدم.", ephemeral=True)
+        await interaction.message.edit(
+            content=f"🎙️ تمت مقابلة <@{self.user_id}> | `{self.app_id}`",
+            embed=embed,
+            view=self
+        )
+
+        await send_app_log(
+            interaction.guild,
+            "🎙️ تمت مقابلة متقدم دعم فني",
+            f"المتقدم: <@{self.user_id}>\nرقم الطلب: `{self.app_id}`\nبواسطة: {interaction.user.mention}",
+            COLOR_BLUE
+        )
+
+        await interaction.followup.send("🎙️ تم تسجيل المقابلة.", ephemeral=True)
 
 
 # =========================
@@ -599,12 +797,17 @@ async def send_support_apply(ctx):
     embed = discord.Embed(
         title="🎧 التقديم على الدعم الفني",
         description=(
-            "اضغط الزر بالأسفل وعبّ نموذج التقديم.\n\n"
-            "بعد إرسال التقديم، الإدارة بتراجعه وإذا تم قبولك مبدئيًا "
-            "بتوصلك رسالة بالخاص للتوجه إلى روم انتظار المقابلة الصوتي."
+            "مرحباً بك في تقديم الدعم الفني لمقاطعة رسك.\n\n"
+            "قبل التقديم تأكد من التالي:\n"
+            "• قراءة قوانين السيرفر كاملة.\n"
+            "• معرفة طريقة التعامل باحترام مع اللاعبين.\n"
+            "• وجود وقت كافي للتواجد.\n"
+            "• الجدية في التقديم وعدم كتابة إجابات عشوائية.\n\n"
+            "اضغط الزر بالأسفل لبدء التقديم."
         ),
         color=COLOR_YELLOW
     )
+    embed.set_footer(text="أي تقديم غير جدي قد يتم رفضه مباشرة.")
 
     await ctx.send(embed=embed, view=SupportApplyView())
 
