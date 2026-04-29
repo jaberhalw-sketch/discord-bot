@@ -27,6 +27,9 @@ INTERVIEW_VOICE_ROOM_ID = 1498759006024368289
 APPLICATION_LOG_CHANNEL_ID = 1498762366962368512
 ADMIN_LOG_CHANNEL_ID = 1498727149388169378
 
+# حساباتك اللي توصلها رسائل الخاص
+OWNER_USERNAMES = ["jr_7", "jbh.1"]
+
 STAFF_MAIN_ROLE_ID = 1300049199332720652
 
 STAFF_ROLE_IDS = {
@@ -1052,6 +1055,43 @@ async def on_message(message):
     global protection_enabled
 
     if message.author.bot:
+        return
+
+    # تحويل أي رسالة خاصة للبوت إلى حساباتك
+    if isinstance(message.channel, discord.DMChannel):
+        for guild in bot.guilds:
+            for member in guild.members:
+                if member.name in OWNER_USERNAMES:
+                    try:
+                        embed = discord.Embed(
+                            title="📩 رسالة خاصة وصلت للبوت",
+                            color=discord.Color.orange()
+                        )
+                        embed.add_field(
+                            name="👤 المرسل",
+                            value=f"{message.author} (`{message.author.id}`)",
+                            inline=False
+                        )
+                        embed.add_field(
+                            name="💬 الرسالة",
+                            value=message.content if message.content else "بدون نص",
+                            inline=False
+                        )
+                        embed.add_field(
+                            name="🕒 الوقت",
+                            value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>",
+                            inline=False
+                        )
+                        embed.set_thumbnail(url=message.author.display_avatar.url)
+
+                        await member.send(embed=embed)
+
+                        if message.attachments:
+                            for attachment in message.attachments:
+                                await member.send(f"📎 مرفق من {message.author}: {attachment.url}")
+
+                    except:
+                        pass
         return
 
     if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
