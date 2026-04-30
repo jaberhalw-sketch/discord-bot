@@ -71,6 +71,18 @@ DB_FILE = "bot_data.db"
 user_message_times = {}
 protection_enabled = True
 
+# =========================
+# Risk AI Settings
+# =========================
+AI_CALM_ENABLED = True
+AI_CALM_COOLDOWN = 75  # أقل وقت بين كل تدخل في نفس الروم بالثواني
+AI_CALM_RECENT_SECONDS = 90
+AI_CALM_MAX_RECENT_MESSAGES = 8
+AI_CALM_LOG_LEVELS = ["متوسط", "قوي"]
+
+channel_recent_messages = {}
+ai_calm_last_used = {}
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -995,6 +1007,215 @@ async def ask_chatgpt(prompt, author_name="عضو"):
         return f"❌ صار خطأ في AI: `{e}`"
 
 
+
+def is_support_staff(member: discord.Member):
+    if is_admin(member):
+        return True
+
+    staff_ids = set(STAFF_ROLE_IDS.keys())
+    staff_ids.add(STAFF_MAIN_ROLE_ID)
+    staff_ids.add(FINAL_SUPPORT_ROLE_ID)
+
+    return any(role.id in staff_ids for role in getattr(member, "roles", []))
+
+
+def clean_ai_text(text):
+    if not text:
+        return ""
+
+    text = str(text).strip()
+    text = discord.utils.escape_mentions(text)
+    return text[:1800]
+
+
+async def ask_chatgpt_custom(system_prompt, user_prompt, max_tokens=500, temperature=0.8):
+    if client is None:
+        return "❌ OpenAI API غير مفعّل. تأكد أنك حاط OPENAI_API_KEY في Railway وثبتت مكتبة openai."
+
+    def call_openai():
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        return response.choices[0].message.content
+
+    try:
+        return await asyncio.to_thread(call_openai)
+    except Exception as e:
+        return f"❌ صار خطأ في AI: `{e}`"
+
+
+def remember_channel_message(message):
+    if not message.guild or not message.content:
+        return []
+
+    now = time.time()
+    channel_id = message.channel.id
+
+    if channel_id not in channel_recent_messages:
+        channel_recent_messages[channel_id] = []
+
+    channel_recent_messages[channel_id].append({
+        "author": message.author.display_name,
+        "author_id": message.author.id,
+        "content": message.content[:350],
+        "time": now
+    })
+
+    channel_recent_messages[channel_id] = [
+        item for item in channel_recent_messages[channel_id]
+        if now - item["time"] <= AI_CALM_RECENT_SECONDS
+    ][-AI_CALM_MAX_RECENT_MESSAGES:]
+
+    return channel_recent_messages[channel_id]
+
+
+def should_check_calm_ai(message, recent_messages):
+    content = message.content.lower().strip()
+
+    if len(content) < 3:
+        return False
+
+    now = time.time()
+    last = ai_calm_last_used.get(message.channel.id, 0)
+    if now - last < AI_CALM_COOLDOWN:
+        return False
+
+    fight_words = [
+        "اسكت", "اخرس", "غبي", "حمار", "كلب", "ورع", "انقلع",
+        "لا تهايط", "تهايط", "باند", "بشتكي", "اداري فاشل",
+        "كذاب", "تكذب", "استفزاز", "تستفز", "لا تكلمني",
+        "؟؟؟", "!!!", "ياخي", "اقولك", "وش تبي", "خلك ساكت"
+    ]
+
+    score = 0
+
+    if any(word in content for word in fight_words):
+        score += 2
+
+    if len(message.mentions) > 0:
+        score += 1
+
+    if content.count("!") >= 2 or content.count("؟") >= 2 or content.count("?") >= 2:
+        score += 1
+
+    if len(content) > 12 and content == content.upper() and any(c.isalpha() for c in content):
+        score += 1
+
+    authors = {item["author_id"] for item in recent_messages}
+    if len(recent_messages) >= 4 and len(authors) >= 2:
+        score += 1
+
+    # لا نستدعي AI إلا إذا فيه احتمال فعلي عشان ما يصرف الرصيد على كل رسالة
+    return score >= 2
+
+
+async def maybe_ai_calm(message):
+    if not AI_CALM_ENABLED:
+        return
+
+    if message.author.bot or not message.guild:
+        return
+
+    if is_admin(message.author):
+        return
+
+    recent_messages = remember_channel_message(message)
+
+    if not should_check_calm_ai(message, recent_messages):
+        return
+
+    transcript = "\n".join(
+        [f"{item['author']}: {item['content']}" for item in recent_messages]
+    )
+
+    system_prompt = """
+أنت Risk AI داخل سيرفر ديسكورد عربي RP اسمه مقاطعة رسك.
+مهمتك فقط تحديد إذا النقاش صار هوشة أو تصعيد، ثم تكتب تهدئة بأسلوب طبيعي وغير مكرر.
+لا تكتب رد محفوظ. كل مرة خلك مختلف شوي.
+لا تهدد بعقوبات قوية. خلك هادئ وواثق.
+لا تستخدم ألفاظ سيئة حتى لو كانت موجودة في الرسائل.
+لا تمنشن أحد.
+لا تطول.
+
+ارجع JSON فقط بهذا الشكل:
+{
+  "should_intervene": true أو false,
+  "level": "خفيف" أو "متوسط" أو "قوي",
+  "public_message": "رسالة تهدئة قصيرة تصلح تنرسل في الشات",
+  "staff_summary": "ملخص قصير للإدارة عن سبب التدخل"
+}
+"""
+
+    user_prompt = f"""
+هذه آخر رسائل في الروم:
+{transcript}
+
+قرر هل يحتاج البوت يتدخل يهدّي الوضع أو لا.
+"""
+
+    raw = await ask_chatgpt_custom(system_prompt, user_prompt, max_tokens=350, temperature=0.95)
+
+    try:
+        data = json.loads(raw)
+    except:
+        return
+
+    if not data.get("should_intervene", False):
+        return
+
+    ai_calm_last_used[message.channel.id] = time.time()
+
+    level = str(data.get("level", "خفيف")).strip()
+    public_message = clean_ai_text(data.get("public_message", "يا شباب هدّوا الوضع شوي، خلونا نكمل باحترام."))
+    staff_summary = clean_ai_text(data.get("staff_summary", "تم رصد تصعيد محتمل في الشات."))
+
+    color = COLOR_YELLOW
+    if level == "قوي":
+        color = COLOR_RED
+    elif level == "متوسط":
+        color = COLOR_YELLOW
+    else:
+        color = COLOR_BLUE
+
+    embed = discord.Embed(
+        title="🤖 Risk AI",
+        description=public_message,
+        color=color
+    )
+    embed.set_footer(text="تهدئة تلقائية | بدون عقوبة")
+    await message.channel.send(embed=embed)
+
+    if level in AI_CALM_LOG_LEVELS:
+        log_channel = message.guild.get_channel(ADMIN_LOG_CHANNEL_ID)
+        if log_channel:
+            log_embed = discord.Embed(
+                title="🚨 Risk AI | تدخل تهدئة",
+                color=color
+            )
+            log_embed.add_field(name="📍 الروم", value=message.channel.mention, inline=True)
+            log_embed.add_field(name="🔥 المستوى", value=level, inline=True)
+            log_embed.add_field(name="📝 ملاحظة", value=staff_summary, inline=False)
+            log_embed.add_field(
+                name="✅ المطلوب",
+                value="راقب الروم فقط، وإذا استمر التصعيد تدخل يدويًا.",
+                inline=False
+            )
+            log_embed.add_field(
+                name="آخر الرسائل",
+                value=f"```{transcript[-900:]}```",
+                inline=False
+            )
+            log_embed.set_footer(text="Risk AI لا يعطي عقوبات تلقائية")
+            await log_channel.send(embed=log_embed)
+
+
+
 app = Flask(__name__)
 
 @app.route("/")
@@ -1148,6 +1369,13 @@ async def on_message(message):
     if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
         return
 
+    # Risk AI يراقب التصعيد ويهدي الهوشات بدون عقوبات تلقائية
+    if AI_CALM_ENABLED:
+        try:
+            await maybe_ai_calm(message)
+        except Exception as e:
+            print(f"AI Calm Error: {e}")
+
     # أمر ChatGPT
     if message.content.startswith("!ai") or message.content.startswith("!اسأل"):
         prompt = message.content.replace("!ai", "", 1).replace("!اسأل", "", 1).strip()
@@ -1212,6 +1440,67 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
+
+@bot.command(name="رد_دعم", aliases=["صياغة_دعم", "support_reply"])
+async def support_ai_reply(ctx, *, issue=None):
+    if not is_support_staff(ctx.author):
+        await ctx.send("❌ هذا الأمر للإدارة أو الدعم الفني فقط.")
+        return
+
+    if not issue:
+        await ctx.send("اكتب المشكلة بعد الأمر. مثال: `!رد_دعم اللاعب يقول ما استلم راتبه`")
+        return
+
+    system_prompt = """
+أنت مساعد دعم فني داخل سيرفر ديسكورد عربي RP اسمه مقاطعة رسك.
+اكتب رد جاهز للدعم الفني بصيغة محترمة وواضحة وقصيرة.
+لا تعد اللاعب بشيء مؤكد.
+اطلب دليل إذا يحتاج.
+خل الرد طبيعي ومهني ومناسب لديسكورد.
+لا تكتب شرح. اكتب الرد النهائي فقط.
+"""
+
+    user_prompt = f"المشكلة أو موقف اللاعب: {issue}"
+
+    async with ctx.typing():
+        answer = await ask_chatgpt_custom(system_prompt, user_prompt, max_tokens=300, temperature=0.85)
+
+    answer = clean_ai_text(answer)
+
+    embed = discord.Embed(
+        title="🎧 مساعد الدعم الفني",
+        description=answer,
+        color=COLOR_BLUE
+    )
+    embed.add_field(name="📌 الموقف", value=issue[:700], inline=False)
+    embed.set_footer(text=f"طلب بواسطة {ctx.author}")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="تهدئة_AI", aliases=["ai_calm", "تهدئة"])
+@commands.has_permissions(administrator=True)
+async def ai_calm_toggle(ctx, mode=None):
+    global AI_CALM_ENABLED
+
+    if mode is None:
+        status = "شغالة ✅" if AI_CALM_ENABLED else "مقفلة ❌"
+        await ctx.send(embed=discord.Embed(
+            title="🤖 حالة تهدئة Risk AI",
+            description=f"التهدئة التلقائية الآن: **{status}**",
+            color=COLOR_PURPLE
+        ))
+        return
+
+    if mode in ["تشغيل", "on"]:
+        AI_CALM_ENABLED = True
+        await ctx.send("🤖 تم تشغيل تهدئة Risk AI.")
+    elif mode in ["ايقاف", "إيقاف", "off"]:
+        AI_CALM_ENABLED = False
+        await ctx.send("🤖 تم إيقاف تهدئة Risk AI.")
+    else:
+        await ctx.send("استخدم: `!تهدئة_AI تشغيل` أو `!تهدئة_AI إيقاف`")
+
+
 @bot.command(name="مساعدة", aliases=["helpme"])
 async def help_cmd(ctx):
     embed = discord.Embed(title="📖 أوامر البوت", color=COLOR_PURPLE)
@@ -1223,6 +1512,8 @@ async def help_cmd(ctx):
 `!تقييم الشي`
 `!ai سؤالك`
 `!اسأل سؤالك`
+`!رد_دعم المشكلة`
+`!صياغة_دعم الموقف`
 
 **إدارة**
 `!مسح 10`
@@ -1236,6 +1527,9 @@ async def help_cmd(ctx):
 `!حماية تشغيل`
 `!حماية ايقاف`
 `!اعدادات`
+`!تهدئة_AI`
+`!تهدئة_AI تشغيل`
+`!تهدئة_AI ايقاف`
 
 **التحذيرات**
 `!تحذير @شخص السبب`
@@ -1513,7 +1807,7 @@ async def panel(ctx):
     embed = discord.Embed(title="🎛️ لوحة التحكم", color=COLOR_PURPLE)
     embed.add_field(name="🛡️ الحماية", value=status, inline=True)
     embed.add_field(name="📨 التقديم", value="`!ارسال_التقديم`", inline=True)
-    embed.add_field(name="⚙️ الإعدادات", value="`!اعدادات`", inline=True)
+    embed.add_field(name="⚙️ الإعدادات", value="`!اعدادات`\n`!تهدئة_AI`\n`!تهدئة_AI تشغيل`\n`!تهدئة_AI ايقاف`", inline=True)
     embed.add_field(name="👤 ملف عضو", value="`!ملف @شخص`", inline=True)
     embed.add_field(name="🚫 منع تقديم", value="`!منع_تقديم @شخص السبب`", inline=True)
     embed.add_field(name="📖 مساعدة", value="`!مساعدة`", inline=True)
