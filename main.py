@@ -6,10 +6,22 @@ import os
 import json
 import time
 import sqlite3
+import asyncio
 from flask import Flask
 from threading import Thread
 
 TOKEN = os.getenv("TOKEN")
+
+# OpenAI / ChatGPT
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+client = OpenAI(api_key=OPENAI_API_KEY) if OpenAI and OPENAI_API_KEY else None
+
 
 ALLOWED_GUILD_ID = 1300038159446441985
 
@@ -948,6 +960,41 @@ class FinalDecisionView(discord.ui.View):
         await interaction.response.send_modal(FinalRejectReasonModal(self.user_id, self.app_id))
 
 
+
+
+async def ask_chatgpt(prompt, author_name="عضو"):
+    if client is None:
+        return "❌ OpenAI API غير مفعّل. تأكد أنك حاط OPENAI_API_KEY في Railway وثبتت مكتبة openai."
+
+    def call_openai():
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "أنت مساعد داخل بوت ديسكورد لسيرفر عربي باسم مقاطعة رسك. "
+                        "رد بالعربي غالباً، وخلك مختصر وواضح ومحترم. "
+                        "لا تساعد على الاختراق أو الضرر أو تجاوز الأنظمة. "
+                        "إذا السؤال عن إدارة السيرفر أو الدعم الفني، عط خطوات عملية."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"اسم العضو: {author_name}\nالسؤال: {prompt}"
+                }
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+        return response.choices[0].message.content
+
+    try:
+        return await asyncio.to_thread(call_openai)
+    except Exception as e:
+        return f"❌ صار خطأ في AI: `{e}`"
+
+
 app = Flask(__name__)
 
 @app.route("/")
@@ -1101,6 +1148,29 @@ async def on_message(message):
     if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
         return
 
+    # أمر ChatGPT
+    if message.content.startswith("!ai") or message.content.startswith("!اسأل"):
+        prompt = message.content.replace("!ai", "", 1).replace("!اسأل", "", 1).strip()
+
+        if not prompt:
+            await message.channel.send("اكتب سؤالك بعد الأمر. مثال: `!ai اكتب إعلان افتتاح للسيرفر`")
+            return
+
+        async with message.channel.typing():
+            answer = await ask_chatgpt(prompt, message.author.display_name)
+
+        if len(answer) > 1900:
+            answer = answer[:1900] + "..."
+
+        embed = discord.Embed(
+            title="🤖 Risk AI",
+            description=answer,
+            color=COLOR_PURPLE
+        )
+        embed.set_footer(text=f"طلب بواسطة {message.author}")
+        await message.channel.send(embed=embed)
+        return
+
     content = message.content.lower()
 
     if protection_enabled and not is_admin(message.author):
@@ -1151,6 +1221,8 @@ async def help_cmd(ctx):
 `!هلا`
 `!طقطق @شخص`
 `!تقييم الشي`
+`!ai سؤالك`
+`!اسأل سؤالك`
 
 **إدارة**
 `!مسح 10`
