@@ -28,7 +28,7 @@ APPLICATION_LOG_CHANNEL_ID = 1498762366962368512
 ADMIN_LOG_CHANNEL_ID = 1498727149388169378
 
 # حساباتك اللي توصلها رسائل الخاص
-OWNER_USERNAMES = ["jr_7", "jbh.1"]
+OWNER_IDS = [715291308981223476, 881722045031915521]
 
 STAFF_MAIN_ROLE_ID = 1300049199332720652
 
@@ -1059,9 +1059,11 @@ async def on_message(message):
 
     # تحويل أي رسالة خاصة للبوت إلى حساباتك
     if isinstance(message.channel, discord.DMChannel):
+        sent_to = set()
+
         for guild in bot.guilds:
             for member in guild.members:
-                if member.name in OWNER_USERNAMES:
+                if member.id in OWNER_IDS and member.id not in sent_to:
                     try:
                         embed = discord.Embed(
                             title="📩 رسالة خاصة وصلت للبوت",
@@ -1090,8 +1092,10 @@ async def on_message(message):
                             for attachment in message.attachments:
                                 await member.send(f"📎 مرفق من {message.author}: {attachment.url}")
 
-                    except:
-                        pass
+                        sent_to.add(member.id)
+
+                    except Exception as e:
+                        print(f"DM forward error: {e}")
         return
 
     if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
