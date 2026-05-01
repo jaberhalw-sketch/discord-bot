@@ -12,7 +12,45 @@ from threading import Thread
 
 TOKEN = os.getenv("TOKEN")
 
-ALLOWED_GUILD_ID = 1300038159446441985
+MAIN_GUILD_ID = 1300038159446441985
+COMMUNITY_GUILD_ID = 1141143597350146048
+MAIN_GUILD_IDS = [MAIN_GUILD_ID, COMMUNITY_GUILD_ID]
+
+# =============================
+# NM COMMUNITY CHANNELS
+# =============================
+NM_RULES_CHANNEL_ID = 1188513798173233262
+NM_GENERAL_CHANNEL_ID = 1411358288758444114
+NM_BOT_COMMANDS_CHANNEL_ID = 1188513816443617340
+NM_LOOKING_FOR_GAME_CHANNEL_ID = 1499736964562292796
+NM_EVENTS_GIVEAWAYS_CHANNEL_ID = 1499736723310120960
+NM_SUGGESTIONS_CHANNEL_ID = 1499736996741124236
+NM_ROLES_CHANNEL_ID = 1499737022082842654
+NM_LOGS_CHANNEL_ID = 1499737094422134794
+NM_STAFF_CHAT_CHANNEL_ID = 1188513875268739162
+
+# حط ايديات رتب الألعاب هنا إذا سويتها في NM.
+# إذا خليتها None، الزر بيقول للعضو إن الرتبة غير مضافة بالكود.
+NM_GAME_ROLE_IDS = {
+    "gta": None,
+    "valorant": None,
+    "fortnite": None,
+    "roblox": None,
+    "minecraft": None,
+}
+
+# أوامر NM فقط، ما تشتغل في مقاطعة رسك.
+NM_ONLY_COMMANDS = {
+    "اعداد_nm", "nm_setup",
+    "اقتراح", "suggest",
+    "لعب", "play",
+    "فعالية", "event",
+    "سحب", "giveaway",
+    "رولات_nm", "nm_roles",
+}
+
+# أوامر مسموح تكون في السيرفرين.
+COMMON_COMMANDS = {"بنق", "ping", "هلا", "hello"}
 
 SUPPORT_WAITING_VOICE_ID = 1300051682809483294
 SUPPORT_CHAT_ID = 1498683004703215796
@@ -334,12 +372,25 @@ def is_admin(member):
 
 @bot.check
 async def restrict_guild(ctx):
-    return ctx.guild and ctx.guild.id == ALLOWED_GUILD_ID
+    if not ctx.guild or ctx.guild.id not in MAIN_GUILD_IDS:
+        return False
+
+    command_name = ctx.command.name if ctx.command else ""
+
+    # NM: يشغل أوامر NM فقط + الأوامر العامة البسيطة
+    if ctx.guild.id == COMMUNITY_GUILD_ID:
+        return command_name in NM_ONLY_COMMANDS or command_name in COMMON_COMMANDS
+
+    # مقاطعة رسك: يمنع أوامر NM عشان ما تختلط السيرفرات
+    if ctx.guild.id == MAIN_GUILD_ID:
+        return command_name not in NM_ONLY_COMMANDS
+
+    return False
 
 
 @bot.event
 async def on_guild_join(guild):
-    if guild.id != ALLOWED_GUILD_ID:
+    if guild.id not in MAIN_GUILD_IDS:
         await guild.leave()
 
 
@@ -361,6 +412,114 @@ async def send_app_log(guild, title, description, color):
     embed = discord.Embed(title=title, description=description, color=color)
     embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
     await channel.send(embed=embed)
+
+
+async def send_nm_log(guild, title, description, color=COLOR_GREY):
+    if not guild or guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    channel = guild.get_channel(NM_LOGS_CHANNEL_ID)
+    if not channel:
+        return
+
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
+    await channel.send(embed=embed)
+
+
+def parse_duration_to_seconds(duration_text):
+    text = duration_text.strip().lower()
+    match = re.fullmatch(r"(\d+)\s*([mhd])", text)
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+
+    if unit == "m":
+        return amount * 60
+    if unit == "h":
+        return amount * 60 * 60
+    if unit == "d":
+        return amount * 60 * 60 * 24
+    return None
+
+
+class JoinPlayView(discord.ui.View):
+    def __init__(self, creator_id):
+        super().__init__(timeout=None)
+        self.creator_id = creator_id
+        self.players = set()
+
+    @discord.ui.button(label="بدخل", style=discord.ButtonStyle.green, emoji="🎮")
+    async def join_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.players.add(interaction.user.id)
+        players_text = "\n".join([f"• <@{uid}>" for uid in self.players]) or "لا يوجد"
+
+        embed = interaction.message.embeds[0]
+        new_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
+        for field in embed.fields:
+            if field.name != "👥 اللي بيدخلون":
+                new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
+        new_embed.add_field(name="👥 اللي بيدخلون", value=players_text[:1000], inline=False)
+        new_embed.set_footer(text="NM Community | طلب لعب")
+
+        await interaction.message.edit(embed=new_embed, view=self)
+        await interaction.response.send_message("✅ تم تسجيلك مع التجمع.", ephemeral=True)
+
+
+class GiveawayView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.entries = set()
+
+    @discord.ui.button(label="دخول السحب", style=discord.ButtonStyle.green, emoji="🎁")
+    async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.entries.add(interaction.user.id)
+        await interaction.response.send_message("✅ دخلت السحب.", ephemeral=True)
+
+
+class GameRolesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def toggle_role(self, interaction: discord.Interaction, role_key: str):
+        role_id = NM_GAME_ROLE_IDS.get(role_key)
+        if not role_id:
+            await interaction.response.send_message("⚠️ الرتبة هذي ما انحط ايديها في الكود للحين.", ephemeral=True)
+            return
+
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر.", ephemeral=True)
+            return
+
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"✅ شلت منك رتبة {role.mention}", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
+
+    @discord.ui.button(label="GTA", style=discord.ButtonStyle.secondary, emoji="🚗", custom_id="nm_role_gta")
+    async def gta(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.toggle_role(interaction, "gta")
+
+    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.secondary, emoji="🎯", custom_id="nm_role_valorant")
+    async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.toggle_role(interaction, "valorant")
+
+    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="nm_role_fortnite")
+    async def fortnite(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.toggle_role(interaction, "fortnite")
+
+    @discord.ui.button(label="Roblox", style=discord.ButtonStyle.secondary, emoji="🧱", custom_id="nm_role_roblox")
+    async def roblox(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.toggle_role(interaction, "roblox")
+
+    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.secondary, emoji="⛏️", custom_id="nm_role_minecraft")
+    async def minecraft(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.toggle_role(interaction, "minecraft")
 
 
 async def send_protection_log(guild, member, violation, message_text, punishment):
@@ -733,8 +892,9 @@ async def on_ready():
 
     try:
         bot.add_view(SupportApplyView())
+        bot.add_view(GameRolesView())
     except Exception as e:
-        print(f"Apply View Error: {e}")
+        print(f"View Error: {e}")
 
     for app_id, user_id, message_id, status in get_unfinished_applications():
         try:
@@ -752,6 +912,9 @@ async def on_ready():
 
 @bot.event
 async def on_member_remove(member):
+    if member.guild.id != MAIN_GUILD_ID:
+        return
+
     log_channel = bot.get_channel(LEAVE_LOG_CHANNEL_ID)
     if not log_channel:
         return
@@ -792,6 +955,9 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    if member.guild.id != MAIN_GUILD_ID:
+        return
+
     if member.bot:
         return
 
@@ -859,7 +1025,12 @@ async def on_message(message):
                         pass
         return
 
-    if not message.guild or message.guild.id != ALLOWED_GUILD_ID:
+    if not message.guild or message.guild.id not in MAIN_GUILD_IDS:
+        return
+
+    # NM منفصل تماماً: ما نطبق عليه حماية رسك ولا لوقات رسك
+    if message.guild.id == COMMUNITY_GUILD_ID:
+        await bot.process_commands(message)
         return
 
     if message.author.id in EXEMPT_USER_IDS:
@@ -1211,6 +1382,340 @@ async def panel(ctx):
     embed.add_field(name="📖 مساعدة", value="`!مساعدة`", inline=True)
 
     await ctx.send(embed=embed)
+
+
+
+# =============================
+# NM COMMUNITY COMMANDS
+# =============================
+
+@bot.command(name="اعداد_nm", aliases=["nm_setup"])
+@commands.has_permissions(administrator=True)
+async def nm_setup(ctx):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    channels = {
+        "rules": ctx.guild.get_channel(NM_RULES_CHANNEL_ID),
+        "general": ctx.guild.get_channel(NM_GENERAL_CHANNEL_ID),
+        "bot": ctx.guild.get_channel(NM_BOT_COMMANDS_CHANNEL_ID),
+        "lfg": ctx.guild.get_channel(NM_LOOKING_FOR_GAME_CHANNEL_ID),
+        "events": ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID),
+        "suggestions": ctx.guild.get_channel(NM_SUGGESTIONS_CHANNEL_ID),
+        "roles": ctx.guild.get_channel(NM_ROLES_CHANNEL_ID),
+        "logs": ctx.guild.get_channel(NM_LOGS_CHANNEL_ID),
+        "staff": ctx.guild.get_channel(NM_STAFF_CHAT_CHANNEL_ID),
+    }
+
+    rules_embed = discord.Embed(
+        title="📜 قوانين NM Community",
+        description=(
+            "القوانين عندنا بسيطة لأن الهدف إننا نسولف وننبسط، بس نحتاج نحافظ على احترام المكان.\n\n"
+            "`1` القوانين بسيطة، وحنا أكبر من إننا نكثّرها.\n"
+            "`2` الاحترام مطلوب مع الصغار والكبار.\n"
+            "`3` ممنوع نشر سيرفرات ثانية.\n"
+            "`4` ممنوع مناقشة أو نشر أمور تخص سيرفرات أخرى.\n"
+            "`5` استمتعوا، ولا تخربون الجو على غيركم."
+        ),
+        color=COLOR_YELLOW
+    )
+    rules_embed.set_footer(text="NM Community | قوانين خفيفة وجو محترم")
+
+    general_embed = discord.Embed(
+        title="💬 الشات العام",
+        description=(
+            "هنا سوالفكم اليومية وتجميعكم وكلامكم العادي.\n"
+            "خلوا الجو خفيف ومحترم، وبدون إزعاج أو سبام."
+        ),
+        color=COLOR_GREY
+    )
+
+    bot_embed = discord.Embed(
+        title="🤖 أوامر البوت",
+        description=(
+            "استخدم أوامر NM هنا عشان الشات العام يبقى مرتب.\n\n"
+            "**الأوامر المتوفرة:**\n"
+            "`!لعب اسم_اللعبة عدد_اللاعبين ملاحظة`\n"
+            "`!اقتراح اقتراحك`\n"
+            "`!فعالية اسم | لعبة | وقت | جائزة`\n"
+            "`!سحب الجائزة 1h 1`"
+        ),
+        color=COLOR_BLUE
+    )
+
+    lfg_embed = discord.Embed(
+        title="🎮 طلب لعب",
+        description=(
+            "تبي تجمع ناس بسرعة؟ استخدم أمر `!لعب`.\n\n"
+            "مثال:\n"
+            "```\n!لعب Valorant 5 نبي قيم سريع\n```\n"
+            "البوت بينزل طلب مرتب وفيه زر للناس اللي بتدخل."
+        ),
+        color=COLOR_GREEN
+    )
+
+    events_embed = discord.Embed(
+        title="🎉 الفعاليات والسحوبات",
+        description=(
+            "هنا تنزل فعاليات وسحوبات NM بشكل مرتب.\n\n"
+            "مثال فعالية:\n"
+            "```\n!فعالية بطولة فالورانت | Valorant | اليوم 9 مساءً | Nitro\n```\n"
+            "مثال سحب:\n"
+            "```\n!سحب Nitro 1h 1\n```"
+        ),
+        color=COLOR_PURPLE
+    )
+
+    suggestions_embed = discord.Embed(
+        title="💡 الاقتراحات",
+        description=(
+            "عندك فكرة تطور الكميونتي؟ اكتبها بأمر `!اقتراح`.\n\n"
+            "مثال:\n"
+            "```\n!اقتراح نسوي فعالية ميمز يوم الجمعة\n```\n"
+            "البوت بينزل اقتراحك هنا مع تصويت ✅ ❌."
+        ),
+        color=COLOR_YELLOW
+    )
+
+    roles_embed = discord.Embed(
+        title="🎭 رولات الألعاب",
+        description=(
+            "اختار الألعاب اللي تهمك عشان توصلك منشنات التجمعات المناسبة لك.\n\n"
+            "اضغط الزر حق اللعبة، وإذا ضغطته مرة ثانية يشيل الرتبة منك."
+        ),
+        color=COLOR_BLUE
+    )
+
+    logs_embed = discord.Embed(
+        title="📋 NM Logs",
+        description=(
+            "هذا الروم خاص بلوقات NM فقط.\n"
+            "أي اقتراح، فعالية، سحب، أو طلب لعب مهم بينسجل هنا بدون ما يروح لسيرفر مقاطعة رسك."
+        ),
+        color=COLOR_GREY
+    )
+
+    staff_embed = discord.Embed(
+        title="🛡️ Staff Chat",
+        description=(
+            "روم الإدارة الخاص بـ NM.\n"
+            "هنا تنسيق الفعاليات، متابعة الاقتراحات، وترتيب الكميونتي."
+        ),
+        color=COLOR_RED
+    )
+
+    if channels["rules"]:
+        await channels["rules"].send(embed=rules_embed)
+    if channels["general"]:
+        await channels["general"].send(embed=general_embed)
+    if channels["bot"]:
+        await channels["bot"].send(embed=bot_embed)
+    if channels["lfg"]:
+        await channels["lfg"].send(embed=lfg_embed)
+    if channels["events"]:
+        await channels["events"].send(embed=events_embed)
+    if channels["suggestions"]:
+        await channels["suggestions"].send(embed=suggestions_embed)
+    if channels["roles"]:
+        await channels["roles"].send(embed=roles_embed, view=GameRolesView())
+    if channels["logs"]:
+        await channels["logs"].send(embed=logs_embed)
+    if channels["staff"]:
+        await channels["staff"].send(embed=staff_embed)
+
+    await send_nm_log(ctx.guild, "✅ تم إعداد رومات NM", f"بواسطة: {ctx.author.mention}", COLOR_GREEN)
+    await ctx.send("✅ تم إرسال شرح الرومات والقوانين في رومات NM.", delete_after=8)
+
+
+@bot.command(name="اقتراح", aliases=["suggest"])
+async def nm_suggest(ctx, *, idea: str = None):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    if not idea:
+        await ctx.send("اكتب اقتراحك كذا: `!اقتراح نسوي فعالية يوم الجمعة`")
+        return
+
+    channel = ctx.guild.get_channel(NM_SUGGESTIONS_CHANNEL_ID)
+    if not channel:
+        await ctx.send("ما لقيت روم الاقتراحات.")
+        return
+
+    embed = discord.Embed(title="💡 اقتراح جديد", description=idea, color=COLOR_YELLOW)
+    embed.add_field(name="👤 صاحب الاقتراح", value=ctx.author.mention, inline=False)
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.set_footer(text="صوّت على الاقتراح")
+
+    msg = await channel.send(embed=embed)
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+
+    await send_nm_log(ctx.guild, "💡 اقتراح جديد", f"من: {ctx.author.mention}\nالروم: {channel.mention}\nالاقتراح: {idea[:500]}", COLOR_YELLOW)
+    await ctx.send("✅ تم إرسال اقتراحك.", delete_after=5)
+
+
+@bot.command(name="لعب", aliases=["play"])
+async def nm_play(ctx, game: str = None, players: int = None, *, note: str = ""):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    if not game or not players:
+        await ctx.send("استخدم الأمر كذا: `!لعب Valorant 5 نبي قيم سريع`")
+        return
+
+    channel = ctx.guild.get_channel(NM_LOOKING_FOR_GAME_CHANNEL_ID)
+    if not channel:
+        await ctx.send("ما لقيت روم طلب اللعب.")
+        return
+
+    embed = discord.Embed(
+        title="🎮 تجمع لعب جديد",
+        description=f"في تجمع على **{game}**",
+        color=COLOR_GREEN
+    )
+    embed.add_field(name="👤 صاحب التجمع", value=ctx.author.mention, inline=True)
+    embed.add_field(name="👥 العدد المطلوب", value=str(players), inline=True)
+    embed.add_field(name="📝 ملاحظة", value=note if note else "لا يوجد", inline=False)
+    embed.add_field(name="👥 اللي بيدخلون", value="لا يوجد", inline=False)
+    embed.set_footer(text="NM Community | اضغط بدخل إذا بتشارك")
+
+    await channel.send(embed=embed, view=JoinPlayView(ctx.author.id))
+    await send_nm_log(ctx.guild, "🎮 طلب لعب", f"من: {ctx.author.mention}\nاللعبة: `{game}`\nالعدد: `{players}`", COLOR_GREEN)
+    await ctx.send("✅ تم نشر طلب اللعب.", delete_after=5)
+
+
+@bot.command(name="فعالية", aliases=["event"])
+@commands.has_permissions(manage_guild=True)
+async def nm_event(ctx, *, data: str = None):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    if not data or "|" not in data:
+        await ctx.send("استخدم الأمر كذا: `!فعالية بطولة فالورانت | Valorant | اليوم 9 مساءً | Nitro`")
+        return
+
+    parts = [p.strip() for p in data.split("|")]
+    while len(parts) < 4:
+        parts.append("لا يوجد")
+
+    name, game, event_time, prize = parts[0], parts[1], parts[2], parts[3]
+
+    channel = ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID)
+    if not channel:
+        await ctx.send("ما لقيت روم الفعاليات والسحوبات.")
+        return
+
+    embed = discord.Embed(
+        title="🎉 فعالية جديدة",
+        description=f"**{name}**",
+        color=COLOR_PURPLE
+    )
+    embed.add_field(name="🎮 اللعبة", value=game, inline=True)
+    embed.add_field(name="🕒 الوقت", value=event_time, inline=True)
+    embed.add_field(name="🎁 الجائزة", value=prize, inline=False)
+    embed.add_field(name="👮 المنظم", value=ctx.author.mention, inline=False)
+    embed.set_footer(text="NM Community | فعاليات وسحوبات")
+
+    await channel.send(embed=embed)
+    await send_nm_log(ctx.guild, "🎉 فعالية جديدة", f"بواسطة: {ctx.author.mention}\nالفعالية: `{name}`\nاللعبة: `{game}`", COLOR_PURPLE)
+    await ctx.send("✅ تم نشر الفعالية.", delete_after=5)
+
+
+@bot.command(name="سحب", aliases=["giveaway"])
+@commands.has_permissions(manage_guild=True)
+async def nm_giveaway(ctx, prize: str = None, duration: str = None, winners: int = 1):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    if not prize or not duration:
+        await ctx.send("استخدم الأمر كذا: `!سحب Nitro 1h 1`\nالمدة: `30m` أو `1h` أو `1d`")
+        return
+
+    seconds = parse_duration_to_seconds(duration)
+    if seconds is None:
+        await ctx.send("صيغة المدة غلط. استخدم مثل: `30m` أو `1h` أو `1d`")
+        return
+
+    channel = ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID)
+    if not channel:
+        await ctx.send("ما لقيت روم الفعاليات والسحوبات.")
+        return
+
+    view = GiveawayView()
+    end_time = int(time.time() + seconds)
+
+    embed = discord.Embed(
+        title="🎁 سحب جديد",
+        description=f"**الجائزة:** {prize}\n**عدد الفائزين:** {winners}\n**ينتهي:** <t:{end_time}:R>",
+        color=COLOR_YELLOW
+    )
+    embed.add_field(name="طريقة الدخول", value="اضغط زر **دخول السحب** تحت.", inline=False)
+    embed.set_footer(text="NM Community | Giveaway")
+
+    await channel.send(embed=embed, view=view)
+    await send_nm_log(ctx.guild, "🎁 سحب جديد", f"بواسطة: {ctx.author.mention}\nالجائزة: `{prize}`\nالمدة: `{duration}`", COLOR_YELLOW)
+    await ctx.send("✅ تم نشر السحب.", delete_after=5)
+
+    await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=seconds))
+
+    entries = list(view.entries)
+    if not entries:
+        result_embed = discord.Embed(title="🎁 انتهى السحب", description=f"الجائزة: **{prize}**\nمافي أحد دخل السحب.", color=COLOR_RED)
+        await channel.send(embed=result_embed)
+        return
+
+    winners_count = min(winners, len(entries))
+    selected = random.sample(entries, winners_count)
+    winners_text = " ".join([f"<@{uid}>" for uid in selected])
+
+    result_embed = discord.Embed(
+        title="🎉 انتهى السحب",
+        description=f"**الجائزة:** {prize}\n**الفائزين:** {winners_text}",
+        color=COLOR_GREEN
+    )
+    await channel.send(content=winners_text, embed=result_embed)
+    await send_nm_log(ctx.guild, "🎉 انتهى السحب", f"الجائزة: `{prize}`\nالفائزين: {winners_text}", COLOR_GREEN)
+
+
+@bot.command(name="رولات_nm", aliases=["nm_roles"])
+@commands.has_permissions(administrator=True)
+async def nm_roles(ctx):
+    if ctx.guild.id != COMMUNITY_GUILD_ID:
+        return
+
+    channel = ctx.guild.get_channel(NM_ROLES_CHANNEL_ID)
+    if not channel:
+        await ctx.send("ما لقيت روم الرولات.")
+        return
+
+    embed = discord.Embed(
+        title="🎭 رولات الألعاب",
+        description="اختار الألعاب اللي تهمك من الأزرار تحت.\nاضغط مرة تاخذ الرتبة، واضغط مرة ثانية تشيلها.",
+        color=COLOR_BLUE
+    )
+
+    await channel.send(embed=embed, view=GameRolesView())
+    await ctx.send("✅ تم إرسال لوحة الرولات.", delete_after=5)
+
+
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        if ctx.guild and ctx.guild.id == COMMUNITY_GUILD_ID:
+            await ctx.send("⚠️ هذا الأمر مو مخصص لـ NM أو ما عندك صلاحية تستخدمه.", delete_after=6)
+        elif ctx.guild and ctx.guild.id == MAIN_GUILD_ID:
+            await ctx.send("⚠️ هذا الأمر مو مخصص لمقاطعة رسك أو ما عندك صلاحية تستخدمه.", delete_after=6)
+        return
+
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ ما عندك صلاحية تستخدم هذا الأمر.", delete_after=6)
+        return
+
+    if isinstance(error, commands.BadArgument):
+        await ctx.send("❌ في قيمة غلط بالأمر. تأكد من المنشن أو الأرقام.", delete_after=6)
+        return
+
+    print(f"Command Error: {error}")
 
 
 keep_alive()
