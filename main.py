@@ -29,14 +29,14 @@ NM_ROLES_CHANNEL_ID = 1499737022082842654
 NM_LOGS_CHANNEL_ID = 1499737094422134794
 NM_STAFF_CHAT_CHANNEL_ID = 1188513875268739162
 
-# رولات ألعاب NM - البوت ينشئها بنفسه ويعطيها للأعضاء من الأزرار.
-# ملاحظة: لازم رتبة البوت تكون فوق رولات الألعاب في ترتيب الرتب.
-NM_GAME_ROLES = {
-    "gta": {"name": "🚗 GTA", "color": 0xF39C12, "emoji": "🚗"},
-    "valorant": {"name": "🎯 Valorant", "color": 0xE74C3C, "emoji": "🎯"},
-    "fortnite": {"name": "🏗️ Fortnite", "color": 0x9B59B6, "emoji": "🏗️"},
-    "roblox": {"name": "🧱 Roblox", "color": 0x95A5A6, "emoji": "🧱"},
-    "minecraft": {"name": "⛏️ Minecraft", "color": 0x2ECC71, "emoji": "⛏️"},
+# حط ايديات رتب الألعاب هنا إذا سويتها في NM.
+# إذا خليتها None، الزر بيقول للعضو إن الرتبة غير مضافة بالكود.
+NM_GAME_ROLE_IDS = {
+    "gta": None,
+    "valorant": None,
+    "fortnite": None,
+    "roblox": None,
+    "minecraft": None,
 }
 
 # أوامر NM فقط، ما تشتغل في مقاطعة رسك.
@@ -51,6 +51,16 @@ NM_ONLY_COMMANDS = {
 
 # أوامر مسموح تكون في السيرفرين.
 COMMON_COMMANDS = {"بنق", "ping", "هلا", "hello"}
+
+# =============================
+# RISK LOG SETTINGS
+# =============================
+# مقاطعة رسك: قفل كل اللوقات ما عدا لوقات التقديم.
+RISK_ADMIN_LOGS_ENABLED = False
+RISK_PROTECTION_LOGS_ENABLED = False
+RISK_LEAVE_LOGS_ENABLED = False
+RISK_SUPPORT_WAITING_LOGS_ENABLED = False
+RISK_APPLICATION_LOGS_ENABLED = True
 
 SUPPORT_WAITING_VOICE_ID = 1300051682809483294
 SUPPORT_CHAT_ID = 1498683004703215796
@@ -395,6 +405,10 @@ async def on_guild_join(guild):
 
 
 async def send_admin_log(guild, title, description, color=COLOR_GREY):
+    # مقاطعة رسك: اللوقات الإدارية مقفلة، التقديم فقط يظل شغال.
+    if guild and guild.id == MAIN_GUILD_ID and not RISK_ADMIN_LOGS_ENABLED:
+        return
+
     channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
     if not channel:
         return
@@ -405,6 +419,10 @@ async def send_admin_log(guild, title, description, color=COLOR_GREY):
 
 
 async def send_app_log(guild, title, description, color):
+    # لوقات التقديم في مقاطعة رسك تظل شغالة.
+    if guild and guild.id == MAIN_GUILD_ID and not RISK_APPLICATION_LOGS_ENABLED:
+        return
+
     channel = guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
     if not channel:
         return
@@ -479,93 +497,37 @@ class GiveawayView(discord.ui.View):
         await interaction.response.send_message("✅ دخلت السحب.", ephemeral=True)
 
 
-async def ensure_nm_game_roles(guild):
-    """ينشئ رولات ألعاب NM تلقائياً إذا ما كانت موجودة."""
-    if not guild or guild.id != COMMUNITY_GUILD_ID:
-        return {}
-
-    created_roles = {}
-
-    for role_key, data in NM_GAME_ROLES.items():
-        role_name = data["name"]
-        color_value = data["color"]
-
-        role = discord.utils.get(guild.roles, name=role_name)
-
-        if role is None:
-            role = await guild.create_role(
-                name=role_name,
-                color=discord.Color(color_value),
-                mentionable=True,
-                reason="NM game roles auto setup"
-            )
-        else:
-            try:
-                await role.edit(
-                    color=discord.Color(color_value),
-                    mentionable=True,
-                    reason="NM game roles style update"
-                )
-            except Exception:
-                pass
-
-        created_roles[role_key] = role
-
-    return created_roles
-
-
 class GameRolesView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     async def toggle_role(self, interaction: discord.Interaction, role_key: str):
-        if not interaction.guild or interaction.guild.id != COMMUNITY_GUILD_ID:
-            await interaction.response.send_message("⚠️ هذي اللوحة مخصصة لـ NM فقط.", ephemeral=True)
+        role_id = NM_GAME_ROLE_IDS.get(role_key)
+        if not role_id:
+            await interaction.response.send_message("⚠️ الرتبة هذي ما انحط ايديها في الكود للحين.", ephemeral=True)
             return
 
-        data = NM_GAME_ROLES.get(role_key)
-        if not data:
-            await interaction.response.send_message("⚠️ الرتبة غير معرفة في الكود.", ephemeral=True)
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر.", ephemeral=True)
             return
 
-        role = discord.utils.get(interaction.guild.roles, name=data["name"])
-        if role is None:
-            try:
-                roles = await ensure_nm_game_roles(interaction.guild)
-                role = roles.get(role_key)
-            except Exception as e:
-                await interaction.response.send_message(
-                    f"❌ ما قدرت أنشئ الرتبة. تأكد إن رتبة البوت فوق الرولات.\n`{e}`",
-                    ephemeral=True
-                )
-                return
-
-        if role is None:
-            await interaction.response.send_message("⚠️ ما لقيت الرتبة ولا قدرت أنشئها.", ephemeral=True)
-            return
-
-        try:
-            if role in interaction.user.roles:
-                await interaction.user.remove_roles(role, reason="NM game role toggle")
-                await interaction.response.send_message(f"✅ شلت منك رتبة {role.mention}", ephemeral=True)
-            else:
-                await interaction.user.add_roles(role, reason="NM game role toggle")
-                await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ ما قدرت أعدل رتبتك. تأكد إن رتبة البوت فوق رتبة {role.mention}.\n`{e}`",
-                ephemeral=True
-            )
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"✅ شلت منك رتبة {role.mention}", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
 
     @discord.ui.button(label="GTA", style=discord.ButtonStyle.secondary, emoji="🚗", custom_id="nm_role_gta")
     async def gta(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.toggle_role(interaction, "gta")
 
-    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.danger, emoji="🎯", custom_id="nm_role_valorant")
+    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.secondary, emoji="🎯", custom_id="nm_role_valorant")
     async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.toggle_role(interaction, "valorant")
 
-    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.primary, emoji="🏗️", custom_id="nm_role_fortnite")
+    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="nm_role_fortnite")
     async def fortnite(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.toggle_role(interaction, "fortnite")
 
@@ -573,12 +535,16 @@ class GameRolesView(discord.ui.View):
     async def roblox(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.toggle_role(interaction, "roblox")
 
-    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.success, emoji="⛏️", custom_id="nm_role_minecraft")
+    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.secondary, emoji="⛏️", custom_id="nm_role_minecraft")
     async def minecraft(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.toggle_role(interaction, "minecraft")
 
 
 async def send_protection_log(guild, member, violation, message_text, punishment):
+    # مقاطعة رسك: لوقات الحماية مقفلة، لكن الحماية نفسها تظل تشتغل.
+    if guild and guild.id == MAIN_GUILD_ID and not RISK_PROTECTION_LOGS_ENABLED:
+        return
+
     log_channel = guild.get_channel(PROTECTION_LOG_CHANNEL_ID)
     if not log_channel:
         return
@@ -1373,7 +1339,8 @@ async def settings(ctx):
     embed.add_field(name="Anti-Link", value="شغال ✅" if ANTI_LINKS else "مغلق ❌", inline=True)
     embed.add_field(name="Spam", value=f"{SPAM_LIMIT} رسائل / {SPAM_SECONDS} ثواني", inline=True)
     embed.add_field(name="Mass Mention", value=f"{MASS_MENTION_LIMIT} منشن", inline=True)
-    embed.add_field(name="Protection Log", value=f"<#{PROTECTION_LOG_CHANNEL_ID}>", inline=False)
+    protection_log_status = "مقفل في مقاطعة رسك ❌" if ctx.guild.id == MAIN_GUILD_ID and not RISK_PROTECTION_LOGS_ENABLED else f"<#{PROTECTION_LOG_CHANNEL_ID}>"
+    embed.add_field(name="Protection Log", value=protection_log_status, inline=False)
     await ctx.send(embed=embed)
 
 
@@ -1533,18 +1500,10 @@ async def nm_setup(ctx):
         color=COLOR_YELLOW
     )
 
-    try:
-        game_roles = await ensure_nm_game_roles(ctx.guild)
-        game_roles_text = "\n".join([f"• {role.mention}" for role in game_roles.values()])
-    except Exception as e:
-        game_roles_text = f"⚠️ ما قدرت أنشئ الرولات تلقائياً: `{e}`"
-
     roles_embed = discord.Embed(
         title="🎭 رولات الألعاب",
         description=(
             "اختار الألعاب اللي تهمك عشان توصلك منشنات التجمعات المناسبة لك.\n\n"
-            "البوت سوّى الرولات تلقائياً وزبط ألوانها:\n"
-            f"{game_roles_text}\n\n"
             "اضغط الزر حق اللعبة، وإذا ضغطته مرة ثانية يشيل الرتبة منك."
         ),
         color=COLOR_BLUE
@@ -1752,28 +1711,14 @@ async def nm_roles(ctx):
         await ctx.send("ما لقيت روم الرولات.")
         return
 
-    try:
-        game_roles = await ensure_nm_game_roles(ctx.guild)
-    except Exception as e:
-        await ctx.send(f"❌ ما قدرت أنشئ الرولات. تأكد إن رتبة البوت فوق الرولات.\n`{e}`")
-        return
-
-    roles_text = "\n".join([f"• {role.mention}" for role in game_roles.values()])
-
     embed = discord.Embed(
         title="🎭 رولات الألعاب",
-        description=(
-            "اختار الألعاب اللي تهمك من الأزرار تحت.\n"
-            "اضغط مرة تاخذ الرتبة، واضغط مرة ثانية تشيلها.\n\n"
-            "**الرولات المتوفرة:**\n"
-            f"{roles_text}"
-        ),
+        description="اختار الألعاب اللي تهمك من الأزرار تحت.\nاضغط مرة تاخذ الرتبة، واضغط مرة ثانية تشيلها.",
         color=COLOR_BLUE
     )
 
     await channel.send(embed=embed, view=GameRolesView())
-    await send_nm_log(ctx.guild, "🎭 تم تجهيز رولات الألعاب", f"بواسطة: {ctx.author.mention}\n{roles_text}", COLOR_BLUE)
-    await ctx.send("✅ تم إنشاء/تحديث رولات الألعاب وإرسال اللوحة.", delete_after=5)
+    await ctx.send("✅ تم إرسال لوحة الرولات.", delete_after=5)
 
 
 @bot.event
