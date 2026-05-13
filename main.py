@@ -24,13 +24,14 @@ LOOKING_FOR_GAME_CHANNEL_ID = 1504066361876418703
 GIVEAWAYS_CHANNEL_ID = 1370418475314581524
 ROLES_CHANNEL_ID = 1504066503501152377
 ANNOUNCEMENTS_CHANNEL_ID = 1370433079377920130
+LEAVE_INFO_CHANNEL_ID = 1504063808656773170
 
 GAME_VOICE_CATEGORY_ID = 1504071883006677172
 
 OWNER_USERNAMES = ["jr_7", "jbh.1"]
 
 BYPASS_USER_IDS = {
-    
+    1125198908231004191
 }
 
 DB_FILE = "nm_system.db"
@@ -71,7 +72,7 @@ GAME_ROLES = {
     "apex": {"name": "Apex Legends", "emoji": "🏹"},
     "warzone": {"name": "Warzone", "emoji": "🪖"},
     "rainbow_six": {"name": "Rainbow Six Siege", "emoji": "🏢"},
-    "fifa": {"name": "EA FC", "emoji": "⚽"},
+    "ea_fc": {"name": "EA FC", "emoji": "⚽"},
     "rust": {"name": "Rust", "emoji": "🪓"},
     "league": {"name": "League of Legends", "emoji": "⚔️"},
     "cod": {"name": "Call of Duty", "emoji": "🎖️"},
@@ -305,7 +306,7 @@ def clean_text(text, limit=900):
     if not text:
         return "بدون نص"
 
-    text = text.replace("```", "'''")
+    text = str(text).replace("```", "'''")
 
     if len(text) > limit:
         text = text[:limit] + "..."
@@ -314,7 +315,7 @@ def clean_text(text, limit=900):
 
 
 def clean_channel_name(name):
-    name = name.lower()
+    name = str(name).lower()
     name = re.sub(r"[^a-zA-Z0-9\u0600-\u06FF\- ]", "", name)
     name = name.replace(" ", "-")
     name = name[:80]
@@ -323,6 +324,24 @@ def clean_channel_name(name):
         name = "game-room"
 
     return name
+
+
+def format_roles_list(member):
+    roles = [
+        role.mention
+        for role in member.roles
+        if role.name != "@everyone"
+    ]
+
+    if not roles:
+        return "ما كان عنده رتب", 0
+
+    text = "\n".join([f"• {role}" for role in roles])
+
+    if len(text) > 1000:
+        text = text[:1000] + "\n..."
+
+    return text, len(roles)
 
 
 async def get_channel_by_id(guild, channel_id):
@@ -356,6 +375,7 @@ async def send_to_channel(guild, channel_id, embed=None, content=None, view=None
 async def get_log_channel(guild):
     if LOG_CHANNEL_ID:
         channel = await get_channel_by_id(guild, LOG_CHANNEL_ID)
+
         if channel:
             return channel
 
@@ -391,12 +411,12 @@ async def send_log(guild, title, description, color=COLOR_GREY):
 
 async def get_audit_executor(guild, action, target_id=None):
     try:
-        async for entry in guild.audit_logs(limit=5, action=action):
+        async for entry in guild.audit_logs(limit=7, action=action):
             if target_id is None:
-                return entry.user
+                return entry
 
             if entry.target and getattr(entry.target, "id", None) == target_id:
-                return entry.user
+                return entry
 
         return None
     except:
@@ -502,6 +522,94 @@ async def create_or_find_game_roles(guild):
     return created_or_found
 
 
+async def create_game_voice_channel(guild, source_channel, game, player_ids, max_players):
+    members = []
+
+    for user_id in player_ids:
+        member = guild.get_member(user_id)
+
+        if member:
+            members.append(member)
+
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(
+            view_channel=True,
+            connect=False
+        ),
+        guild.me: discord.PermissionOverwrite(
+            view_channel=True,
+            connect=True,
+            speak=True,
+            manage_channels=True
+        )
+    }
+
+    for member in members:
+        overwrites[member] = discord.PermissionOverwrite(
+            view_channel=True,
+            connect=True,
+            speak=True,
+            stream=True,
+            use_voice_activation=True
+        )
+
+    category = guild.get_channel(GAME_VOICE_CATEGORY_ID)
+
+    if not category or not isinstance(category, discord.CategoryChannel):
+        category = source_channel.category if source_channel else None
+
+    channel_name = f"🎮-{clean_channel_name(game)}"
+
+    voice_channel = await guild.create_voice_channel(
+        name=channel_name,
+        overwrites=overwrites,
+        category=category,
+        reason="NM System LFG private voice room"
+    )
+
+    players_text = "\n".join([f"• <@{uid}>" for uid in player_ids]) or "لا يوجد"
+
+    embed = discord.Embed(
+        title="✅ تم اكتمال التجمع",
+        description=(
+            f"اللعبة: **{game}**\n"
+            f"العدد: **{len(player_ids)}/{max_players}**\n\n"
+            f"تم فتح روم فويس خاص:\n{voice_channel.mention}\n\n"
+            f"الكل يقدر يشوف الروم، لكن الدخول فقط للمسجلين."
+        ),
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.add_field(
+        name="👥 اللاعبين",
+        value=players_text[:1000],
+        inline=False
+    )
+
+    embed.set_footer(text="NM System | Looking For Game")
+
+    if source_channel:
+        await source_channel.send(embed=embed)
+
+    await send_log(
+        guild,
+        "🎮 تم فتح روم لعب خاص",
+        f"""
+**اللعبة:** {game}
+**الروم:** {voice_channel.mention}
+**الكاتقوري:** `{category.name if category else 'غير معروف'}`
+**العدد:** {len(player_ids)}/{max_players}
+
+**اللاعبين:**
+{players_text}
+""",
+        COLOR_GREEN
+    )
+
+    return voice_channel
+
+
 # =========================
 # VIEWS
 # =========================
@@ -528,96 +636,16 @@ class JoinPlayView(discord.ui.View):
         if self.channel_created:
             return
 
-        guild = interaction.guild
-
-        if not guild:
-            return
-
-        members = []
-
-        for user_id in self.players:
-            member = guild.get_member(user_id)
-
-            if member:
-                members.append(member)
-
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(
-                view_channel=True,
-                connect=False
-            ),
-            guild.me: discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True,
-                manage_channels=True
-            )
-        }
-
-        for member in members:
-            overwrites[member] = discord.PermissionOverwrite(
-                view_channel=True,
-                connect=True,
-                speak=True,
-                stream=True,
-                use_voice_activation=True
-            )
-
-        category = guild.get_channel(GAME_VOICE_CATEGORY_ID)
-
-        if not category or not isinstance(category, discord.CategoryChannel):
-            category = interaction.channel.category
-
-        channel_name = f"🎮-{clean_channel_name(self.game)}"
-
-        voice_channel = await guild.create_voice_channel(
-            name=channel_name,
-            overwrites=overwrites,
-            category=category,
-            reason="NM System LFG private voice room"
+        voice_channel = await create_game_voice_channel(
+            guild=interaction.guild,
+            source_channel=interaction.channel,
+            game=self.game,
+            player_ids=list(self.players),
+            max_players=self.max_players
         )
 
         self.channel_created = True
         self.created_channel_id = voice_channel.id
-
-        players_text = self.make_players_text()
-
-        embed = discord.Embed(
-            title="✅ تم اكتمال التجمع",
-            description=(
-                f"اللعبة: **{self.game}**\n"
-                f"العدد: **{len(self.players)}/{self.max_players}**\n\n"
-                f"تم فتح روم فويس خاص:\n{voice_channel.mention}\n\n"
-                f"الكل يقدر يشوف الروم، لكن الدخول فقط للمسجلين."
-            ),
-            color=COLOR_GREEN,
-            timestamp=discord.utils.utcnow()
-        )
-
-        embed.add_field(
-            name="👥 اللاعبين",
-            value=players_text[:1000],
-            inline=False
-        )
-
-        embed.set_footer(text="NM System | Looking For Game")
-
-        await interaction.channel.send(embed=embed)
-
-        await send_log(
-            guild,
-            "🎮 تم فتح روم لعب خاص",
-            f"""
-**اللعبة:** {self.game}
-**الروم:** {voice_channel.mention}
-**الكاتقوري:** `{category.name if category else 'غير معروف'}`
-**العدد:** {len(self.players)}/{self.max_players}
-
-**اللاعبين:**
-{players_text}
-""",
-            COLOR_GREEN
-        )
 
     async def refresh_embed(self, interaction, button=None):
         players_text = self.make_players_text()
@@ -999,8 +1027,9 @@ async def on_member_join(member):
         "📥 عضو دخل",
         f"""
 **العضو:** {member.mention}
+**User:** `{member}`
 **ID:** `{member.id}`
-**الحساب انشأ:** <t:{created}:R>
+**الحساب انشأ:** <t:{created}:F> | <t:{created}:R>
 """,
         COLOR_GREEN
     )
@@ -1011,37 +1040,110 @@ async def on_member_remove(member):
     if member.guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(member.guild, discord.AuditLogAction.kick, member.id)
+    guild = member.guild
 
-    roles = [
-        role.mention
-        for role in member.roles
-        if role.name != "@everyone"
-    ]
+    action_type = "📤 خرج من نفسه"
+    action_details = "العضو طلع من السيرفر بنفسه أو السبب غير معروف."
+    executor_text = "لا يوجد"
+    reason_text = "لا يوجد"
+    color = COLOR_GREY
 
-    if roles:
-        roles_text = "\n".join([f"• {role}" for role in roles])
-    else:
-        roles_text = "ما كان عنده رتب"
+    try:
+        ban_entry = await get_audit_executor(guild, discord.AuditLogAction.ban, member.id)
 
-    if executor:
-        title = "👢 عضو انطرد"
-        extra = f"**بواسطة:** {executor.mention}"
-        color = COLOR_RED
-    else:
-        title = "📤 عضو خرج"
-        extra = "**النوع:** خروج عادي أو غير معروف"
-        color = COLOR_GREY
+        if ban_entry:
+            action_type = "🔨 تبند"
+            executor_text = ban_entry.user.mention if ban_entry.user else "غير معروف"
+            reason_text = ban_entry.reason if ban_entry.reason else "بدون سبب مكتوب"
+            action_details = "تم حظر العضو من السيرفر."
+            color = COLOR_RED
+        else:
+            kick_entry = await get_audit_executor(guild, discord.AuditLogAction.kick, member.id)
+
+            if kick_entry:
+                action_type = "👢 انطرد"
+                executor_text = kick_entry.user.mention if kick_entry.user else "غير معروف"
+                reason_text = kick_entry.reason if kick_entry.reason else "بدون سبب مكتوب"
+                action_details = "تم طرد العضو من السيرفر."
+                color = COLOR_RED
+
+    except:
+        pass
+
+    roles_text, roles_count = format_roles_list(member)
+
+    created_at = int(member.created_at.timestamp())
+
+    joined_at_text = "غير معروف"
+
+    if member.joined_at:
+        joined_at_text = f"<t:{int(member.joined_at.timestamp())}:F> | <t:{int(member.joined_at.timestamp())}:R>"
+
+    embed = discord.Embed(
+        title="🚪 Member Leave Info",
+        description="تم تسجيل خروج عضو من السيرفر.",
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.add_field(
+        name="👤 معلومات العضو",
+        value=(
+            f"**Mention:** {member.mention}\n"
+            f"**User:** `{member}`\n"
+            f"**Display Name:** `{member.display_name}`\n"
+            f"**User ID:** `{member.id}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📌 نوع الخروج",
+        value=(
+            f"**الحالة:** {action_type}\n"
+            f"**التفصيل:** {action_details}\n"
+            f"**بواسطة:** {executor_text}\n"
+            f"**السبب:** {reason_text}"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📅 تفاصيل الحساب",
+        value=(
+            f"**تاريخ إنشاء الحساب:** <t:{created_at}:F> | <t:{created_at}:R>\n"
+            f"**تاريخ دخول السيرفر:** {joined_at_text}"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name=f"🎭 الرتب اللي كانت معه قبل الخروج ({roles_count})",
+        value=roles_text,
+        inline=False
+    )
+
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.set_footer(text="NM System | nm_leave_info")
+
+    leave_channel = await get_channel_by_id(guild, LEAVE_INFO_CHANNEL_ID)
+
+    if leave_channel:
+        try:
+            await leave_channel.send(embed=embed)
+        except:
+            pass
 
     await send_log(
-        member.guild,
-        title,
+        guild,
+        action_type,
         f"""
 **العضو:** `{member}`
 **ID:** `{member.id}`
-{extra}
+**بواسطة:** {executor_text}
+**السبب:** {reason_text}
 
-**الرتب اللي كانت معه يوم خرج:**
+**الرتب اللي كانت معه قبل الخروج:**
 {roles_text}
 """,
         color
@@ -1053,8 +1155,9 @@ async def on_member_ban(guild, user):
     if guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(guild, discord.AuditLogAction.ban, user.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(guild, discord.AuditLogAction.ban, user.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+    reason_text = entry.reason if entry and entry.reason else "بدون سبب مكتوب"
 
     await send_log(
         guild,
@@ -1063,6 +1166,7 @@ async def on_member_ban(guild, user):
 **العضو:** `{user}`
 **ID:** `{user.id}`
 **بواسطة:** {executor_text}
+**السبب:** {reason_text}
 """,
         COLOR_RED
     )
@@ -1073,8 +1177,9 @@ async def on_member_unban(guild, user):
     if guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(guild, discord.AuditLogAction.unban, user.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(guild, discord.AuditLogAction.unban, user.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+    reason_text = entry.reason if entry and entry.reason else "بدون سبب مكتوب"
 
     await send_log(
         guild,
@@ -1083,6 +1188,7 @@ async def on_member_unban(guild, user):
 **العضو:** `{user}`
 **ID:** `{user.id}`
 **بواسطة:** {executor_text}
+**السبب:** {reason_text}
 """,
         COLOR_GREEN
     )
@@ -1101,8 +1207,8 @@ async def on_member_update(before, after):
 
     if added:
         roles_text = ", ".join([r.mention for r in added if r.name != "@everyone"])
-        executor = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
-        executor_text = executor.mention if executor else "غير معروف"
+        entry = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
+        executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
         if roles_text:
             await send_log(
@@ -1118,8 +1224,8 @@ async def on_member_update(before, after):
 
     if removed:
         roles_text = ", ".join([r.mention for r in removed if r.name != "@everyone"])
-        executor = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
-        executor_text = executor.mention if executor else "غير معروف"
+        entry = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
+        executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
         if roles_text:
             await send_log(
@@ -1170,8 +1276,8 @@ async def on_guild_channel_create(channel):
     if channel.guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         channel.guild,
@@ -1190,8 +1296,8 @@ async def on_guild_channel_delete(channel):
     if channel.guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         channel.guild,
@@ -1225,8 +1331,8 @@ async def on_guild_channel_update(before, after):
     if not changes:
         return
 
-    executor = await get_audit_executor(after.guild, discord.AuditLogAction.channel_update, after.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(after.guild, discord.AuditLogAction.channel_update, after.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         after.guild,
@@ -1241,8 +1347,8 @@ async def on_guild_role_create(role):
     if role.guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(role.guild, discord.AuditLogAction.role_create, role.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(role.guild, discord.AuditLogAction.role_create, role.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         role.guild,
@@ -1261,8 +1367,8 @@ async def on_guild_role_delete(role):
     if role.guild.id != GUILD_ID:
         return
 
-    executor = await get_audit_executor(role.guild, discord.AuditLogAction.role_delete, role.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(role.guild, discord.AuditLogAction.role_delete, role.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         role.guild,
@@ -1300,8 +1406,8 @@ async def on_guild_role_update(before, after):
     if not changes:
         return
 
-    executor = await get_audit_executor(after.guild, discord.AuditLogAction.role_update, after.id)
-    executor_text = executor.mention if executor else "غير معروف"
+    entry = await get_audit_executor(after.guild, discord.AuditLogAction.role_update, after.id)
+    executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
     await send_log(
         after.guild,
@@ -1552,8 +1658,10 @@ async def play(ctx, game=None, players: int = None, *, note=""):
 
     if target_msg:
         await ctx.message.add_reaction("✅")
+        source_channel = target_msg.channel
     else:
         target_msg = await ctx.send(embed=embed, view=view)
+        source_channel = ctx.channel
 
     await send_log(
         ctx.guild,
@@ -1566,6 +1674,15 @@ async def play(ctx, game=None, players: int = None, *, note=""):
 """,
         COLOR_GREEN
     )
+
+    if players == 1:
+        await create_game_voice_channel(
+            guild=ctx.guild,
+            source_channel=source_channel,
+            game=game,
+            player_ids=[ctx.author.id],
+            max_players=players
+        )
 
 
 @bot.command(name="سحب", aliases=["giveaway"])
@@ -1997,16 +2114,6 @@ async def setup_posts(ctx):
             inline=False
         )
 
-        lfg_embed.add_field(
-            name="🔐 الصلاحيات المقترحة",
-            value=(
-                "الأعضاء: يشوفون الروم ويكتبون.\n"
-                "البوت: Manage Channels + Send Messages + Embed Links.\n"
-                "الفويس الخاص: الكل يشوفه، الدخول فقط للمسجلين."
-            ),
-            inline=False
-        )
-
         lfg_embed.set_footer(text="NM System | Looking For Game")
 
         await send_to_channel(
@@ -2150,6 +2257,46 @@ async def setup_posts(ctx):
             embed=announcements_embed
         )
 
+        leave_info_embed = discord.Embed(
+            title="🚪 Member Leave Info",
+            description=(
+                "هذا الروم مخصص لتسجيل تفاصيل خروج الأعضاء.\n\n"
+                "إذا عضو طلع، انطرد، أو تبند، البوت ينزل هنا معلوماته كاملة."
+            ),
+            color=COLOR_RED,
+            timestamp=discord.utils.utcnow()
+        )
+
+        leave_info_embed.add_field(
+            name="📌 المعلومات اللي بتنزل هنا",
+            value=(
+                "• منشن العضو\n"
+                "• اليوزر\n"
+                "• User ID\n"
+                "• هل خرج بنفسه أو انطرد أو تبند\n"
+                "• مين طرده أو بنده\n"
+                "• السبب إذا موجود\n"
+                "• تاريخ إنشاء الحساب\n"
+                "• تاريخ دخوله السيرفر\n"
+                "• الرتب اللي كانت معه قبل يطلع"
+            ),
+            inline=False
+        )
+
+        leave_info_embed.add_field(
+            name="🔐 ملاحظة",
+            value="هذا الروم يفضل يكون للإدارة فقط لأنه يحتوي معلومات لوق.",
+            inline=False
+        )
+
+        leave_info_embed.set_footer(text="NM System | nm_leave_info")
+
+        await send_to_channel(
+            guild,
+            LEAVE_INFO_CHANNEL_ID,
+            embed=leave_info_embed
+        )
+
         commands_embed = discord.Embed(
             title="🤖 NM System Commands",
             description="هذي أهم أوامر البوت:",
@@ -2234,6 +2381,7 @@ async def setup_posts(ctx):
 • تنزيل شرح roles
 • تنزيل لوحة الرولات
 • تنزيل شرح announcements
+• تنزيل شرح nm_leave_info
 • تجهيز فتح رومات اللعب داخل كاتقوري `{GAME_VOICE_CATEGORY_ID}`
 
 **عدد رتب الألعاب:** `{len(game_roles)}`
