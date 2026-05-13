@@ -504,6 +504,125 @@ async def send_private_message(target_member, title, body, sender):
     await target_member.send(embed=embed)
 
 
+
+def get_dm_error_reason(error):
+    if isinstance(error, discord.Forbidden):
+        return "Forbidden - الخاص مقفل أو مانع رسائل السيرفر"
+
+    if isinstance(error, discord.HTTPException):
+        return f"HTTPException - Discord رفض الإرسال مؤقتًا / Code: {getattr(error, 'code', 'Unknown')}"
+
+    return type(error).__name__
+
+
+def build_failed_text(failed_members):
+    if not failed_members:
+        return "لا يوجد"
+
+    lines = []
+
+    for item in failed_members:
+        member = item["member"]
+        reason = item["reason"]
+
+        lines.append(
+            f"• {member.mention} | `{member}` | ID: `{member.id}`\n"
+            f"  السبب: `{reason}`"
+        )
+
+    text = "\n".join(lines)
+
+    if len(text) > 3000:
+        text = text[:3000] + "\n... القائمة طويلة وتم اختصارها"
+
+    return text
+
+
+async def send_dm_result_log(ctx, title, target_text, total, sent, failed, failed_members, message_title, message_body):
+    failed_text = build_failed_text(failed_members)
+
+    await send_log(
+        ctx.guild,
+        title,
+        f"""
+**بواسطة:** {ctx.author.mention}
+**الهدف:** {target_text}
+**عدد الأعضاء:** `{total}`
+**وصل:** `{sent}`
+**فشل:** `{failed}`
+
+**العنوان:**
+`{message_title}`
+
+**الرسالة:**
+```{clean_text(message_body, 800)}```
+
+**الأعضاء اللي فشل الإرسال لهم:**
+{failed_text}
+""",
+        COLOR_BLUE,
+        log_type="server"
+    )
+
+
+async def run_bulk_dm(ctx, members, target_text, title, body, status_title, log_title):
+    status_msg = await ctx.send(
+        f"📨 {status_title}...\n"
+        f"العدد: `{len(members)}`"
+    )
+
+    sent = 0
+    failed = 0
+    failed_members = []
+
+    for index, member in enumerate(members, start=1):
+        try:
+            await send_private_message(member, title, body, ctx.author)
+            sent += 1
+
+        except Exception as e:
+            failed += 1
+            failed_members.append({
+                "member": member,
+                "reason": get_dm_error_reason(e)
+            })
+
+        if index % 5 == 0 or index == len(members):
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"📨 {status_title}...\n"
+                        f"التقدم: `{index}/{len(members)}`\n"
+                        f"وصل: `{sent}` | فشل: `{failed}`"
+                    )
+                )
+            except Exception:
+                pass
+
+        await asyncio.sleep(DM_DELAY_SECONDS)
+
+    await status_msg.edit(
+        content=(
+            f"✅ انتهى الإرسال\n"
+            f"وصل: `{sent}`\n"
+            f"فشل: `{failed}`\n\n"
+            f"راجع `nm-server-logs` لمعرفة من فشل وسبب الفشل."
+        )
+    )
+
+    await send_dm_result_log(
+        ctx=ctx,
+        title=log_title,
+        target_text=target_text,
+        total=len(members),
+        sent=sent,
+        failed=failed,
+        failed_members=failed_members,
+        message_title=title,
+        message_body=body
+    )
+
+
 def clean_channel_name(name):
     name = str(name).lower()
     name = re.sub(r"[^a-zA-Z0-9\u0600-\u06FF\- ]", "", name)
@@ -2391,6 +2510,8 @@ async def dm_user(ctx, member: discord.Member = None, *, message=None):
             f"""
 **بواسطة:** {ctx.author.mention}
 **إلى:** {member.mention}
+**User:** `{member}`
+**User ID:** `{member.id}`
 
 **الرسالة:**
 ```{clean_text(message, 800)}```
@@ -2399,10 +2520,30 @@ async def dm_user(ctx, member: discord.Member = None, *, message=None):
             log_type="server"
         )
 
-    except discord.Forbidden:
-        await ctx.send("❌ ما قدرت أرسل له، غالبًا الخاص عنده مقفل.")
     except Exception as e:
-        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+        reason = get_dm_error_reason(e)
+
+        await ctx.send(
+            f"❌ ما قدرت أرسل لـ {member.mention}\n"
+            f"السبب: `{reason}`"
+        )
+
+        await send_log(
+            ctx.guild,
+            "❌ DM Failed",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**إلى:** {member.mention}
+**User:** `{member}`
+**User ID:** `{member.id}`
+**السبب:** `{reason}`
+
+**الرسالة:**
+```{clean_text(message, 800)}```
+""",
+            COLOR_RED,
+            log_type="server"
+        )
 
 
 @bot.command(name="dmembed")
@@ -2429,6 +2570,8 @@ async def dm_user_embed(ctx, member: discord.Member = None, *, text=None):
             f"""
 **بواسطة:** {ctx.author.mention}
 **إلى:** {member.mention}
+**User:** `{member}`
+**User ID:** `{member.id}`
 **العنوان:** `{title}`
 
 **الرسالة:**
@@ -2438,10 +2581,31 @@ async def dm_user_embed(ctx, member: discord.Member = None, *, text=None):
             log_type="server"
         )
 
-    except discord.Forbidden:
-        await ctx.send("❌ ما قدرت أرسل له، غالبًا الخاص عنده مقفل.")
     except Exception as e:
-        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+        reason = get_dm_error_reason(e)
+
+        await ctx.send(
+            f"❌ ما قدرت أرسل لـ {member.mention}\n"
+            f"السبب: `{reason}`"
+        )
+
+        await send_log(
+            ctx.guild,
+            "❌ DM Embed Failed",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**إلى:** {member.mention}
+**User:** `{member}`
+**User ID:** `{member.id}`
+**السبب:** `{reason}`
+**العنوان:** `{title}`
+
+**الرسالة:**
+```{clean_text(body, 800)}```
+""",
+            COLOR_RED,
+            log_type="server"
+        )
 
 
 @bot.command(name="dmtest")
@@ -2471,10 +2635,13 @@ async def dm_test(ctx, *, text=None):
             log_type="server"
         )
 
-    except discord.Forbidden:
-        await ctx.send("❌ ما قدرت أرسل لك، افتح الخاص من إعدادات السيرفر.")
     except Exception as e:
-        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+        reason = get_dm_error_reason(e)
+
+        await ctx.send(
+            f"❌ ما قدرت أرسل لك بالخاص.\n"
+            f"السبب: `{reason}`"
+        )
 
 
 @bot.command(name="dmrole")
@@ -2484,67 +2651,20 @@ async def dm_role(ctx, role: discord.Role = None, *, message=None):
         await ctx.send("استخدم: `!dmrole @role رسالتك`")
         return
 
-    title = "📩 رسالة من إدارة السيرفر"
-    body = message
-
     members = [m for m in role.members if not m.bot]
 
     if not members:
         await ctx.send("❌ ما فيه أعضاء حقيقيين في هذي الرتبة.")
         return
 
-    status_msg = await ctx.send(
-        f"📨 جاري الإرسال لأعضاء رتبة {role.mention}...\n"
-        f"العدد: `{len(members)}`"
-    )
-
-    sent = 0
-    failed = 0
-
-    for index, member in enumerate(members, start=1):
-        try:
-            await send_private_message(member, title, body, ctx.author)
-            sent += 1
-        except:
-            failed += 1
-
-        if index % 5 == 0 or index == len(members):
-            try:
-                await status_msg.edit(
-                    content=(
-                        f"📨 جاري الإرسال لأعضاء رتبة {role.mention}...\n"
-                        f"التقدم: `{index}/{len(members)}`\n"
-                        f"وصل: `{sent}` | فشل: `{failed}`"
-                    )
-                )
-            except:
-                pass
-
-        await asyncio.sleep(DM_DELAY_SECONDS)
-
-    await status_msg.edit(
-        content=(
-            f"✅ انتهى الإرسال لرتبة {role.mention}\n"
-            f"وصل: `{sent}`\n"
-            f"فشل: `{failed}`"
-        )
-    )
-
-    await send_log(
-        ctx.guild,
-        "📩 DM Role Sent",
-        f"""
-**بواسطة:** {ctx.author.mention}
-**الرتبة:** {role.mention}
-**عدد الأعضاء:** `{len(members)}`
-**وصل:** `{sent}`
-**فشل:** `{failed}`
-
-**الرسالة:**
-```{clean_text(message, 800)}```
-""",
-        COLOR_BLUE,
-        log_type="server"
+    await run_bulk_dm(
+        ctx=ctx,
+        members=members,
+        target_text=f"رتبة {role.mention}",
+        title="📩 رسالة من إدارة السيرفر",
+        body=message,
+        status_title=f"جاري الإرسال لأعضاء رتبة {role.mention}",
+        log_title="📩 DM Role Sent"
     )
 
 
@@ -2563,59 +2683,14 @@ async def dm_role_embed(ctx, role: discord.Role = None, *, text=None):
         await ctx.send("❌ ما فيه أعضاء حقيقيين في هذي الرتبة.")
         return
 
-    status_msg = await ctx.send(
-        f"📨 جاري إرسال Embed لأعضاء رتبة {role.mention}...\n"
-        f"العدد: `{len(members)}`"
-    )
-
-    sent = 0
-    failed = 0
-
-    for index, member in enumerate(members, start=1):
-        try:
-            await send_private_message(member, title, body, ctx.author)
-            sent += 1
-        except:
-            failed += 1
-
-        if index % 5 == 0 or index == len(members):
-            try:
-                await status_msg.edit(
-                    content=(
-                        f"📨 جاري إرسال Embed لأعضاء رتبة {role.mention}...\n"
-                        f"التقدم: `{index}/{len(members)}`\n"
-                        f"وصل: `{sent}` | فشل: `{failed}`"
-                    )
-                )
-            except:
-                pass
-
-        await asyncio.sleep(DM_DELAY_SECONDS)
-
-    await status_msg.edit(
-        content=(
-            f"✅ انتهى إرسال Embed لرتبة {role.mention}\n"
-            f"وصل: `{sent}`\n"
-            f"فشل: `{failed}`"
-        )
-    )
-
-    await send_log(
-        ctx.guild,
-        "📩 DM Role Embed Sent",
-        f"""
-**بواسطة:** {ctx.author.mention}
-**الرتبة:** {role.mention}
-**عدد الأعضاء:** `{len(members)}`
-**وصل:** `{sent}`
-**فشل:** `{failed}`
-**العنوان:** `{title}`
-
-**الرسالة:**
-```{clean_text(body, 800)}```
-""",
-        COLOR_BLUE,
-        log_type="server"
+    await run_bulk_dm(
+        ctx=ctx,
+        members=members,
+        target_text=f"رتبة {role.mention}",
+        title=title,
+        body=body,
+        status_title=f"جاري إرسال Embed لأعضاء رتبة {role.mention}",
+        log_title="📩 DM Role Embed Sent"
     )
 
 
@@ -2630,67 +2705,20 @@ async def dm_all(ctx, *, message=None):
         await ctx.send("استخدم: `!dmall رسالتك`")
         return
 
-    title = "📩 رسالة من إدارة السيرفر"
-    body = message
-
     members = [m for m in ctx.guild.members if not m.bot]
 
     if not members:
         await ctx.send("❌ ما فيه أعضاء للإرسال لهم.")
         return
 
-    status_msg = await ctx.send(
-        f"📨 جاري الإرسال لكل أعضاء السيرفر...\n"
-        f"العدد: `{len(members)}`"
-    )
-
-    sent = 0
-    failed = 0
-
-    for index, member in enumerate(members, start=1):
-        try:
-            await send_private_message(member, title, body, ctx.author)
-            sent += 1
-        except:
-            failed += 1
-
-        if index % 5 == 0 or index == len(members):
-            try:
-                await status_msg.edit(
-                    content=(
-                        f"📨 جاري الإرسال لكل أعضاء السيرفر...\n"
-                        f"التقدم: `{index}/{len(members)}`\n"
-                        f"وصل: `{sent}` | فشل: `{failed}`"
-                    )
-                )
-            except:
-                pass
-
-        await asyncio.sleep(DM_DELAY_SECONDS)
-
-    await status_msg.edit(
-        content=(
-            f"✅ انتهى الإرسال لكل السيرفر\n"
-            f"وصل: `{sent}`\n"
-            f"فشل: `{failed}`"
-        )
-    )
-
-    await send_log(
-        ctx.guild,
-        "📩 DM All Sent",
-        f"""
-**بواسطة:** {ctx.author.mention}
-**النوع:** كل السيرفر
-**عدد الأعضاء:** `{len(members)}`
-**وصل:** `{sent}`
-**فشل:** `{failed}`
-
-**الرسالة:**
-```{clean_text(message, 800)}```
-""",
-        COLOR_BLUE,
-        log_type="server"
+    await run_bulk_dm(
+        ctx=ctx,
+        members=members,
+        target_text="كل السيرفر",
+        title="📩 رسالة من إدارة السيرفر",
+        body=message,
+        status_title="جاري الإرسال لكل أعضاء السيرفر",
+        log_title="📩 DM All Sent"
     )
 
 
@@ -2713,60 +2741,16 @@ async def dm_all_embed(ctx, *, text=None):
         await ctx.send("❌ ما فيه أعضاء للإرسال لهم.")
         return
 
-    status_msg = await ctx.send(
-        f"📨 جاري إرسال Embed لكل أعضاء السيرفر...\n"
-        f"العدد: `{len(members)}`"
+    await run_bulk_dm(
+        ctx=ctx,
+        members=members,
+        target_text="كل السيرفر",
+        title=title,
+        body=body,
+        status_title="جاري إرسال Embed لكل أعضاء السيرفر",
+        log_title="📩 DM All Embed Sent"
     )
 
-    sent = 0
-    failed = 0
-
-    for index, member in enumerate(members, start=1):
-        try:
-            await send_private_message(member, title, body, ctx.author)
-            sent += 1
-        except:
-            failed += 1
-
-        if index % 5 == 0 or index == len(members):
-            try:
-                await status_msg.edit(
-                    content=(
-                        f"📨 جاري إرسال Embed لكل أعضاء السيرفر...\n"
-                        f"التقدم: `{index}/{len(members)}`\n"
-                        f"وصل: `{sent}` | فشل: `{failed}`"
-                    )
-                )
-            except:
-                pass
-
-        await asyncio.sleep(DM_DELAY_SECONDS)
-
-    await status_msg.edit(
-        content=(
-            f"✅ انتهى إرسال Embed لكل السيرفر\n"
-            f"وصل: `{sent}`\n"
-            f"فشل: `{failed}`"
-        )
-    )
-
-    await send_log(
-        ctx.guild,
-        "📩 DM All Embed Sent",
-        f"""
-**بواسطة:** {ctx.author.mention}
-**النوع:** كل السيرفر
-**عدد الأعضاء:** `{len(members)}`
-**وصل:** `{sent}`
-**فشل:** `{failed}`
-**العنوان:** `{title}`
-
-**الرسالة:**
-```{clean_text(body, 800)}```
-""",
-        COLOR_BLUE,
-        log_type="server"
-    )
 
 
 @bot.command(name="لفلي", aliases=["rank"])
@@ -3297,6 +3281,9 @@ async def on_command_error(ctx, error):
 
     print(f"Command Error: {error}")
 
+
+if not TOKEN:
+    raise RuntimeError("TOKEN environment variable is missing. Add TOKEN in Railway Variables.")
 
 keep_alive()
 
