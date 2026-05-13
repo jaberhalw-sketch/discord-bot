@@ -561,6 +561,88 @@ def format_money(amount):
         return f"0 {COIN_NAME}"
 
 
+def short_money(amount):
+    try:
+        amount = int(amount)
+    except:
+        amount = 0
+
+    sign = "-" if amount < 0 else ""
+    amount = abs(amount)
+
+    if amount >= 1_000_000_000:
+        return f"{sign}{amount / 1_000_000_000:.2f}B".rstrip("0").rstrip(".")
+
+    if amount >= 1_000_000:
+        return f"{sign}{amount / 1_000_000:.2f}M".rstrip("0").rstrip(".")
+
+    if amount >= 1_000:
+        return f"{sign}{amount / 1_000:.1f}K".rstrip("0").rstrip(".")
+
+    return f"{sign}{amount:,}"
+
+
+def coin_line(amount, bold=True):
+    try:
+        value = int(amount)
+    except:
+        value = 0
+
+    if bold:
+        return f"**{value:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+
+    return f"{value:,} {ECONOMY_EMOJI} {COIN_NAME}"
+
+
+def money_delta(amount):
+    try:
+        amount = int(amount)
+    except:
+        amount = 0
+
+    sign = "+" if amount >= 0 else ""
+    return f"**{sign}{amount:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+
+
+def get_money_rank(user_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) + 1
+            FROM economy
+            WHERE balance > (SELECT balance FROM economy WHERE user_id = ?)
+        """, (user_id,))
+        rank = cur.fetchone()[0]
+        conn.close()
+        return int(rank or 1)
+    except:
+        return None
+
+
+def economy_status_text(user_id):
+    balance = get_balance(user_id)
+    rank = get_money_rank(user_id)
+    rank_text = f"#{rank}" if rank else "غير معروف"
+    return balance, rank_text
+
+
+def clean_bar(percent, length=12):
+    percent = max(0, min(1, float(percent)))
+    filled = int(round(percent * length))
+    return "█" * filled + "░" * (length - filled)
+
+
+def slot_box(roll):
+    return (
+        "```txt\n"
+        "╔═══════════════╗\n"
+        f"║  {roll[0]} │ {roll[1]} │ {roll[2]}  ║\n"
+        "╚═══════════════╝\n"
+        "```"
+    )
+
+
 def member_display(member):
     if not member:
         return "غير معروف"
@@ -762,7 +844,7 @@ async def validate_gamble(ctx, amount_text):
     amount = parse_bet_amount(amount_text)
 
     if amount is None:
-        await ctx.send("استخدم مبلغ صحيح. مثال: `!حظ 500` أو `!حظ 10k`")
+        await ctx.send("❌ اكتب مبلغ صحيح. مثال: `!حظ 500` أو `!حظ 10k` أو `!حظ 1m`")
         return None
 
     if amount <= 0:
@@ -780,7 +862,7 @@ async def validate_gamble(ctx, amount_text):
     if balance < amount:
         embed = discord.Embed(
             title="❌ رصيدك ما يكفي",
-            description=f"رصيدك الحالي: **{balance:,} {COIN_NAME}**\nالمبلغ المطلوب: **{amount:,} {COIN_NAME}**",
+            description=f"ما تقدر تدخل برهان أعلى من رصيدك.\n\n**Wallet:** {coin_line(balance)}\n**Bet:** {coin_line(amount)}",
             color=COLOR_RED,
             timestamp=discord.utils.utcnow()
         )
@@ -791,24 +873,27 @@ async def validate_gamble(ctx, amount_text):
     return amount
 
 
-def gambling_embed(title, description, color, member, bet, result_amount=None, balance=None):
+def gambling_embed(title, status, color, member, bet, result_amount=None, balance=None, details=None, game_name="Gambling"):
     embed = discord.Embed(
         title=title,
-        description=description,
+        description=status,
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="🎲 الرهان", value=f"**{bet:,}** {COIN_NAME}", inline=True)
+
+    embed.set_author(name=f"{member.display_name} • {game_name}", icon_url=member.display_avatar.url)
+    embed.add_field(name="🎯 Bet", value=coin_line(bet), inline=True)
 
     if result_amount is not None:
-        sign = "+" if result_amount >= 0 else ""
-        embed.add_field(name="💸 النتيجة", value=f"**{sign}{result_amount:,}** {COIN_NAME}", inline=True)
+        embed.add_field(name="📈 Change", value=money_delta(result_amount), inline=True)
 
     if balance is not None:
-        embed.add_field(name="💰 رصيدك الآن", value=f"**{balance:,}** {COIN_NAME}", inline=False)
+        embed.add_field(name="💼 New Balance", value=coin_line(balance), inline=False)
 
-    embed.set_footer(text=f"{BOT_BRAND} | Gambling | Cooldown {GAMBLE_COOLDOWN_SECONDS}s")
+    if details:
+        embed.add_field(name="📌 Details", value=details, inline=False)
+
+    embed.set_footer(text=f"{BOT_BRAND} • {game_name} • Cooldown {GAMBLE_COOLDOWN_SECONDS}s")
     return embed
 
 
@@ -3254,19 +3339,26 @@ async def my_balance(ctx):
 
     balance = get_balance(ctx.author.id)
     xp, level = get_level_data(ctx.author.id)
+    needed = level * 100
     daily_bonus = DAILY_REWARD_BASE + (int(level) * 25)
+    rank = get_money_rank(ctx.author.id)
+    progress = clean_bar(xp / needed if needed else 0)
 
     embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Wallet",
-        description=f"محفظة {ctx.author.mention}",
+        title=f"{ECONOMY_EMOJI} Retard Wallet",
+        description=(
+            f"محفظة {ctx.author.mention}\n"
+            f"`{progress}` **{xp:,}/{needed:,} XP**"
+        ),
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.add_field(name="💰 الرصيد", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="💼 Balance", value=coin_line(balance), inline=False)
+    embed.add_field(name="🏆 Money Rank", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
     embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
-    embed.add_field(name="🎁 Hourly Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} | Economy")
+    embed.add_field(name="⏰ Hourly Reward", value=coin_line(daily_bonus), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Economy Wallet")
     await ctx.send(embed=embed)
 
 
@@ -3278,19 +3370,26 @@ async def balance(ctx, member: discord.Member = None):
     member = member or ctx.author
     balance_amount = get_balance(member.id)
     xp, level_num = get_level_data(member.id)
+    needed = level_num * 100
     daily_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
+    rank = get_money_rank(member.id)
+    progress = clean_bar(xp / needed if needed else 0)
 
     embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Wallet",
-        description=f"محفظة {member.mention}",
+        title=f"{ECONOMY_EMOJI} Retard Wallet",
+        description=(
+            f"محفظة {member.mention}\n"
+            f"`{progress}` **{xp:,}/{needed:,} XP**"
+        ),
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="💰 الرصيد", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
+    embed.add_field(name="🏆 Money Rank", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
     embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
-    embed.add_field(name="🎁 Hourly Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} | Economy")
+    embed.add_field(name="⏰ Hourly Reward", value=coin_line(daily_bonus), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Economy Wallet")
     await ctx.send(embed=embed)
 
 
@@ -3304,12 +3403,13 @@ async def daily(ctx):
 
     if not success:
         embed = discord.Embed(
-            title="⏳ Hourly reward already claimed",
+            title="⏳ المكافأة الساعية مأخوذة",
             description=f"ارجع بعد **{format_seconds(remaining)}**.",
             color=COLOR_ORANGE,
             timestamp=discord.utils.utcnow()
         )
-        embed.set_footer(text=f"{BOT_BRAND} | Hourly Reward")
+        embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} • Hourly Reward")
         await ctx.send(embed=embed)
         return
 
@@ -3320,10 +3420,10 @@ async def daily(ctx):
         timestamp=discord.utils.utcnow()
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.add_field(name="المكافأة", value=f"**+{reward:,}**\n{COIN_NAME}", inline=True)
-    embed.add_field(name="رصيدك الآن", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
-    embed.add_field(name="Level bonus", value=f"Level `{level}`", inline=True)
-    embed.set_footer(text="تقدر تاخذها كل ساعة، وكل ما زاد لفلك تزيد المكافأة شوي")
+    embed.add_field(name="🎁 Reward", value=money_delta(reward), inline=True)
+    embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
+    embed.add_field(name="🏅 Level Bonus", value=f"Level **{level}**", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • كل ساعة تقدر تاخذ المكافأة")
     await ctx.send(embed=embed)
 
 
@@ -3388,16 +3488,16 @@ async def richest(ctx):
 
     for i, (user_id, balance_amount) in enumerate(rows, start=1):
         icon = medals[i - 1] if i <= 3 else f"`#{i}`"
-        text += f"{icon} <@{user_id}> — **{balance_amount:,}** {COIN_NAME}\n"
+        text += f"{icon} <@{user_id}> — {coin_line(balance_amount)} `({short_money(balance_amount)})`\n"
 
     embed = discord.Embed(
-        title=f"💎 Richest Members",
+        title=f"💎 Richest Wallets",
         description=text,
         color=COLOR_YELLOW,
         timestamp=discord.utils.utcnow()
     )
-    embed.add_field(name="🏦 Total Economy", value=f"**{total:,}** {COIN_NAME}", inline=False)
-    embed.set_footer(text=f"{BOT_BRAND} | Top 10 Economy")
+    embed.add_field(name="🏦 Total Economy", value=coin_line(total), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Economy Leaderboard")
     await ctx.send(embed=embed)
 
 
@@ -3478,31 +3578,41 @@ async def gambling_help(ctx):
         return
 
     embed = discord.Embed(
-        title="🎰 شرح نظام القمار",
+        title="🎰 Casino Guide",
         description=(
-            f"القمار هنا بعملة البوت فقط: **{COIN_NAME}**\n"
-            "ما فيه حد أعلى للرهان، تقدر تدخل بأي مبلغ عندك.\n"
-            f"بين كل محاولة ومحاولة فيه **{GAMBLE_COOLDOWN_SECONDS} ثواني** فقط."
+            f"القمار هنا بعملة البوت فقط: {ECONOMY_EMOJI} **{COIN_NAME}**\n"
+            "ما فيه حد أعلى للرهان، تدخل بأي مبلغ موجود في محفظتك.\n"
+            f"الانتظار بين كل محاولة ومحاولة: **{GAMBLE_COOLDOWN_SECONDS} ثواني**."
         ),
         color=COLOR_PURPLE,
         timestamp=discord.utils.utcnow()
     )
     embed.add_field(
-        name="🎲 الأوامر",
-        value=(
-            "`!حظ 500` — 50% تفوز و50% تخسر\n"
-            "`!دبل 500` — ربح أقوى لكن احتمال الخسارة أعلى\n"
-            "`!سلوت 500` — 3 رموز نفس بعض ربح كبير، 2 نفس بعض ربح بسيط\n"
-            "`!وجه 500 ملك` — اختار ملك أو كتابة"
-        ),
+        name="🎲 Lucky Roll",
+        value="`!حظ 500` — 50% فوز / 50% خسارة",
+        inline=False
+    )
+    embed.add_field(
+        name="💎 Double Risk",
+        value="`!دبل 500` — 45% فوز / 55% خسارة",
+        inline=False
+    )
+    embed.add_field(
+        name="🎰 Slot Machine",
+        value="`!سلوت 500` — 3 نفس بعض = x5، رمزين = x2",
+        inline=False
+    )
+    embed.add_field(
+        name="🪙 Coin Flip",
+        value="`!وجه 500 ملك` أو `!وجه 500 كتابة`",
         inline=False
     )
     embed.add_field(
         name="💡 اختصارات المبلغ",
-        value="تقدر تكتب `10k` بدل `10000` و `1m` بدل `1000000`.",
+        value="`10k` = 10,000 • `1m` = 1,000,000 • مثال: `!حظ 25k`",
         inline=False
     )
-    embed.set_footer(text=f"{BOT_BRAND} | Gambling Guide")
+    embed.set_footer(text=f"{BOT_BRAND} • Casino")
     await ctx.send(embed=embed)
 
 
@@ -3519,24 +3629,28 @@ async def gamble_luck(ctx, amount=None):
         payout = bet * 2
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
-            "🎲 حظك فاز!",
-            f"فزت وخذيت دبل الرهان.",
+            "🎲 Lucky Roll",
+            "✅ **WIN** — فزت بالدبل.",
             COLOR_GREEN,
             ctx.author,
             bet,
             result_amount=bet,
-            balance=balance
+            balance=balance,
+            details="Chance: **50%** • Payout: **x2**",
+            game_name="Lucky Roll"
         )
     else:
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
-            "🎲 حظك خسر",
-            "راحت عليك هالمرة.",
+            "🎲 Lucky Roll",
+            "❌ **LOSE** — راحت عليك هالمرة.",
             COLOR_RED,
             ctx.author,
             bet,
             result_amount=-bet,
-            balance=balance
+            balance=balance,
+            details="Chance: **50%** • Better luck next time",
+            game_name="Lucky Roll"
         )
 
     await ctx.send(embed=embed)
@@ -3555,24 +3669,28 @@ async def gamble_double(ctx, amount=None):
         payout = bet * 2
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
-            "💎 دبل ناجح!",
-            "دخلت مخاطرة وفزت بالدبل.",
+            "💎 Double Risk",
+            "✅ **DOUBLE HIT** — مخاطرة وطلعت لك.",
             COLOR_GREEN,
             ctx.author,
             bet,
             result_amount=bet,
-            balance=balance
+            balance=balance,
+            details="Chance: **45%** • Payout: **x2**",
+            game_name="Double Risk"
         )
     else:
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
-            "💥 الدبل فشل",
-            "المخاطرة ما ضبطت.",
+            "💎 Double Risk",
+            "❌ **BUST** — الدبل ما ضبط.",
             COLOR_RED,
             ctx.author,
             bet,
             result_amount=-bet,
-            balance=balance
+            balance=balance,
+            details="Chance: **45%** • Risk: High",
+            game_name="Double Risk"
         )
 
     await ctx.send(embed=embed)
@@ -3589,42 +3707,58 @@ async def gamble_slot(ctx, amount=None):
     remove_money(ctx.author.id, bet)
 
     unique = len(set(roll))
+    machine = slot_box(roll)
 
     if unique == 1:
         multiplier = 5
         payout = bet * multiplier
         balance = add_money(ctx.author.id, payout)
         result = payout - bet
-        title = "🎰 JACKPOT!"
-        desc = f"{' '.join(roll)}\nثلاثة نفس بعض! ربحت x{multiplier}."
+        title = "🎰 SLOT MACHINE — JACKPOT"
+        status = f"🔥 **JACKPOT!**\n{machine}"
+        details = f"Three match • Reward: **x{multiplier}**"
         color = COLOR_GREEN
     elif unique == 2:
         multiplier = 2
         payout = bet * multiplier
         balance = add_money(ctx.author.id, payout)
         result = payout - bet
-        title = "🎰 ربح صغير"
-        desc = f"{' '.join(roll)}\nطلعت لك رمزين نفس بعض، ربحت x{multiplier}."
+        title = "🎰 SLOT MACHINE — SMALL WIN"
+        status = f"✅ **TWO MATCH**\n{machine}"
+        details = f"Two match • Reward: **x{multiplier}**"
         color = COLOR_YELLOW
     else:
         balance = get_balance(ctx.author.id)
         result = -bet
-        title = "🎰 خسارة"
-        desc = f"{' '.join(roll)}\nما ضبطت هالمرة."
+        title = "🎰 SLOT MACHINE — LOST"
+        status = f"❌ **NO MATCH**\n{machine}"
+        details = "No match • Reward: **0**"
         color = COLOR_RED
 
-    embed = gambling_embed(title, desc, color, ctx.author, bet, result_amount=result, balance=balance)
+    embed = gambling_embed(
+        title,
+        status,
+        color,
+        ctx.author,
+        bet,
+        result_amount=result,
+        balance=balance,
+        details=details,
+        game_name="Slot Machine"
+    )
     await ctx.send(embed=embed)
 
 
 @bot.command(name="وجه", aliases=["flip", "coinflip"])
 async def gamble_flip(ctx, amount=None, choice=None):
-    bet = await validate_gamble(ctx, amount)
-    if bet is None:
+    if not choice:
+        if not await require_gambling_channel(ctx):
+            return
+        await ctx.send("استخدم: `!وجه 500 ملك` أو `!وجه 500 كتابة`")
         return
 
-    if not choice:
-        await ctx.send("استخدم: `!وجه 500 ملك` أو `!وجه 500 كتابة`")
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
         return
 
     choice = str(choice).lower().strip()
@@ -3643,28 +3777,34 @@ async def gamble_flip(ctx, amount=None, choice=None):
     result = random.choice(["ملك", "كتابة"])
     win = result == user_choice
 
+    details = f"Your pick: **{user_choice}** • Result: **{result}**"
+
     if win:
         payout = bet * 2
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
-            "🪙 توقعت صح!",
-            f"اختيارك: **{user_choice}**\nالنتيجة: **{result}**",
+            "🪙 Coin Flip",
+            "✅ **CORRECT PICK** — توقعت صح.",
             COLOR_GREEN,
             ctx.author,
             bet,
             result_amount=bet,
-            balance=balance
+            balance=balance,
+            details=details,
+            game_name="Coin Flip"
         )
     else:
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
-            "🪙 توقعت غلط",
-            f"اختيارك: **{user_choice}**\nالنتيجة: **{result}**",
+            "🪙 Coin Flip",
+            "❌ **WRONG PICK** — توقعت غلط.",
             COLOR_RED,
             ctx.author,
             bet,
             result_amount=-bet,
-            balance=balance
+            balance=balance,
+            details=details,
+            game_name="Coin Flip"
         )
 
     await ctx.send(embed=embed)
