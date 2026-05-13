@@ -28,6 +28,8 @@ LEAVE_INFO_CHANNEL_ID = 1504063808656773170
 
 GAME_VOICE_CATEGORY_ID = 1504071883006677172
 
+LOGS_CATEGORY_ID = 1504063695062306948
+
 OWNER_USERNAMES = ["jr_7", "jbh.1"]
 
 BYPASS_USER_IDS = {
@@ -37,6 +39,7 @@ BYPASS_USER_IDS = {
 DB_FILE = "nm_system.db"
 WARNINGS_FILE = "warnings.json"
 GAME_ROLES_FILE = "game_roles.json"
+LOG_CHANNELS_FILE = "log_channels.json"
 
 PREFIX = "!"
 
@@ -57,6 +60,18 @@ COLOR_ORANGE = discord.Color.orange()
 protection_enabled = True
 user_message_times = {}
 xp_cooldowns = {}
+
+LOG_CHANNEL_NAMES = {
+    "message": "nm-message-logs",
+    "member": "nm-member-logs",
+    "moderation": "nm-moderation-logs",
+    "role": "nm-role-logs",
+    "channel": "nm-channel-logs",
+    "voice": "nm-voice-logs",
+    "server": "nm-server-logs",
+    "game": "nm-game-logs",
+    "giveaway": "nm-giveaway-logs",
+}
 
 GAME_ROLES = {
     "gta": {"name": "GTA", "emoji": "🚗"},
@@ -80,8 +95,6 @@ GAME_ROLES = {
     "the_finals": {"name": "The Finals", "emoji": "💥"},
     "helldivers": {"name": "Helldivers 2", "emoji": "🌌"},
 }
-
-GAME_ROLE_IDS = {}
 
 bad_words = [
     "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب",
@@ -128,6 +141,7 @@ def save_json(file_name, data):
 
 warnings = load_json(WARNINGS_FILE, {})
 GAME_ROLE_IDS = load_json(GAME_ROLES_FILE, {})
+LOG_CHANNEL_IDS = load_json(LOG_CHANNELS_FILE, {})
 
 
 def save_warnings():
@@ -136,6 +150,10 @@ def save_warnings():
 
 def save_game_roles():
     save_json(GAME_ROLES_FILE, GAME_ROLE_IDS)
+
+
+def save_log_channels():
+    save_json(LOG_CHANNELS_FILE, LOG_CHANNEL_IDS)
 
 
 # =========================
@@ -348,13 +366,13 @@ async def get_channel_by_id(guild, channel_id):
     if not channel_id:
         return None
 
-    channel = guild.get_channel(channel_id)
+    channel = guild.get_channel(int(channel_id))
 
     if channel:
         return channel
 
     try:
-        channel = await guild.fetch_channel(channel_id)
+        channel = await guild.fetch_channel(int(channel_id))
         return channel
     except:
         return None
@@ -372,7 +390,61 @@ async def send_to_channel(guild, channel_id, embed=None, content=None, view=None
         return None
 
 
-async def get_log_channel(guild):
+async def create_or_find_log_channels(guild):
+    category = guild.get_channel(LOGS_CATEGORY_ID)
+
+    if not category or not isinstance(category, discord.CategoryChannel):
+        category = None
+
+    created_or_found = {}
+
+    for log_key, channel_name in LOG_CHANNEL_NAMES.items():
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+
+        if not channel:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(
+                    view_channel=False,
+                    send_messages=False
+                ),
+                guild.me: discord.PermissionOverwrite(
+                    view_channel=True,
+                    send_messages=True,
+                    embed_links=True,
+                    manage_channels=True
+                )
+            }
+
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason="NM System log channel setup"
+            )
+
+        else:
+            if category and channel.category != category:
+                try:
+                    await channel.edit(category=category)
+                except:
+                    pass
+
+        LOG_CHANNEL_IDS[log_key] = channel.id
+        created_or_found[log_key] = channel
+
+    save_log_channels()
+    return created_or_found
+
+
+async def get_log_channel_by_type(guild, log_type="general"):
+    channel_id = LOG_CHANNEL_IDS.get(log_type)
+
+    if channel_id:
+        channel = guild.get_channel(int(channel_id))
+
+        if channel:
+            return channel
+
     if LOG_CHANNEL_ID:
         channel = await get_channel_by_id(guild, LOG_CHANNEL_ID)
 
@@ -388,8 +460,8 @@ async def get_log_channel(guild):
     return None
 
 
-async def send_log(guild, title, description, color=COLOR_GREY):
-    channel = await get_log_channel(guild)
+async def send_log(guild, title, description, color=COLOR_GREY, log_type="general"):
+    channel = await get_log_channel_by_type(guild, log_type)
 
     if not channel:
         return
@@ -401,7 +473,7 @@ async def send_log(guild, title, description, color=COLOR_GREY):
         timestamp=discord.utils.utcnow()
     )
 
-    embed.set_footer(text="NM System | Audit Logs")
+    embed.set_footer(text=f"NM System | {log_type} logs")
 
     try:
         await channel.send(embed=embed)
@@ -497,7 +569,8 @@ async def handle_violation(message, reason):
 **الرسالة:**
 ```{clean_text(old_message, 800)}```
 """,
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="moderation"
     )
 
 
@@ -604,7 +677,8 @@ async def create_game_voice_channel(guild, source_channel, game, player_ids, max
 **اللاعبين:**
 {players_text}
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="game"
     )
 
     return voice_channel
@@ -985,7 +1059,8 @@ async def on_message_delete(message):
 **المحتوى:**
 ```{clean_text(message.content, 900)}```
 """,
-        COLOR_RED
+        COLOR_RED,
+        log_type="message"
     )
 
 
@@ -1011,7 +1086,8 @@ async def on_message_edit(before, after):
 **بعد:**
 ```{clean_text(after.content, 700)}```
 """,
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="message"
     )
 
 
@@ -1031,7 +1107,8 @@ async def on_member_join(member):
 **ID:** `{member.id}`
 **الحساب انشأ:** <t:{created}:F> | <t:{created}:R>
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="member"
     )
 
 
@@ -1146,7 +1223,8 @@ async def on_member_remove(member):
 **الرتب اللي كانت معه قبل الخروج:**
 {roles_text}
 """,
-        color
+        color,
+        log_type="member"
     )
 
 
@@ -1168,7 +1246,8 @@ async def on_member_ban(guild, user):
 **بواسطة:** {executor_text}
 **السبب:** {reason_text}
 """,
-        COLOR_RED
+        COLOR_RED,
+        log_type="member"
     )
 
 
@@ -1190,7 +1269,8 @@ async def on_member_unban(guild, user):
 **بواسطة:** {executor_text}
 **السبب:** {reason_text}
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="member"
     )
 
 
@@ -1219,7 +1299,8 @@ async def on_member_update(before, after):
 **الرول:** {roles_text}
 **بواسطة:** {executor_text}
 """,
-                COLOR_GREEN
+                COLOR_GREEN,
+                log_type="role"
             )
 
     if removed:
@@ -1236,7 +1317,8 @@ async def on_member_update(before, after):
 **الرول:** {roles_text}
 **بواسطة:** {executor_text}
 """,
-                COLOR_RED
+                COLOR_RED,
+                log_type="role"
             )
 
     if before.nick != after.nick:
@@ -1248,7 +1330,8 @@ async def on_member_update(before, after):
 **قبل:** `{before.nick}`
 **بعد:** `{after.nick}`
 """,
-            COLOR_YELLOW
+            COLOR_YELLOW,
+            log_type="member"
         )
 
     if before.timed_out_until != after.timed_out_until:
@@ -1260,14 +1343,16 @@ async def on_member_update(before, after):
 **العضو:** {after.mention}
 **ينتهي:** <t:{int(after.timed_out_until.timestamp())}:R>
 """,
-                COLOR_RED
+                COLOR_RED,
+                log_type="moderation"
             )
         else:
             await send_log(
                 after.guild,
                 "✅ فك تايم أوت",
                 f"**العضو:** {after.mention}",
-                COLOR_GREEN
+                COLOR_GREEN,
+                log_type="moderation"
             )
 
 
@@ -1287,7 +1372,8 @@ async def on_guild_channel_create(channel):
 **الاسم:** `{channel.name}`
 **بواسطة:** {executor_text}
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="channel"
     )
 
 
@@ -1306,7 +1392,8 @@ async def on_guild_channel_delete(channel):
 **الاسم:** `{channel.name}`
 **بواسطة:** {executor_text}
 """,
-        COLOR_RED
+        COLOR_RED,
+        log_type="channel"
     )
 
 
@@ -1338,7 +1425,8 @@ async def on_guild_channel_update(before, after):
         after.guild,
         "📝 تعديل روم",
         "\n".join(changes) + f"\n**بواسطة:** {executor_text}",
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="channel"
     )
 
 
@@ -1358,7 +1446,8 @@ async def on_guild_role_create(role):
 **الاسم:** `{role.name}`
 **بواسطة:** {executor_text}
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="role"
     )
 
 
@@ -1377,7 +1466,8 @@ async def on_guild_role_delete(role):
 **الاسم:** `{role.name}`
 **بواسطة:** {executor_text}
 """,
-        COLOR_RED
+        COLOR_RED,
+        log_type="role"
     )
 
 
@@ -1419,7 +1509,8 @@ async def on_guild_role_update(before, after):
 
 **بواسطة:** {executor_text}
 """,
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="role"
     )
 
 
@@ -1433,7 +1524,8 @@ async def on_voice_state_update(member, before, after):
             member.guild,
             "🔊 دخول فويس",
             f"**العضو:** {member.mention}\n**الروم:** `{after.channel.name}`",
-            COLOR_GREEN
+            COLOR_GREEN,
+            log_type="voice"
         )
 
     elif before.channel is not None and after.channel is None:
@@ -1441,7 +1533,8 @@ async def on_voice_state_update(member, before, after):
             member.guild,
             "🔇 خروج من فويس",
             f"**العضو:** {member.mention}\n**الروم:** `{before.channel.name}`",
-            COLOR_GREY
+            COLOR_GREY,
+            log_type="voice"
         )
 
     elif before.channel != after.channel:
@@ -1453,7 +1546,8 @@ async def on_voice_state_update(member, before, after):
 **من:** `{before.channel.name}`
 **إلى:** `{after.channel.name}`
 """,
-            COLOR_BLUE
+            COLOR_BLUE,
+            log_type="voice"
         )
 
 
@@ -1477,7 +1571,8 @@ async def on_guild_update(before, after):
         after,
         "⚙️ تعديل السيرفر",
         "\n".join(changes),
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="server"
     )
 
 
@@ -1490,6 +1585,10 @@ async def help_cmd(ctx):
     embed = discord.Embed(title="📖 أوامر NM System", color=COLOR_PURPLE)
 
     embed.description = """
+**إنشاء وإعداد**
+`!انشاء` - ينشئ رومات اللوقات فقط
+`!اعداد` - يجهز الرولات والشروحات واللوحات
+
 **عامة**
 `!بنق`
 `!هلا`
@@ -1510,7 +1609,6 @@ async def help_cmd(ctx):
 `!لعب Valorant 5 ملاحظة`
 `!سحب Nitro 1h 1`
 `!رولات`
-`!اعداد`
 
 **Level**
 `!لفلي`
@@ -1526,6 +1624,66 @@ async def help_cmd(ctx):
 """
 
     await ctx.send(embed=embed)
+
+
+@bot.command(name="انشاء", aliases=["create_logs"])
+@commands.has_permissions(administrator=True)
+async def create_logs_command(ctx):
+    guild = ctx.guild
+
+    if not guild or guild.id != GUILD_ID:
+        await ctx.send("❌ هذا الأمر يشتغل بس في السيرفر الأساسي.")
+        return
+
+    loading = await ctx.send("⚙️ جاري إنشاء رومات اللوقات فقط...")
+
+    try:
+        log_channels = await create_or_find_log_channels(guild)
+
+        embed = discord.Embed(
+            title="✅ تم إنشاء رومات اللوقات",
+            description="تم إنشاء/تحديث رومات اللوقات داخل الكاتقوري المحدد.",
+            color=COLOR_GREEN,
+            timestamp=discord.utils.utcnow()
+        )
+
+        logs_text = ""
+
+        for log_key, channel in log_channels.items():
+            logs_text += f"• `{log_key}` → {channel.mention}\n"
+
+        embed.add_field(
+            name="📁 رومات اللوقات",
+            value=logs_text[:1000],
+            inline=False
+        )
+
+        embed.add_field(
+            name="📌 ملاحظة",
+            value="إذا الروم موجود من قبل، البوت ما يكرره. يستخدم الموجود ويحفظ ID حقه.",
+            inline=False
+        )
+
+        embed.set_footer(text="NM System | Logs Setup")
+
+        await loading.edit(content="✅ تم إنشاء رومات اللوقات بنجاح.")
+        await ctx.send(embed=embed)
+
+        await send_log(
+            guild,
+            "⚙️ إنشاء رومات اللوقات",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**الأمر:** `!انشاء`
+**الكاتقوري:** `{LOGS_CATEGORY_ID}`
+**عدد رومات اللوقات:** `{len(log_channels)}`
+""",
+            COLOR_BLUE,
+            log_type="server"
+        )
+
+    except Exception as e:
+        await loading.edit(content=f"❌ صار خطأ أثناء إنشاء رومات اللوقات:\n```{e}```")
 
 
 @bot.command(name="بنق", aliases=["ping"])
@@ -1603,7 +1761,8 @@ async def suggest(ctx, *, idea=None):
         ctx.guild,
         "💡 اقتراح جديد",
         f"**من:** {ctx.author.mention}\n**الاقتراح:** {idea[:800]}",
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="server"
     )
 
 
@@ -1672,7 +1831,8 @@ async def play(ctx, game=None, players: int = None, *, note=""):
 **العدد:** {players}
 **ملاحظة:** {note or 'لا يوجد'}
 """,
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="game"
     )
 
     if players == 1:
@@ -1725,7 +1885,8 @@ async def giveaway(ctx, prize=None, duration=None, winners: int = 1):
         ctx.guild,
         "🎁 سحب جديد",
         f"**بواسطة:** {ctx.author.mention}\n**الجائزة:** {prize}\n**المدة:** {duration}\n**الفائزين:** {winners}",
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="giveaway"
     )
 
     await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=seconds))
@@ -1741,6 +1902,14 @@ async def giveaway(ctx, prize=None, duration=None, winners: int = 1):
                 description=f"الجائزة: **{prize}**\nمافي أحد دخل.",
                 color=COLOR_RED
             )
+        )
+
+        await send_log(
+            ctx.guild,
+            "🎁 انتهى السحب بدون مشاركين",
+            f"**الجائزة:** {prize}",
+            COLOR_RED,
+            log_type="giveaway"
         )
         return
 
@@ -1759,6 +1928,14 @@ async def giveaway(ctx, prize=None, duration=None, winners: int = 1):
         GIVEAWAYS_CHANNEL_ID,
         content=winners_text,
         embed=result_embed
+    )
+
+    await send_log(
+        ctx.guild,
+        "🎉 انتهى السحب",
+        f"**الجائزة:** {prize}\n**الفائزين:** {winners_text}",
+        COLOR_GREEN,
+        log_type="giveaway"
     )
 
 
@@ -1895,7 +2072,8 @@ async def warn(ctx, member: discord.Member, *, reason="بدون سبب"):
 **السبب:** {reason}
 **الإجراء:** {punishment}
 """,
-        COLOR_YELLOW
+        COLOR_YELLOW,
+        log_type="moderation"
     )
 
 
@@ -1949,6 +2127,14 @@ async def reset_warnings(ctx, member: discord.Member):
         )
     )
 
+    await send_log(
+        ctx.guild,
+        "✅ تصفير تحذيرات",
+        f"**بواسطة:** {ctx.author.mention}\n**العضو:** {member.mention}",
+        COLOR_GREEN,
+        log_type="moderation"
+    )
+
 
 @bot.command(name="مسح", aliases=["clear"])
 @commands.has_permissions(manage_messages=True)
@@ -1968,7 +2154,8 @@ async def clear(ctx, amount: int = 5):
         ctx.guild,
         "🧹 مسح رسائل",
         f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}\n**العدد:** {amount}",
-        COLOR_GREY
+        COLOR_GREY,
+        log_type="message"
     )
 
 
@@ -1989,7 +2176,8 @@ async def lock(ctx):
         ctx.guild,
         "🔒 قفل روم",
         f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}",
-        COLOR_RED
+        COLOR_RED,
+        log_type="channel"
     )
 
 
@@ -2010,7 +2198,8 @@ async def unlock(ctx):
         ctx.guild,
         "🔓 فتح روم",
         f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}",
-        COLOR_GREEN
+        COLOR_GREEN,
+        log_type="channel"
     )
 
 
@@ -2018,6 +2207,8 @@ async def unlock(ctx):
 @commands.has_permissions(administrator=True)
 async def panel(ctx):
     embed = discord.Embed(title="🎛️ لوحة NM System", color=COLOR_PURPLE)
+    embed.add_field(name="📁 إنشاء لوقات", value="`!انشاء`", inline=True)
+    embed.add_field(name="⚙️ إعداد النظام", value="`!اعداد`", inline=True)
     embed.add_field(name="🛡️ الحماية", value="`!حماية`", inline=True)
     embed.add_field(name="📊 اللفل", value="`!ترتيب`", inline=True)
     embed.add_field(name="🎮 لعب", value="`!لعب Valorant 5`", inline=True)
@@ -2025,7 +2216,6 @@ async def panel(ctx):
     embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
     embed.add_field(name="🎁 سحب", value="`!سحب Nitro 1h 1`", inline=True)
     embed.add_field(name="📢 إعلان", value="`!اعلان نص الإعلان`", inline=True)
-    embed.add_field(name="⚙️ إعداد", value="`!اعداد`", inline=True)
     embed.add_field(name="📖 مساعدة", value="`!مساعدة`", inline=True)
 
     await ctx.send(embed=embed)
@@ -2061,7 +2251,8 @@ async def announce(ctx, *, text=None):
         ctx.guild,
         "📢 إعلان جديد",
         f"**بواسطة:** {ctx.author.mention}\n**الإعلان:** {clean_text(text, 900)}",
-        COLOR_BLUE
+        COLOR_BLUE,
+        log_type="server"
     )
 
 
@@ -2283,12 +2474,6 @@ async def setup_posts(ctx):
             inline=False
         )
 
-        leave_info_embed.add_field(
-            name="🔐 ملاحظة",
-            value="هذا الروم يفضل يكون للإدارة فقط لأنه يحتوي معلومات لوق.",
-            inline=False
-        )
-
         leave_info_embed.set_footer(text="NM System | nm_leave_info")
 
         await send_to_channel(
@@ -2302,6 +2487,18 @@ async def setup_posts(ctx):
             description="هذي أهم أوامر البوت:",
             color=COLOR_GREY,
             timestamp=discord.utils.utcnow()
+        )
+
+        commands_embed.add_field(
+            name="📁 اللوقات",
+            value="`!انشاء`",
+            inline=True
+        )
+
+        commands_embed.add_field(
+            name="⚙️ الإعداد",
+            value="`!اعداد`",
+            inline=True
         )
 
         commands_embed.add_field(
@@ -2350,25 +2547,13 @@ async def setup_posts(ctx):
             inline=True
         )
 
-        commands_embed.add_field(
-            name="😎 عامة",
-            value=(
-                "`!بنق`\n"
-                "`!هلا`\n"
-                "`!طقطق @user`\n"
-                "`!تقييم الشي`\n"
-                "`!لوحة`"
-            ),
-            inline=True
-        )
-
         commands_embed.set_footer(text="NM System | Setup Completed")
 
         await ctx.send(embed=commands_embed)
 
         await send_log(
             guild,
-            "⚙️ إعداد الرومات والرتب",
+            "⚙️ إعداد النظام",
             f"""
 **بواسطة:** {ctx.author.mention}
 **الأمر:** `!اعداد`
@@ -2386,7 +2571,8 @@ async def setup_posts(ctx):
 
 **عدد رتب الألعاب:** `{len(game_roles)}`
 """,
-            COLOR_BLUE
+            COLOR_BLUE,
+            log_type="server"
         )
 
         await loading.edit(content="✅ تم تجهيز رتب الألعاب وتنزيل إعدادات الرومات ولوحة الرولات بنجاح.")
