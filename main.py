@@ -76,6 +76,8 @@ COIN_NAME = "Retard coin"
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
+GAMBLING_CHANNEL_ID = 1504165660341571684
+GAMBLE_COOLDOWN_SECONDS = 2
 ECONOMY_EMOJI = "🪙"
 LEVEL_EMOJI = "📊"
 BOT_BRAND = "Retards System"
@@ -93,6 +95,7 @@ protection_enabled = True
 user_message_times = {}
 xp_cooldowns = {}
 coin_cooldowns = {}
+gamble_cooldowns = {}
 game_room_delete_tasks = {}
 memory_backup_task = None
 economy_explain_task = None
@@ -705,6 +708,110 @@ async def require_commands_channel(ctx):
     return False
 
 
+async def require_gambling_channel(ctx):
+    if ctx.channel.id == GAMBLING_CHANNEL_ID:
+        return True
+
+    embed = discord.Embed(
+        title="🎰 الروم الغلط",
+        description=f"أوامر القمار تشتغل فقط هنا: <#{GAMBLING_CHANNEL_ID}>",
+        color=COLOR_ORANGE
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Gambling")
+    await ctx.send(embed=embed, delete_after=8)
+    return False
+
+
+def parse_bet_amount(amount):
+    if amount is None:
+        return None
+
+    text = str(amount).lower().replace(",", "").strip()
+
+    multipliers = {
+        "k": 1_000,
+        "m": 1_000_000,
+        "b": 1_000_000_000,
+    }
+
+    try:
+        if text[-1:] in multipliers:
+            number = float(text[:-1])
+            return int(number * multipliers[text[-1]])
+
+        return int(text)
+    except:
+        return None
+
+
+def can_gamble_now(user_id):
+    now = time.time()
+    last = gamble_cooldowns.get(user_id, 0)
+
+    if now - last < GAMBLE_COOLDOWN_SECONDS:
+        return False, GAMBLE_COOLDOWN_SECONDS - (now - last)
+
+    gamble_cooldowns[user_id] = now
+    return True, 0
+
+
+async def validate_gamble(ctx, amount_text):
+    if not await require_gambling_channel(ctx):
+        return None
+
+    amount = parse_bet_amount(amount_text)
+
+    if amount is None:
+        await ctx.send("استخدم مبلغ صحيح. مثال: `!حظ 500` أو `!حظ 10k`")
+        return None
+
+    if amount <= 0:
+        await ctx.send("❌ مبلغ الرهان لازم يكون أكبر من صفر.")
+        return None
+
+    ok, remaining = can_gamble_now(ctx.author.id)
+
+    if not ok:
+        await ctx.send(f"⏳ انتظر **{remaining:.1f} ثانية** قبل القمار مرة ثانية.", delete_after=4)
+        return None
+
+    balance = get_balance(ctx.author.id)
+
+    if balance < amount:
+        embed = discord.Embed(
+            title="❌ رصيدك ما يكفي",
+            description=f"رصيدك الحالي: **{balance:,} {COIN_NAME}**\nالمبلغ المطلوب: **{amount:,} {COIN_NAME}**",
+            color=COLOR_RED,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} | Gambling")
+        await ctx.send(embed=embed)
+        return None
+
+    return amount
+
+
+def gambling_embed(title, description, color, member, bet, result_amount=None, balance=None):
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🎲 الرهان", value=f"**{bet:,}** {COIN_NAME}", inline=True)
+
+    if result_amount is not None:
+        sign = "+" if result_amount >= 0 else ""
+        embed.add_field(name="💸 النتيجة", value=f"**{sign}{result_amount:,}** {COIN_NAME}", inline=True)
+
+    if balance is not None:
+        embed.add_field(name="💰 رصيدك الآن", value=f"**{balance:,}** {COIN_NAME}", inline=False)
+
+    embed.set_footer(text=f"{BOT_BRAND} | Gambling | Cooldown {GAMBLE_COOLDOWN_SECONDS}s")
+    return embed
+
+
 async def dm_disabled_reply(ctx):
     await ctx.send(
         "❌ أوامر الخاص معطّلة حالياً لأن Discord حجز البوت بسبب نظام السبام.\n"
@@ -1153,6 +1260,19 @@ def build_economy_guide_embed(auto=False):
     embed.add_field(
         name="🔁 التحويل",
         value="`!تحويل @شخص 500` يحول فلوس لشخص ثاني.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🎰 القمار بعملة البوت",
+        value=(
+            f"روم القمار: <#{GAMBLING_CHANNEL_ID}>\n"
+            "`!شرح_القمار` شرح أوامر القمار\n"
+            "`!حظ 500` نسبة 50/50\n"
+            "`!دبل 500` أخطر، لكن يعطي دبل\n"
+            "`!سلوت 500` رموز وجوائز عشوائية\n"
+            "`!وجه 500 ملك` أو `!وجه 500 كتابة`"
+        ),
         inline=False
     )
 
@@ -2606,6 +2726,14 @@ async def help_cmd(ctx):
 `!تحويل @شخص 500`
 `!اغنى`
 
+**Gambling - في روم القمار فقط**
+`!شرح_القمار`
+`!حظ 500`
+`!دبل 500`
+`!سلوت 500`
+`!وجه 500 ملك`
+`!وجه 500 كتابة`
+
 **Economy Admin**
 `!اعطاءفلوس @شخص 1000`
 `!سحبفلوس @شخص 500`
@@ -3340,6 +3468,205 @@ async def admin_reset_money(ctx, member: discord.Member = None):
         timestamp=discord.utils.utcnow()
     )
     embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
+    await ctx.send(embed=embed)
+
+
+
+@bot.command(name="شرح_القمار", aliases=["قمار", "gambling", "gamblehelp"])
+async def gambling_help(ctx):
+    if not await require_gambling_channel(ctx):
+        return
+
+    embed = discord.Embed(
+        title="🎰 شرح نظام القمار",
+        description=(
+            f"القمار هنا بعملة البوت فقط: **{COIN_NAME}**\n"
+            "ما فيه حد أعلى للرهان، تقدر تدخل بأي مبلغ عندك.\n"
+            f"بين كل محاولة ومحاولة فيه **{GAMBLE_COOLDOWN_SECONDS} ثواني** فقط."
+        ),
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(
+        name="🎲 الأوامر",
+        value=(
+            "`!حظ 500` — 50% تفوز و50% تخسر\n"
+            "`!دبل 500` — ربح أقوى لكن احتمال الخسارة أعلى\n"
+            "`!سلوت 500` — 3 رموز نفس بعض ربح كبير، 2 نفس بعض ربح بسيط\n"
+            "`!وجه 500 ملك` — اختار ملك أو كتابة"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="💡 اختصارات المبلغ",
+        value="تقدر تكتب `10k` بدل `10000` و `1m` بدل `1000000`.",
+        inline=False
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Gambling Guide")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="حظ", aliases=["coin", "luck"])
+async def gamble_luck(ctx, amount=None):
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
+        return
+
+    remove_money(ctx.author.id, bet)
+    win = random.random() < 0.50
+
+    if win:
+        payout = bet * 2
+        balance = add_money(ctx.author.id, payout)
+        embed = gambling_embed(
+            "🎲 حظك فاز!",
+            f"فزت وخذيت دبل الرهان.",
+            COLOR_GREEN,
+            ctx.author,
+            bet,
+            result_amount=bet,
+            balance=balance
+        )
+    else:
+        balance = get_balance(ctx.author.id)
+        embed = gambling_embed(
+            "🎲 حظك خسر",
+            "راحت عليك هالمرة.",
+            COLOR_RED,
+            ctx.author,
+            bet,
+            result_amount=-bet,
+            balance=balance
+        )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="دبل", aliases=["double"])
+async def gamble_double(ctx, amount=None):
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
+        return
+
+    remove_money(ctx.author.id, bet)
+    win = random.random() < 0.45
+
+    if win:
+        payout = bet * 2
+        balance = add_money(ctx.author.id, payout)
+        embed = gambling_embed(
+            "💎 دبل ناجح!",
+            "دخلت مخاطرة وفزت بالدبل.",
+            COLOR_GREEN,
+            ctx.author,
+            bet,
+            result_amount=bet,
+            balance=balance
+        )
+    else:
+        balance = get_balance(ctx.author.id)
+        embed = gambling_embed(
+            "💥 الدبل فشل",
+            "المخاطرة ما ضبطت.",
+            COLOR_RED,
+            ctx.author,
+            bet,
+            result_amount=-bet,
+            balance=balance
+        )
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="سلوت", aliases=["slot", "slots"])
+async def gamble_slot(ctx, amount=None):
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
+        return
+
+    symbols = ["🍒", "🍋", "🍇", "🔔", "💎", "7️⃣"]
+    roll = [random.choice(symbols) for _ in range(3)]
+    remove_money(ctx.author.id, bet)
+
+    unique = len(set(roll))
+
+    if unique == 1:
+        multiplier = 5
+        payout = bet * multiplier
+        balance = add_money(ctx.author.id, payout)
+        result = payout - bet
+        title = "🎰 JACKPOT!"
+        desc = f"{' '.join(roll)}\nثلاثة نفس بعض! ربحت x{multiplier}."
+        color = COLOR_GREEN
+    elif unique == 2:
+        multiplier = 2
+        payout = bet * multiplier
+        balance = add_money(ctx.author.id, payout)
+        result = payout - bet
+        title = "🎰 ربح صغير"
+        desc = f"{' '.join(roll)}\nطلعت لك رمزين نفس بعض، ربحت x{multiplier}."
+        color = COLOR_YELLOW
+    else:
+        balance = get_balance(ctx.author.id)
+        result = -bet
+        title = "🎰 خسارة"
+        desc = f"{' '.join(roll)}\nما ضبطت هالمرة."
+        color = COLOR_RED
+
+    embed = gambling_embed(title, desc, color, ctx.author, bet, result_amount=result, balance=balance)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="وجه", aliases=["flip", "coinflip"])
+async def gamble_flip(ctx, amount=None, choice=None):
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
+        return
+
+    if not choice:
+        await ctx.send("استخدم: `!وجه 500 ملك` أو `!وجه 500 كتابة`")
+        return
+
+    choice = str(choice).lower().strip()
+    heads_words = ["ملك", "وجه", "heads", "head", "h"]
+    tails_words = ["كتابة", "كتابه", "tails", "tail", "t"]
+
+    if choice in heads_words:
+        user_choice = "ملك"
+    elif choice in tails_words:
+        user_choice = "كتابة"
+    else:
+        await ctx.send("اختيارك لازم يكون `ملك` أو `كتابة`.")
+        return
+
+    remove_money(ctx.author.id, bet)
+    result = random.choice(["ملك", "كتابة"])
+    win = result == user_choice
+
+    if win:
+        payout = bet * 2
+        balance = add_money(ctx.author.id, payout)
+        embed = gambling_embed(
+            "🪙 توقعت صح!",
+            f"اختيارك: **{user_choice}**\nالنتيجة: **{result}**",
+            COLOR_GREEN,
+            ctx.author,
+            bet,
+            result_amount=bet,
+            balance=balance
+        )
+    else:
+        balance = get_balance(ctx.author.id)
+        embed = gambling_embed(
+            "🪙 توقعت غلط",
+            f"اختيارك: **{user_choice}**\nالنتيجة: **{result}**",
+            COLOR_RED,
+            ctx.author,
+            bet,
+            result_amount=-bet,
+            balance=balance
+        )
+
     await ctx.send(embed=embed)
 
 
