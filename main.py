@@ -38,6 +38,12 @@ BYPASS_USER_IDS = {
     1125198908231004191
 }
 
+DM_OWNER_IDS = {
+    1125198908231004191,
+}
+
+DM_DELAY_SECONDS = 2
+
 DB_FILE = "nm_system.db"
 WARNINGS_FILE = "warnings.json"
 LOG_CHANNELS_FILE = "log_channels.json"
@@ -454,6 +460,47 @@ def clean_text(text, limit=900):
         text = text[:limit] + "..."
 
     return text
+
+
+def can_use_mass_dm(ctx):
+    if ctx.author.id in DM_OWNER_IDS:
+        return True
+
+    if ctx.guild and ctx.author.id == ctx.guild.owner_id:
+        return True
+
+    return False
+
+
+def split_dm_embed_text(text):
+    if "|" in text:
+        title, body = text.split("|", 1)
+        title = title.strip()
+        body = body.strip()
+    else:
+        title = "📩 رسالة من إدارة السيرفر"
+        body = text.strip()
+
+    if not title:
+        title = "📩 رسالة من إدارة السيرفر"
+
+    if not body:
+        body = "بدون محتوى"
+
+    return title, body
+
+
+async def send_private_message(target_member, title, body, sender):
+    embed = discord.Embed(
+        title=title,
+        description=body,
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.set_footer(text=f"NM System | Sent by {sender}")
+
+    await target_member.send(embed=embed)
 
 
 def clean_channel_name(name):
@@ -967,31 +1014,19 @@ class JoinPlayView(discord.ui.View):
     )
     async def join_play(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.cancelled:
-            await interaction.response.send_message(
-                "❌ التجمع ملغي.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ التجمع ملغي.", ephemeral=True)
             return
 
         if self.channel_created:
-            await interaction.response.send_message(
-                "❌ التجمع اكتمل وتم فتح الروم.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ التجمع اكتمل وتم فتح الروم.", ephemeral=True)
             return
 
         if interaction.user.id in self.players:
-            await interaction.response.send_message(
-                "✅ أنت داخل التجمع أصلًا.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("✅ أنت داخل التجمع أصلًا.", ephemeral=True)
             return
 
         if len(self.players) >= self.max_players:
-            await interaction.response.send_message(
-                "❌ التجمع اكتمل، ما تقدر تدخل.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ التجمع اكتمل، ما تقدر تدخل.", ephemeral=True)
             return
 
         self.players.add(interaction.user.id)
@@ -1027,10 +1062,7 @@ class JoinPlayView(discord.ui.View):
     )
     async def leave_play(self, interaction: discord.Interaction, button: discord.ui.Button):
         if self.cancelled:
-            await interaction.response.send_message(
-                "❌ التجمع ملغي.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ التجمع ملغي.", ephemeral=True)
             return
 
         if self.channel_created:
@@ -1048,10 +1080,7 @@ class JoinPlayView(discord.ui.View):
             return
 
         if interaction.user.id not in self.players:
-            await interaction.response.send_message(
-                "❌ أنت مو داخل التجمع.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("❌ أنت مو داخل التجمع.", ephemeral=True)
             return
 
         self.players.remove(interaction.user.id)
@@ -1061,10 +1090,7 @@ class JoinPlayView(discord.ui.View):
             status_text=f"🚪 {interaction.user.mention} طلع من التجمع."
         )
 
-        await interaction.response.send_message(
-            "✅ طلعت من التجمع.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("✅ طلعت من التجمع.", ephemeral=True)
 
     @discord.ui.button(
         label="إلغاء التجمع",
@@ -1099,32 +1125,14 @@ class JoinPlayView(discord.ui.View):
             timestamp=discord.utils.utcnow()
         )
 
-        embed.add_field(
-            name="👤 صاحب التجمع",
-            value=f"<@{self.host_id}>",
-            inline=True
-        )
-
-        embed.add_field(
-            name="👥 العدد قبل الإلغاء",
-            value=f"{len(self.players)}/{self.max_players}",
-            inline=True
-        )
-
-        embed.add_field(
-            name="👥 اللي كانوا داخلين",
-            value=players_text[:1000],
-            inline=False
-        )
-
+        embed.add_field(name="👤 صاحب التجمع", value=f"<@{self.host_id}>", inline=True)
+        embed.add_field(name="👥 العدد قبل الإلغاء", value=f"{len(self.players)}/{self.max_players}", inline=True)
+        embed.add_field(name="👥 اللي كانوا داخلين", value=players_text[:1000], inline=False)
         embed.set_footer(text="NM System | Looking For Game")
 
         await interaction.message.edit(embed=embed, view=self)
 
-        await interaction.response.send_message(
-            "✅ تم إلغاء التجمع.",
-            ephemeral=True
-        )
+        await interaction.response.send_message("✅ تم إلغاء التجمع.", ephemeral=True)
 
         await send_log(
             interaction.guild,
@@ -1171,19 +1179,13 @@ class GameRoleButton(discord.ui.Button):
         role_id = GAME_ROLE_IDS.get(self.role_key)
 
         if not role_id:
-            await interaction.response.send_message(
-                "⚠️ الرتبة غير موجودة في الكود.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("⚠️ الرتبة غير موجودة في الكود.", ephemeral=True)
             return
 
         role = interaction.guild.get_role(int(role_id))
 
         if not role:
-            await interaction.response.send_message(
-                "⚠️ ما لقيت الرتبة في السيرفر. تأكد من ID الرتبة.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر. تأكد من ID الرتبة.", ephemeral=True)
             return
 
         if role in interaction.user.roles:
@@ -1953,6 +1955,15 @@ async def help_cmd(ctx):
 `!سحب Nitro 1h 1`
 `!رولات`
 
+**رسائل الخاص**
+`!dm @user الرسالة`
+`!dmembed @user العنوان | الرسالة`
+`!dmtest العنوان | الرسالة`
+`!dmrole @role الرسالة`
+`!dmroleembed @role العنوان | الرسالة`
+`!dmall الرسالة`
+`!dmallembed العنوان | الرسالة`
+
 **Level**
 `!لفلي`
 `!لفل @شخص`
@@ -1995,18 +2006,12 @@ async def create_logs_command(ctx):
         for log_key, channel in log_channels.items():
             logs_text += f"• `{log_key}` → {channel.mention}\n"
 
-        embed.add_field(
-            name="📁 رومات اللوقات",
-            value=logs_text[:1000],
-            inline=False
-        )
-
+        embed.add_field(name="📁 رومات اللوقات", value=logs_text[:1000], inline=False)
         embed.add_field(
             name="📌 ملاحظة",
             value="إذا الروم موجود من قبل، البوت ما يكرره. يستخدم الموجود ويحفظ ID حقه.",
             inline=False
         )
-
         embed.set_footer(text="NM System | Logs Setup")
 
         await loading.edit(content="✅ تم إنشاء رومات اللوقات بنجاح.")
@@ -2101,39 +2106,11 @@ async def user_info(ctx, member: discord.Member = None):
         inline=False
     )
 
-    embed.add_field(
-        name="📊 اللفل",
-        value=(
-            f"**Level:** `{level_num}`\n"
-            f"**XP:** `{xp}/{needed}`"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="🚫 التحذيرات",
-        value=f"`{len(user_warnings)}` تحذير",
-        inline=True
-    )
-
-    embed.add_field(
-        name="⏳ تايم أوت",
-        value=timeout_text,
-        inline=True
-    )
-
-    embed.add_field(
-        name="🏷️ أعلى رتبة",
-        value=top_role,
-        inline=False
-    )
-
-    embed.add_field(
-        name=f"🎭 الرتب ({roles_count})",
-        value=roles_text,
-        inline=False
-    )
-
+    embed.add_field(name="📊 اللفل", value=f"**Level:** `{level_num}`\n**XP:** `{xp}/{needed}`", inline=True)
+    embed.add_field(name="🚫 التحذيرات", value=f"`{len(user_warnings)}` تحذير", inline=True)
+    embed.add_field(name="⏳ تايم أوت", value=timeout_text, inline=True)
+    embed.add_field(name="🏷️ أعلى رتبة", value=top_role, inline=False)
+    embed.add_field(name=f"🎭 الرتب ({roles_count})", value=roles_text, inline=False)
     embed.set_footer(text="NM System | User Info")
 
     await ctx.send(embed=embed)
@@ -2231,11 +2208,7 @@ async def play(ctx, game=None, players: int = None, *, note=""):
     embed.add_field(name="👥 اللي بيدخلون", value=f"• {ctx.author.mention}", inline=False)
 
     if players == 1:
-        embed.add_field(
-            name="🔒 الحالة",
-            value="اكتمل العدد، سيتم فتح الروم الخاص.",
-            inline=False
-        )
+        embed.add_field(name="🔒 الحالة", value="اكتمل العدد، سيتم فتح الروم الخاص.", inline=False)
 
     embed.set_footer(text="NM System | اضغط بدخل إذا بتشارك")
 
@@ -2390,6 +2363,409 @@ async def roles(ctx):
         await ctx.message.add_reaction("✅")
     else:
         await ctx.send(embed=embed, view=GameRolesView())
+
+
+@bot.command(name="dm")
+@commands.has_permissions(administrator=True)
+async def dm_user(ctx, member: discord.Member = None, *, message=None):
+    if not member or not message:
+        await ctx.send("استخدم: `!dm @user رسالتك`")
+        return
+
+    if member.bot:
+        await ctx.send("❌ ما أرسل للبوتات.")
+        return
+
+    title = "📩 رسالة من إدارة السيرفر"
+    body = message
+
+    try:
+        await send_private_message(member, title, body, ctx.author)
+
+        await ctx.send(f"✅ تم إرسال الرسالة لـ {member.mention}")
+
+        await send_log(
+            ctx.guild,
+            "📩 DM Sent",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**إلى:** {member.mention}
+
+**الرسالة:**
+```{clean_text(message, 800)}```
+""",
+            COLOR_BLUE,
+            log_type="server"
+        )
+
+    except discord.Forbidden:
+        await ctx.send("❌ ما قدرت أرسل له، غالبًا الخاص عنده مقفل.")
+    except Exception as e:
+        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+
+
+@bot.command(name="dmembed")
+@commands.has_permissions(administrator=True)
+async def dm_user_embed(ctx, member: discord.Member = None, *, text=None):
+    if not member or not text:
+        await ctx.send("استخدم: `!dmembed @user العنوان | الرسالة`")
+        return
+
+    if member.bot:
+        await ctx.send("❌ ما أرسل للبوتات.")
+        return
+
+    title, body = split_dm_embed_text(text)
+
+    try:
+        await send_private_message(member, title, body, ctx.author)
+
+        await ctx.send(f"✅ تم إرسال Embed DM لـ {member.mention}")
+
+        await send_log(
+            ctx.guild,
+            "📩 DM Embed Sent",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**إلى:** {member.mention}
+**العنوان:** `{title}`
+
+**الرسالة:**
+```{clean_text(body, 800)}```
+""",
+            COLOR_BLUE,
+            log_type="server"
+        )
+
+    except discord.Forbidden:
+        await ctx.send("❌ ما قدرت أرسل له، غالبًا الخاص عنده مقفل.")
+    except Exception as e:
+        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+
+
+@bot.command(name="dmtest")
+@commands.has_permissions(administrator=True)
+async def dm_test(ctx, *, text=None):
+    if not text:
+        await ctx.send("استخدم: `!dmtest العنوان | الرسالة` أو `!dmtest الرسالة`")
+        return
+
+    title, body = split_dm_embed_text(text)
+
+    try:
+        await send_private_message(ctx.author, title, body, ctx.author)
+        await ctx.send("✅ تم إرسال تجربة لك بالخاص.")
+
+        await send_log(
+            ctx.guild,
+            "🧪 DM Test",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**العنوان:** `{title}`
+
+**الرسالة:**
+```{clean_text(body, 800)}```
+""",
+            COLOR_BLUE,
+            log_type="server"
+        )
+
+    except discord.Forbidden:
+        await ctx.send("❌ ما قدرت أرسل لك، افتح الخاص من إعدادات السيرفر.")
+    except Exception as e:
+        await ctx.send(f"❌ صار خطأ:\n```{e}```")
+
+
+@bot.command(name="dmrole")
+@commands.has_permissions(administrator=True)
+async def dm_role(ctx, role: discord.Role = None, *, message=None):
+    if not role or not message:
+        await ctx.send("استخدم: `!dmrole @role رسالتك`")
+        return
+
+    title = "📩 رسالة من إدارة السيرفر"
+    body = message
+
+    members = [m for m in role.members if not m.bot]
+
+    if not members:
+        await ctx.send("❌ ما فيه أعضاء حقيقيين في هذي الرتبة.")
+        return
+
+    status_msg = await ctx.send(
+        f"📨 جاري الإرسال لأعضاء رتبة {role.mention}...\n"
+        f"العدد: `{len(members)}`"
+    )
+
+    sent = 0
+    failed = 0
+
+    for index, member in enumerate(members, start=1):
+        try:
+            await send_private_message(member, title, body, ctx.author)
+            sent += 1
+        except:
+            failed += 1
+
+        if index % 5 == 0 or index == len(members):
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"📨 جاري الإرسال لأعضاء رتبة {role.mention}...\n"
+                        f"التقدم: `{index}/{len(members)}`\n"
+                        f"وصل: `{sent}` | فشل: `{failed}`"
+                    )
+                )
+            except:
+                pass
+
+        await asyncio.sleep(DM_DELAY_SECONDS)
+
+    await status_msg.edit(
+        content=(
+            f"✅ انتهى الإرسال لرتبة {role.mention}\n"
+            f"وصل: `{sent}`\n"
+            f"فشل: `{failed}`"
+        )
+    )
+
+    await send_log(
+        ctx.guild,
+        "📩 DM Role Sent",
+        f"""
+**بواسطة:** {ctx.author.mention}
+**الرتبة:** {role.mention}
+**عدد الأعضاء:** `{len(members)}`
+**وصل:** `{sent}`
+**فشل:** `{failed}`
+
+**الرسالة:**
+```{clean_text(message, 800)}```
+""",
+        COLOR_BLUE,
+        log_type="server"
+    )
+
+
+@bot.command(name="dmroleembed")
+@commands.has_permissions(administrator=True)
+async def dm_role_embed(ctx, role: discord.Role = None, *, text=None):
+    if not role or not text:
+        await ctx.send("استخدم: `!dmroleembed @role العنوان | الرسالة`")
+        return
+
+    title, body = split_dm_embed_text(text)
+
+    members = [m for m in role.members if not m.bot]
+
+    if not members:
+        await ctx.send("❌ ما فيه أعضاء حقيقيين في هذي الرتبة.")
+        return
+
+    status_msg = await ctx.send(
+        f"📨 جاري إرسال Embed لأعضاء رتبة {role.mention}...\n"
+        f"العدد: `{len(members)}`"
+    )
+
+    sent = 0
+    failed = 0
+
+    for index, member in enumerate(members, start=1):
+        try:
+            await send_private_message(member, title, body, ctx.author)
+            sent += 1
+        except:
+            failed += 1
+
+        if index % 5 == 0 or index == len(members):
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"📨 جاري إرسال Embed لأعضاء رتبة {role.mention}...\n"
+                        f"التقدم: `{index}/{len(members)}`\n"
+                        f"وصل: `{sent}` | فشل: `{failed}`"
+                    )
+                )
+            except:
+                pass
+
+        await asyncio.sleep(DM_DELAY_SECONDS)
+
+    await status_msg.edit(
+        content=(
+            f"✅ انتهى إرسال Embed لرتبة {role.mention}\n"
+            f"وصل: `{sent}`\n"
+            f"فشل: `{failed}`"
+        )
+    )
+
+    await send_log(
+        ctx.guild,
+        "📩 DM Role Embed Sent",
+        f"""
+**بواسطة:** {ctx.author.mention}
+**الرتبة:** {role.mention}
+**عدد الأعضاء:** `{len(members)}`
+**وصل:** `{sent}`
+**فشل:** `{failed}`
+**العنوان:** `{title}`
+
+**الرسالة:**
+```{clean_text(body, 800)}```
+""",
+        COLOR_BLUE,
+        log_type="server"
+    )
+
+
+@bot.command(name="dmall")
+@commands.has_permissions(administrator=True)
+async def dm_all(ctx, *, message=None):
+    if not can_use_mass_dm(ctx):
+        await ctx.send("❌ هذا الأمر خاص بمالك السيرفر أو الأشخاص المسموح لهم فقط.")
+        return
+
+    if not message:
+        await ctx.send("استخدم: `!dmall رسالتك`")
+        return
+
+    title = "📩 رسالة من إدارة السيرفر"
+    body = message
+
+    members = [m for m in ctx.guild.members if not m.bot]
+
+    if not members:
+        await ctx.send("❌ ما فيه أعضاء للإرسال لهم.")
+        return
+
+    status_msg = await ctx.send(
+        f"📨 جاري الإرسال لكل أعضاء السيرفر...\n"
+        f"العدد: `{len(members)}`"
+    )
+
+    sent = 0
+    failed = 0
+
+    for index, member in enumerate(members, start=1):
+        try:
+            await send_private_message(member, title, body, ctx.author)
+            sent += 1
+        except:
+            failed += 1
+
+        if index % 5 == 0 or index == len(members):
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"📨 جاري الإرسال لكل أعضاء السيرفر...\n"
+                        f"التقدم: `{index}/{len(members)}`\n"
+                        f"وصل: `{sent}` | فشل: `{failed}`"
+                    )
+                )
+            except:
+                pass
+
+        await asyncio.sleep(DM_DELAY_SECONDS)
+
+    await status_msg.edit(
+        content=(
+            f"✅ انتهى الإرسال لكل السيرفر\n"
+            f"وصل: `{sent}`\n"
+            f"فشل: `{failed}`"
+        )
+    )
+
+    await send_log(
+        ctx.guild,
+        "📩 DM All Sent",
+        f"""
+**بواسطة:** {ctx.author.mention}
+**النوع:** كل السيرفر
+**عدد الأعضاء:** `{len(members)}`
+**وصل:** `{sent}`
+**فشل:** `{failed}`
+
+**الرسالة:**
+```{clean_text(message, 800)}```
+""",
+        COLOR_BLUE,
+        log_type="server"
+    )
+
+
+@bot.command(name="dmallembed")
+@commands.has_permissions(administrator=True)
+async def dm_all_embed(ctx, *, text=None):
+    if not can_use_mass_dm(ctx):
+        await ctx.send("❌ هذا الأمر خاص بمالك السيرفر أو الأشخاص المسموح لهم فقط.")
+        return
+
+    if not text:
+        await ctx.send("استخدم: `!dmallembed العنوان | الرسالة`")
+        return
+
+    title, body = split_dm_embed_text(text)
+
+    members = [m for m in ctx.guild.members if not m.bot]
+
+    if not members:
+        await ctx.send("❌ ما فيه أعضاء للإرسال لهم.")
+        return
+
+    status_msg = await ctx.send(
+        f"📨 جاري إرسال Embed لكل أعضاء السيرفر...\n"
+        f"العدد: `{len(members)}`"
+    )
+
+    sent = 0
+    failed = 0
+
+    for index, member in enumerate(members, start=1):
+        try:
+            await send_private_message(member, title, body, ctx.author)
+            sent += 1
+        except:
+            failed += 1
+
+        if index % 5 == 0 or index == len(members):
+            try:
+                await status_msg.edit(
+                    content=(
+                        f"📨 جاري إرسال Embed لكل أعضاء السيرفر...\n"
+                        f"التقدم: `{index}/{len(members)}`\n"
+                        f"وصل: `{sent}` | فشل: `{failed}`"
+                    )
+                )
+            except:
+                pass
+
+        await asyncio.sleep(DM_DELAY_SECONDS)
+
+    await status_msg.edit(
+        content=(
+            f"✅ انتهى إرسال Embed لكل السيرفر\n"
+            f"وصل: `{sent}`\n"
+            f"فشل: `{failed}`"
+        )
+    )
+
+    await send_log(
+        ctx.guild,
+        "📩 DM All Embed Sent",
+        f"""
+**بواسطة:** {ctx.author.mention}
+**النوع:** كل السيرفر
+**عدد الأعضاء:** `{len(members)}`
+**وصل:** `{sent}`
+**فشل:** `{failed}`
+**العنوان:** `{title}`
+
+**الرسالة:**
+```{clean_text(body, 800)}```
+""",
+        COLOR_BLUE,
+        log_type="server"
+    )
 
 
 @bot.command(name="لفلي", aliases=["rank"])
@@ -2648,6 +3024,10 @@ async def panel(ctx):
     embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
     embed.add_field(name="🎁 سحب", value="`!سحب Nitro 1h 1`", inline=True)
     embed.add_field(name="📢 إعلان", value="`!اعلان نص الإعلان`", inline=True)
+    embed.add_field(name="📩 DM شخص", value="`!dm @user الرسالة`", inline=True)
+    embed.add_field(name="📨 DM رتبة", value="`!dmrole @role الرسالة`", inline=True)
+    embed.add_field(name="📢 DM الكل", value="`!dmall الرسالة`", inline=True)
+    embed.add_field(name="🧪 تجربة DM", value="`!dmtest العنوان | الرسالة`", inline=True)
     embed.add_field(name="📖 مساعدة", value="`!مساعدة`", inline=True)
 
     await ctx.send(embed=embed)
@@ -2737,11 +3117,7 @@ async def setup_posts(ctx):
 
         lfg_embed.set_footer(text="NM System | Looking For Game")
 
-        await send_to_channel(
-            guild,
-            LOOKING_FOR_GAME_CHANNEL_ID,
-            embed=lfg_embed
-        )
+        await send_to_channel(guild, LOOKING_FOR_GAME_CHANNEL_ID, embed=lfg_embed)
 
         giveaways_embed = discord.Embed(
             title="🎁 Giveaways",
@@ -2762,11 +3138,7 @@ async def setup_posts(ctx):
 
         giveaways_embed.set_footer(text="NM System | Giveaways")
 
-        await send_to_channel(
-            guild,
-            GIVEAWAYS_CHANNEL_ID,
-            embed=giveaways_embed
-        )
+        await send_to_channel(guild, GIVEAWAYS_CHANNEL_ID, embed=giveaways_embed)
 
         roles_info_embed = discord.Embed(
             title="🎭 Roles",
@@ -2789,19 +3161,10 @@ async def setup_posts(ctx):
             else:
                 games_text += f"{data['emoji']} {data['name']} - غير موجودة\n"
 
-        roles_info_embed.add_field(
-            name="🎮 الألعاب المتوفرة",
-            value=games_text[:1000],
-            inline=False
-        )
-
+        roles_info_embed.add_field(name="🎮 الألعاب المتوفرة", value=games_text[:1000], inline=False)
         roles_info_embed.set_footer(text="NM System | Game Roles")
 
-        await send_to_channel(
-            guild,
-            ROLES_CHANNEL_ID,
-            embed=roles_info_embed
-        )
+        await send_to_channel(guild, ROLES_CHANNEL_ID, embed=roles_info_embed)
 
         roles_panel_embed = discord.Embed(
             title="🎮 اختر رتب الألعاب",
@@ -2829,19 +3192,10 @@ async def setup_posts(ctx):
             timestamp=discord.utils.utcnow()
         )
 
-        announcements_embed.add_field(
-            name="✅ الاستخدام",
-            value="`!اعلان نص الإعلان`",
-            inline=False
-        )
-
+        announcements_embed.add_field(name="✅ الاستخدام", value="`!اعلان نص الإعلان`", inline=False)
         announcements_embed.set_footer(text="NM System | Announcements")
 
-        await send_to_channel(
-            guild,
-            ANNOUNCEMENTS_CHANNEL_ID,
-            embed=announcements_embed
-        )
+        await send_to_channel(guild, ANNOUNCEMENTS_CHANNEL_ID, embed=announcements_embed)
 
         leave_info_embed = discord.Embed(
             title="🚪 Member Leave Info",
@@ -2871,11 +3225,7 @@ async def setup_posts(ctx):
 
         leave_info_embed.set_footer(text="NM System | nm_leave_info")
 
-        await send_to_channel(
-            guild,
-            LEAVE_INFO_CHANNEL_ID,
-            embed=leave_info_embed
-        )
+        await send_to_channel(guild, LEAVE_INFO_CHANNEL_ID, embed=leave_info_embed)
 
         commands_embed = discord.Embed(
             title="🤖 NM System Commands",
@@ -2889,6 +3239,7 @@ async def setup_posts(ctx):
         commands_embed.add_field(name="👤 معلومات", value="`!معلومات @user`", inline=True)
         commands_embed.add_field(name="🎮 اللعب", value="`!لعب Valorant 5`", inline=True)
         commands_embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
+        commands_embed.add_field(name="📩 الخاص", value="`!dmtest`\n`!dmrole`\n`!dmall`", inline=True)
         commands_embed.add_field(name="📊 اللفل", value="`!لفلي`\n`!ترتيب`", inline=True)
 
         commands_embed.set_footer(text="NM System | Setup Completed")
