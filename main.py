@@ -3299,4 +3299,16 @@ async def on_command_error(ctx, error):
 
 
 keep_alive()
-bot.run(TOKEN)
+
+while True:
+    try:
+        bot.run(TOKEN)
+    except discord.errors.DiscordServerError as e:
+        print(f"Discord login server error: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
+    except discord.errors.HTTPException as e:
+        print(f"Discord HTTP error: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
+    except Exception as e:
+        print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
