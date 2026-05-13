@@ -38,7 +38,6 @@ BYPASS_USER_IDS = {
 
 DB_FILE = "nm_system.db"
 WARNINGS_FILE = "warnings.json"
-GAME_ROLES_FILE = "game_roles.json"
 LOG_CHANNELS_FILE = "log_channels.json"
 
 PREFIX = "!"
@@ -74,30 +73,54 @@ LOG_CHANNEL_NAMES = {
 }
 
 GAME_ROLES = {
-    "gta": {"name": "GTA", "emoji": "🚗"},
-    "valorant": {"name": "Valorant", "emoji": "🎯"},
-    "fortnite": {"name": "Fortnite", "emoji": "🏗️"},
-    "roblox": {"name": "Roblox", "emoji": "🧱"},
-    "minecraft": {"name": "Minecraft", "emoji": "⛏️"},
-    "counter_strike": {"name": "Counter Strike", "emoji": "🔫"},
-    "dead_by_daylight": {"name": "Dead by Daylight", "emoji": "💀"},
-    "overwatch": {"name": "Overwatch", "emoji": "🛡️"},
-    "arc_raiders": {"name": "ARC Raiders", "emoji": "🚀"},
-    "rocket_league": {"name": "Rocket League", "emoji": "⚽"},
-    "apex": {"name": "Apex Legends", "emoji": "🏹"},
-    "warzone": {"name": "Warzone", "emoji": "🪖"},
-    "rainbow_six": {"name": "Rainbow Six Siege", "emoji": "🏢"},
-    "ea_fc": {"name": "EA FC", "emoji": "⚽"},
-    "rust": {"name": "Rust", "emoji": "🪓"},
-    "league": {"name": "League of Legends", "emoji": "⚔️"},
-    "cod": {"name": "Call of Duty", "emoji": "🎖️"},
-    "among_us": {"name": "Among Us", "emoji": "🛸"},
-    "the_finals": {"name": "The Finals", "emoji": "💥"},
-    "helldivers": {"name": "Helldivers 2", "emoji": "🌌"},
+    "gta": {"name": "🚗 GTA", "emoji": "🚗"},
+    "valorant": {"name": "🎯 Valorant", "emoji": "🎯"},
+    "fortnite": {"name": "🏗️ Fortnite", "emoji": "🏗️"},
+    "roblox": {"name": "🧱 Roblox", "emoji": "🧱"},
+    "minecraft": {"name": "⛏️ Minecraft", "emoji": "⛏️"},
+    "counter_strike": {"name": "🔫 Counter Strike", "emoji": "🔫"},
+    "dead_by_daylight": {"name": "💀 Dead by Daylight", "emoji": "💀"},
+    "overwatch": {"name": "🛡️ Overwatch", "emoji": "🛡️"},
+    "arc_raiders": {"name": "🚀 ARC Raiders", "emoji": "🚀"},
+    "rocket_league": {"name": "⚽ Rocket League", "emoji": "⚽"},
+    "apex": {"name": "🏹 Apex Legends", "emoji": "🏹"},
+    "warzone": {"name": "🪖 Warzone", "emoji": "🪖"},
+    "rainbow_six": {"name": "🏢 Rainbow Six Siege", "emoji": "🏢"},
+    "ea_fc": {"name": "⚽ EA FC", "emoji": "⚽"},
+    "rust": {"name": "🪓 Rust", "emoji": "🪓"},
+    "league": {"name": "⚔️ League of Legends", "emoji": "⚔️"},
+    "cod": {"name": "🎖️ Call of Duty", "emoji": "🎖️"},
+    "among_us": {"name": "🛸 Among Us", "emoji": "🛸"},
+    "the_finals": {"name": "💥 The Finals", "emoji": "💥"},
+    "helldivers": {"name": "🌌 Helldivers 2", "emoji": "🌌"},
+}
+
+# مهم: الرتب هنا ثابتة بالـ IDs، لذلك !اعداد ما يسوي رتب جديدة
+GAME_ROLE_IDS = {
+    "helldivers": 1504078793889812652,
+    "the_finals": 1504078792866533406,
+    "among_us": 1504078791364837498,
+    "cod": 1504078790522044608,
+    "league": 1504078789364158594,
+    "rust": 1504078787422191698,
+    "ea_fc": 1504078787061481543,
+    "rainbow_six": 1504078785606320216,
+    "warzone": 1504078784465469572,
+    "apex": 1504078783169302558,
+    "rocket_league": 1504078782401871983,
+    "arc_raiders": 1504078781441245204,
+    "overwatch": 1504078780665298984,
+    "dead_by_daylight": 1504078779964850267,
+    "counter_strike": 1504078778719141910,
+    "minecraft": 1504078777272111205,
+    "roblox": 1504078775699116052,
+    "fortnite": 1504078773081870407,
+    "valorant": 1504078771903401984,
+    "gta": 1504078771106480208,
 }
 
 bad_words = [
-     "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "شرموطه", "شرموطة",
+    "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "شرموطه", "شرموطة",
     "سالب", "كس", "كس امك", "كس اختك", "كس اخوك", "كس والديك",
     "كسمك", "كسمكم", "كسمه", "كسم", "كسختك", "كسامك", "كساختك",
     "كساخوك", "كسابوك", "كسس", "كسي", "كسى", "كىس", "كءس",
@@ -110,7 +133,7 @@ bad_words = [
     "منيكه", "منيوك", "منيوكه", "منيك", "متناك", "متناكه",
     "مفتوحه", "مقحب", "مقحبه", "ناك", "نيك",
     "مص", "مصه", "مصي", "مصزبي", "مص لين تغص", "مص لين تنام",
-    "الحس", "الحسيه", "لحس", "اعلق", "العق",
+    "الحس", "الحسيه", "لحس", "العق",
     "خول", "ديوث", "عرص", "عرصه", "ياعرص", "ياعرصه",
     "قحب", "قحبة", "قحبة*", "قحبه في قحبه", "يقحبه", "ياقحبة", "ياقحبه",
     "بنت القحبه", "يابن القحبه", "يابن القحب", "يابن القحاب",
@@ -128,16 +151,10 @@ bad_words = [
     "تعال اركب على زبي", "على زبي", "عض الغالي",
     "تبي تتناك", "تبي تمص", "سكس", "سكىس", "سىكىس", "سىكس",
     "كلزب", "كل زق يبن الشرمطه", "نظام مقحبه",
-    "الكافر", "الكافرة", "الكافره", "كافر", "كافرة", "كافره",
-    "الملحد", "الملحدة", "الملحده", "ملحد", "ملحدة", "ملحده",
-
-    # English
     "fuck", "fucking", "fucked", "fucker", "motherfucker",
     "shit", "bullshit", "bitch", "bitches",
-    "ass", "asshole", "dick", "cock", "pussy", "cunt",
+    "asshole", "dick", "cock", "pussy", "cunt",
     "slut", "whore", "sex", "suck my dick", "smd", "stfu", "kys",
-
-    # Arabizi / Franco
     "3leh", "3r9", "3r9h", "5alk", "5altk", "87bh",
     "a5ok", "a5tk", "abok", "aft7k", "agl5", "ajl5",
     "al3a'le", "al3'aly", "al87bh", "amk", "anek", "anekk",
@@ -145,7 +162,7 @@ bad_words = [
     "bzne", "bzny", "g7bh", "ghbh", "jtle5",
     "ks", "ks a5tk", "ks-mk", "ks5tk", "kse", "ksmk", "ksy",
     "lanek", "m3r9", "m7nh", "m87bh", "m9", "mfto7", "mfto7h",
-    "mhan", "zb", "zbe", "mhanh", "mm7on", "mm7onh", "mnyok", "mtnak", "mtnakh",
+    "mhan", "mhanh", "mm7on", "mm7onh", "mnyok", "mtnak", "mtnakh",
     "sharmo6h", "shrame6", "shrm6h", "shrmo6h", "shrmoth",
     "sks", "tjl5", "tm9", "tm9en", "y87bh", "ya87bh",
     "yabn", "ybn", "zane", "zaneh", "zany", "zanyh",
@@ -195,16 +212,11 @@ def save_json(file_name, data):
 
 
 warnings = load_json(WARNINGS_FILE, {})
-GAME_ROLE_IDS = load_json(GAME_ROLES_FILE, {})
 LOG_CHANNEL_IDS = load_json(LOG_CHANNELS_FILE, {})
 
 
 def save_warnings():
     save_json(WARNINGS_FILE, warnings)
-
-
-def save_game_roles():
-    save_json(GAME_ROLES_FILE, GAME_ROLE_IDS)
 
 
 def save_log_channels():
@@ -333,13 +345,68 @@ def save_suggestion(user_id, suggestion):
 # HELPERS
 # =========================
 
+def normalize_bad_text(text):
+    text = str(text).lower()
+
+    replacements = {
+        "أ": "ا",
+        "إ": "ا",
+        "آ": "ا",
+        "ى": "ي",
+        "ئ": "ي",
+        "ؤ": "و",
+        "ة": "ه",
+        "ڤ": "ف",
+        "0": "o",
+        "1": "i",
+        "2": "ء",
+        "3": "ع",
+        "4": "a",
+        "5": "خ",
+        "6": "ط",
+        "7": "ح",
+        "8": "ق",
+        "9": "ص",
+        "@": "a",
+        "$": "s",
+        "!": "i",
+        "*": "",
+        "_": "",
+        "-": "",
+        ".": "",
+        ",": "",
+        "'": "",
+        '"': "",
+        "`": "",
+        " ": "",
+        "ـ": "",
+    }
+
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+
+    text = re.sub(r"(.)\1{2,}", r"\1", text)
+    return text
+
+
 def contains_bad_word(content):
-    content = content.lower()
+    original = str(content).lower()
+    normalized_message = normalize_bad_text(content)
 
     for word in bad_words:
-        pattern = r'(?<![\w\u0600-\u06FF])' + re.escape(word.lower()) + r'(?![\w\u0600-\u06FF])'
+        word = word.lower().strip()
 
-        if re.search(pattern, content):
+        if not word:
+            continue
+
+        normalized_word = normalize_bad_text(word)
+
+        if len(normalized_word) >= 3 and normalized_word in normalized_message:
+            return True
+
+        pattern = r'(?<![\w\u0600-\u06FF])' + re.escape(word) + r'(?![\w\u0600-\u06FF])'
+
+        if re.search(pattern, original):
             return True
 
     return False
@@ -630,24 +697,17 @@ async def handle_violation(message, reason):
 
 
 async def create_or_find_game_roles(guild):
-    created_or_found = []
+    found_roles = []
 
-    for key, data in GAME_ROLES.items():
-        role_name = data["name"]
-        role = discord.utils.get(guild.roles, name=role_name)
+    for key, role_id in GAME_ROLE_IDS.items():
+        role = guild.get_role(int(role_id))
 
-        if not role:
-            role = await guild.create_role(
-                name=role_name,
-                mentionable=True,
-                reason="NM System game role setup"
-            )
+        if role:
+            found_roles.append(role)
+        else:
+            print(f"Role not found for key {key}: {role_id}")
 
-        GAME_ROLE_IDS[key] = role.id
-        created_or_found.append(role)
-
-    save_game_roles()
-    return created_or_found
+    return found_roles
 
 
 async def create_game_voice_channel(guild, source_channel, game, player_ids, max_players):
@@ -891,7 +951,6 @@ class GameRoleButton(discord.ui.Button):
     def __init__(self, role_key, label, emoji):
         super().__init__(
             label=label,
-            emoji=emoji,
             style=discord.ButtonStyle.secondary,
             custom_id=f"game_role_{role_key}"
         )
@@ -902,7 +961,7 @@ class GameRoleButton(discord.ui.Button):
 
         if not role_id:
             await interaction.response.send_message(
-                "⚠️ الرتبة ما تجهزت. اكتب `!اعداد` أول.",
+                "⚠️ الرتبة غير موجودة في الكود.",
                 ephemeral=True
             )
             return
@@ -911,7 +970,7 @@ class GameRoleButton(discord.ui.Button):
 
         if not role:
             await interaction.response.send_message(
-                "⚠️ ما لقيت الرتبة في السيرفر. اكتب `!اعداد` عشان البوت يسويها من جديد.",
+                "⚠️ ما لقيت الرتبة في السيرفر. تأكد من ID الرتبة.",
                 ephemeral=True
             )
             return
@@ -1642,7 +1701,7 @@ async def help_cmd(ctx):
     embed.description = """
 **إنشاء وإعداد**
 `!انشاء` - ينشئ رومات اللوقات فقط
-`!اعداد` - يجهز الرولات والشروحات واللوحات
+`!اعداد` - يجهز الشروحات ولوحة الرولات بدون إنشاء رتب جديدة
 
 **عامة**
 `!بنق`
@@ -2320,7 +2379,7 @@ async def setup_posts(ctx):
         await ctx.send("❌ هذا الأمر يشتغل بس في السيرفر الأساسي.")
         return
 
-    loading = await ctx.send("⚙️ جاري تجهيز الرتب وتنزيل رسائل الإعداد...")
+    loading = await ctx.send("⚙️ جاري تجهيز الشروحات ولوحة الرولات بدون إنشاء رتب جديدة...")
 
     try:
         game_roles = await create_or_find_game_roles(guild)
@@ -2420,7 +2479,13 @@ async def setup_posts(ctx):
         games_text = ""
 
         for key, data in GAME_ROLES.items():
-            games_text += f"{data['emoji']} {data['name']}\n"
+            role_id = GAME_ROLE_IDS.get(key)
+            role = guild.get_role(int(role_id)) if role_id else None
+
+            if role:
+                games_text += f"{data['emoji']} {role.mention}\n"
+            else:
+                games_text += f"{data['emoji']} {data['name']} - غير موجودة\n"
 
         roles_info_embed.add_field(
             name="🎮 الألعاب المتوفرة",
@@ -2614,8 +2679,8 @@ async def setup_posts(ctx):
 **الأمر:** `!اعداد`
 
 تم:
-• إنشاء/تحديث رتب الألعاب
-• حفظ IDs الرتب في `{GAME_ROLES_FILE}`
+• استخدام رتب الألعاب الموجودة مسبقًا
+• لم يتم إنشاء أي رتبة جديدة
 • تنزيل شرح looking-for-game
 • تنزيل شرح giveaways
 • تنزيل شرح roles
@@ -2624,13 +2689,13 @@ async def setup_posts(ctx):
 • تنزيل شرح nm_leave_info
 • تجهيز فتح رومات اللعب داخل كاتقوري `{GAME_VOICE_CATEGORY_ID}`
 
-**عدد رتب الألعاب:** `{len(game_roles)}`
+**عدد الرتب الموجودة:** `{len(game_roles)}`
 """,
             COLOR_BLUE,
             log_type="server"
         )
 
-        await loading.edit(content="✅ تم تجهيز رتب الألعاب وتنزيل إعدادات الرومات ولوحة الرولات بنجاح.")
+        await loading.edit(content="✅ تم تجهيز الشروحات ولوحة الرولات بدون إنشاء رتب جديدة.")
 
     except Exception as e:
         await loading.edit(content=f"❌ صار خطأ أثناء الإعداد:\n```{e}```")
