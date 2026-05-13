@@ -7,6 +7,7 @@ import time
 import random
 import sqlite3
 import re
+import asyncio
 from flask import Flask
 from threading import Thread
 
@@ -27,6 +28,7 @@ ANNOUNCEMENTS_CHANNEL_ID = 1370433079377920130
 LEAVE_INFO_CHANNEL_ID = 1504063808656773170
 
 GAME_VOICE_CATEGORY_ID = 1504071883006677172
+GAME_ROOM_DELETE_SECONDS = 300  # 5 minutes
 
 LOGS_CATEGORY_ID = 1504063695062306948
 
@@ -59,6 +61,7 @@ COLOR_ORANGE = discord.Color.orange()
 protection_enabled = True
 user_message_times = {}
 xp_cooldowns = {}
+game_room_delete_tasks = {}
 
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
@@ -95,7 +98,6 @@ GAME_ROLES = {
     "helldivers": {"name": "🌌 Helldivers 2", "emoji": "🌌"},
 }
 
-# مهم: الرتب هنا ثابتة بالـ IDs، لذلك !اعداد ما يسوي رتب جديدة
 GAME_ROLE_IDS = {
     "helldivers": 1504078793889812652,
     "the_finals": 1504078792866533406,
@@ -710,6 +712,66 @@ async def create_or_find_game_roles(guild):
     return found_roles
 
 
+async def schedule_delete_empty_game_room(channel):
+    if not channel:
+        return
+
+    if not isinstance(channel, discord.VoiceChannel):
+        return
+
+    if not channel.name.startswith("🎮-"):
+        return
+
+    if channel.id in game_room_delete_tasks:
+        return
+
+    async def delete_later():
+        try:
+            await asyncio.sleep(GAME_ROOM_DELETE_SECONDS)
+
+            fresh_channel = channel.guild.get_channel(channel.id)
+
+            if not fresh_channel:
+                return
+
+            if len(fresh_channel.members) == 0:
+                await send_log(
+                    fresh_channel.guild,
+                    "🧹 حذف روم لعب فاضي",
+                    f"""
+**الروم:** `{fresh_channel.name}`
+**السبب:** الروم صار فاضي لمدة 5 دقائق.
+""",
+                    COLOR_GREY,
+                    log_type="game"
+                )
+
+                await fresh_channel.delete(reason="NM System auto deleted empty game room")
+
+        except asyncio.CancelledError:
+            return
+
+        except Exception as e:
+            print(f"Auto delete game room error: {e}")
+
+        finally:
+            game_room_delete_tasks.pop(channel.id, None)
+
+    task = asyncio.create_task(delete_later())
+    game_room_delete_tasks[channel.id] = task
+
+
+def cancel_game_room_delete(channel):
+    if not channel:
+        return
+
+    task = game_room_delete_tasks.get(channel.id)
+
+    if task:
+        task.cancel()
+        game_room_delete_tasks.pop(channel.id, None)
+
+
 async def create_game_voice_channel(guild, source_channel, game, player_ids, max_players):
     members = []
 
@@ -796,6 +858,9 @@ async def create_game_voice_channel(guild, source_channel, game, player_ids, max
         log_type="game"
     )
 
+    if len(voice_channel.members) == 0:
+        await schedule_delete_empty_game_room(voice_channel)
+
     return voice_channel
 
 
@@ -817,9 +882,14 @@ class JoinPlayView(discord.ui.View):
 
         self.channel_created = False
         self.created_channel_id = None
+        self.cancelled = False
 
     def make_players_text(self):
         return "\n".join([f"• <@{uid}>" for uid in self.players]) or "لا يوجد"
+
+    def disable_all_buttons(self):
+        for item in self.children:
+            item.disabled = True
 
     async def create_private_game_voice(self, interaction):
         if self.channel_created:
@@ -836,7 +906,7 @@ class JoinPlayView(discord.ui.View):
         self.channel_created = True
         self.created_channel_id = voice_channel.id
 
-    async def refresh_embed(self, interaction, button=None):
+    async def refresh_embed(self, interaction, status_text=None):
         players_text = self.make_players_text()
         current_count = len(self.players)
 
@@ -871,18 +941,21 @@ class JoinPlayView(discord.ui.View):
             inline=False
         )
 
-        if current_count >= self.max_players:
+        if status_text:
+            embed.add_field(
+                name="📌 الحالة",
+                value=status_text,
+                inline=False
+            )
+
+        if current_count >= self.max_players and not self.cancelled:
             embed.add_field(
                 name="🔒 الحالة",
                 value="اكتمل العدد وتم قفل الدخول.",
                 inline=False
             )
 
-        embed.set_footer(text="NM System | اضغط بدخل إذا بتشارك")
-
-        if button and current_count >= self.max_players:
-            button.disabled = True
-            button.label = "اكتمل العدد"
+        embed.set_footer(text="NM System | Looking For Game")
 
         await interaction.message.edit(embed=embed, view=self)
 
@@ -893,6 +966,20 @@ class JoinPlayView(discord.ui.View):
         custom_id="join_play_button"
     )
     async def join_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.cancelled:
+            await interaction.response.send_message(
+                "❌ التجمع ملغي.",
+                ephemeral=True
+            )
+            return
+
+        if self.channel_created:
+            await interaction.response.send_message(
+                "❌ التجمع اكتمل وتم فتح الروم.",
+                ephemeral=True
+            )
+            return
+
         if interaction.user.id in self.players:
             await interaction.response.send_message(
                 "✅ أنت داخل التجمع أصلًا.",
@@ -901,11 +988,6 @@ class JoinPlayView(discord.ui.View):
             return
 
         if len(self.players) >= self.max_players:
-            button.disabled = True
-            button.label = "اكتمل العدد"
-
-            await interaction.message.edit(view=self)
-
             await interaction.response.send_message(
                 "❌ التجمع اكتمل، ما تقدر تدخل.",
                 ephemeral=True
@@ -915,7 +997,13 @@ class JoinPlayView(discord.ui.View):
         self.players.add(interaction.user.id)
 
         if len(self.players) >= self.max_players:
-            await self.refresh_embed(interaction, button)
+            self.disable_all_buttons()
+
+            await self.refresh_embed(
+                interaction,
+                status_text="✅ اكتمل العدد. تم فتح روم فويس خاص."
+            )
+
             await interaction.response.send_message(
                 "✅ دخلت التجمع، واكتمل العدد. تم فتح الروم الخاص.",
                 ephemeral=True
@@ -924,10 +1012,133 @@ class JoinPlayView(discord.ui.View):
             await self.create_private_game_voice(interaction)
             return
 
-        await self.refresh_embed(interaction, button)
+        await self.refresh_embed(interaction)
+
         await interaction.response.send_message(
             f"✅ تم تسجيلك. العدد الآن {len(self.players)}/{self.max_players}.",
             ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="بطلع",
+        style=discord.ButtonStyle.secondary,
+        emoji="🚪",
+        custom_id="leave_play_button"
+    )
+    async def leave_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.cancelled:
+            await interaction.response.send_message(
+                "❌ التجمع ملغي.",
+                ephemeral=True
+            )
+            return
+
+        if self.channel_created:
+            await interaction.response.send_message(
+                "❌ ما تقدر تطلع بعد ما اكتمل التجمع وانفتح الروم.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.user.id == self.host_id:
+            await interaction.response.send_message(
+                "⚠️ أنت صاحب التجمع. استخدم زر **إلغاء التجمع** بدل الخروج.",
+                ephemeral=True
+            )
+            return
+
+        if interaction.user.id not in self.players:
+            await interaction.response.send_message(
+                "❌ أنت مو داخل التجمع.",
+                ephemeral=True
+            )
+            return
+
+        self.players.remove(interaction.user.id)
+
+        await self.refresh_embed(
+            interaction,
+            status_text=f"🚪 {interaction.user.mention} طلع من التجمع."
+        )
+
+        await interaction.response.send_message(
+            "✅ طلعت من التجمع.",
+            ephemeral=True
+        )
+
+    @discord.ui.button(
+        label="إلغاء التجمع",
+        style=discord.ButtonStyle.red,
+        emoji="❌",
+        custom_id="cancel_play_button"
+    )
+    async def cancel_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.host_id:
+            await interaction.response.send_message(
+                "❌ فقط صاحب التجمع يقدر يلغيه.",
+                ephemeral=True
+            )
+            return
+
+        if self.channel_created:
+            await interaction.response.send_message(
+                "❌ ما تقدر تلغي التجمع بعد ما اكتمل وانفتح الروم.",
+                ephemeral=True
+            )
+            return
+
+        self.cancelled = True
+        self.disable_all_buttons()
+
+        players_text = self.make_players_text()
+
+        embed = discord.Embed(
+            title="❌ تم إلغاء التجمع",
+            description=f"تم إلغاء تجمع **{self.game}** بواسطة صاحب التجمع.",
+            color=COLOR_RED,
+            timestamp=discord.utils.utcnow()
+        )
+
+        embed.add_field(
+            name="👤 صاحب التجمع",
+            value=f"<@{self.host_id}>",
+            inline=True
+        )
+
+        embed.add_field(
+            name="👥 العدد قبل الإلغاء",
+            value=f"{len(self.players)}/{self.max_players}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="👥 اللي كانوا داخلين",
+            value=players_text[:1000],
+            inline=False
+        )
+
+        embed.set_footer(text="NM System | Looking For Game")
+
+        await interaction.message.edit(embed=embed, view=self)
+
+        await interaction.response.send_message(
+            "✅ تم إلغاء التجمع.",
+            ephemeral=True
+        )
+
+        await send_log(
+            interaction.guild,
+            "❌ تم إلغاء تجمع لعب",
+            f"""
+**اللعبة:** {self.game}
+**صاحب التجمع:** <@{self.host_id}>
+**العدد وقت الإلغاء:** {len(self.players)}/{self.max_players}
+
+**اللاعبين:**
+{players_text}
+""",
+            COLOR_RED,
+            log_type="game"
         )
 
 
@@ -1234,32 +1445,42 @@ async def on_member_remove(member):
     guild = member.guild
 
     action_type = "📤 خرج من نفسه"
-    action_details = "العضو طلع من السيرفر بنفسه أو السبب غير معروف."
+    action_details = "العضو طلع من السيرفر بنفسه."
     executor_text = "لا يوجد"
     reason_text = "لا يوجد"
     color = COLOR_GREY
+
+    now = discord.utils.utcnow()
+    max_audit_age_seconds = 15
 
     try:
         ban_entry = await get_audit_executor(guild, discord.AuditLogAction.ban, member.id)
 
         if ban_entry:
-            action_type = "🔨 تبند"
-            executor_text = ban_entry.user.mention if ban_entry.user else "غير معروف"
-            reason_text = ban_entry.reason if ban_entry.reason else "بدون سبب مكتوب"
-            action_details = "تم حظر العضو من السيرفر."
-            color = COLOR_RED
-        else:
+            age = abs((now - ban_entry.created_at).total_seconds())
+
+            if age <= max_audit_age_seconds:
+                action_type = "🔨 تبند"
+                executor_text = ban_entry.user.mention if ban_entry.user else "غير معروف"
+                reason_text = ban_entry.reason if ban_entry.reason else "بدون سبب مكتوب"
+                action_details = "تم حظر العضو من السيرفر."
+                color = COLOR_RED
+
+        if action_type == "📤 خرج من نفسه":
             kick_entry = await get_audit_executor(guild, discord.AuditLogAction.kick, member.id)
 
             if kick_entry:
-                action_type = "👢 انطرد"
-                executor_text = kick_entry.user.mention if kick_entry.user else "غير معروف"
-                reason_text = kick_entry.reason if kick_entry.reason else "بدون سبب مكتوب"
-                action_details = "تم طرد العضو من السيرفر."
-                color = COLOR_RED
+                age = abs((now - kick_entry.created_at).total_seconds())
 
-    except:
-        pass
+                if age <= max_audit_age_seconds:
+                    action_type = "👢 انطرد"
+                    executor_text = kick_entry.user.mention if kick_entry.user else "غير معروف"
+                    reason_text = kick_entry.reason if kick_entry.reason else "بدون سبب مكتوب"
+                    action_details = "تم طرد العضو من السيرفر."
+                    color = COLOR_RED
+
+    except Exception as e:
+        print(f"Leave audit check error: {e}")
 
     roles_text, roles_count = format_roles_list(member)
 
@@ -1633,6 +1854,13 @@ async def on_voice_state_update(member, before, after):
     if member.guild.id != GUILD_ID or member.bot:
         return
 
+    if after.channel and after.channel.name.startswith("🎮-"):
+        cancel_game_room_delete(after.channel)
+
+    if before.channel and before.channel.name.startswith("🎮-"):
+        if len(before.channel.members) == 0:
+            await schedule_delete_empty_game_room(before.channel)
+
     if before.channel is None and after.channel is not None:
         await send_log(
             member.guild,
@@ -1706,6 +1934,7 @@ async def help_cmd(ctx):
 **عامة**
 `!بنق`
 `!هلا`
+`!معلومات @شخص`
 `!طقطق @شخص`
 `!تقييم الشي`
 
@@ -1820,6 +2049,94 @@ async def hello(ctx):
             color=COLOR_GREY
         )
     )
+
+
+@bot.command(name="معلومات", aliases=["info", "user"])
+async def user_info(ctx, member: discord.Member = None):
+    member = member or ctx.author
+
+    xp, level_num = get_level_data(member.id)
+    needed = level_num * 100
+
+    user_warnings = warnings.get(str(member.id), [])
+    roles_text, roles_count = format_roles_list(member)
+
+    created_at = int(member.created_at.timestamp())
+
+    joined_at_text = "غير معروف"
+    if member.joined_at:
+        joined_at_text = f"<t:{int(member.joined_at.timestamp())}:F> | <t:{int(member.joined_at.timestamp())}:R>"
+
+    timeout_text = "لا"
+    if member.timed_out_until:
+        timeout_text = f"نعم، ينتهي <t:{int(member.timed_out_until.timestamp())}:R>"
+
+    top_role = member.top_role.mention if member.top_role and member.top_role.name != "@everyone" else "لا يوجد"
+
+    embed = discord.Embed(
+        title="👤 معلومات العضو",
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.set_thumbnail(url=member.display_avatar.url)
+
+    embed.add_field(
+        name="📌 الأساسي",
+        value=(
+            f"**Mention:** {member.mention}\n"
+            f"**User:** `{member}`\n"
+            f"**Display Name:** `{member.display_name}`\n"
+            f"**User ID:** `{member.id}`"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📅 التواريخ",
+        value=(
+            f"**إنشاء الحساب:** <t:{created_at}:F> | <t:{created_at}:R>\n"
+            f"**دخول السيرفر:** {joined_at_text}"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📊 اللفل",
+        value=(
+            f"**Level:** `{level_num}`\n"
+            f"**XP:** `{xp}/{needed}`"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🚫 التحذيرات",
+        value=f"`{len(user_warnings)}` تحذير",
+        inline=True
+    )
+
+    embed.add_field(
+        name="⏳ تايم أوت",
+        value=timeout_text,
+        inline=True
+    )
+
+    embed.add_field(
+        name="🏷️ أعلى رتبة",
+        value=top_role,
+        inline=False
+    )
+
+    embed.add_field(
+        name=f"🎭 الرتب ({roles_count})",
+        value=roles_text,
+        inline=False
+    )
+
+    embed.set_footer(text="NM System | User Info")
+
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="طقطق", aliases=["roast"])
@@ -2323,6 +2640,7 @@ async def panel(ctx):
     embed = discord.Embed(title="🎛️ لوحة NM System", color=COLOR_PURPLE)
     embed.add_field(name="📁 إنشاء لوقات", value="`!انشاء`", inline=True)
     embed.add_field(name="⚙️ إعداد النظام", value="`!اعداد`", inline=True)
+    embed.add_field(name="👤 معلومات عضو", value="`!معلومات @user`", inline=True)
     embed.add_field(name="🛡️ الحماية", value="`!حماية`", inline=True)
     embed.add_field(name="📊 اللفل", value="`!ترتيب`", inline=True)
     embed.add_field(name="🎮 لعب", value="`!لعب Valorant 5`", inline=True)
@@ -2388,7 +2706,7 @@ async def setup_posts(ctx):
             title="🎮 Looking For Game",
             description=(
                 "هذا الروم مخصص للتجمعات والبحث عن لاعبين.\n\n"
-                "تقدر تستخدم أمر التجمع، والبوت بينزل رسالة فيها زر **بدخل**.\n"
+                "تقدر تستخدم أمر التجمع، والبوت بينزل رسالة فيها أزرار.\n"
                 "إذا اكتمل العدد، البوت يفتح روم فويس خاص باسم اللعبة.\n"
                 "الكل يشوف الروم، لكن الدخول فقط للمسجلين."
             ),
@@ -2408,13 +2726,11 @@ async def setup_posts(ctx):
         )
 
         lfg_embed.add_field(
-            name="📌 القوانين",
+            name="📌 الأزرار",
             value=(
-                "• لا تكرر نفس الطلب أكثر من مرة.\n"
-                "• لا تسوي سبام منشن.\n"
-                "• اكتب اسم اللعبة والعدد بوضوح.\n"
-                "• اللي بيدخل يضغط زر **بدخل**.\n"
-                "• إذا اكتمل العدد، ما يقدر أحد يدخل زيادة."
+                "🎮 **بدخل**: تدخل التجمع.\n"
+                "🚪 **بطلع**: تطلع من التجمع قبل يكتمل.\n"
+                "❌ **إلغاء التجمع**: لصاحب التجمع فقط."
             ),
             inline=False
         )
@@ -2429,10 +2745,7 @@ async def setup_posts(ctx):
 
         giveaways_embed = discord.Embed(
             title="🎁 Giveaways",
-            description=(
-                "هذا الروم مخصص للسحوبات فقط.\n\n"
-                "السحوبات تنزل هنا بزر دخول، والاختيار يكون تلقائي بعد انتهاء الوقت."
-            ),
+            description="هذا الروم مخصص للسحوبات فقط.",
             color=COLOR_YELLOW,
             timestamp=discord.utils.utcnow()
         )
@@ -2443,17 +2756,6 @@ async def setup_posts(ctx):
                 "`!سحب Nitro 1h 1`\n"
                 "`!سحب Robux 30m 1`\n"
                 "`!سحب GiftCard 1d 2`"
-            ),
-            inline=False
-        )
-
-        giveaways_embed.add_field(
-            name="📌 القوانين",
-            value=(
-                "• السحوبات للإدارة فقط.\n"
-                "• الدخول يكون من الزر فقط.\n"
-                "• ممنوع السبام أو طلب الفوز.\n"
-                "• إذا انتهى السحب البوت يعلن الفائزين."
             ),
             inline=False
         )
@@ -2493,16 +2795,6 @@ async def setup_posts(ctx):
             inline=False
         )
 
-        roles_info_embed.add_field(
-            name="📌 القوانين",
-            value=(
-                "• خذ الرتبة اللي تخص الألعاب اللي تلعبها فقط.\n"
-                "• الرتب تساعد الناس يمنشنون لاعبين نفس لعبتك.\n"
-                "• لا تسوي إزعاج أو منشن عشوائي للرتب."
-            ),
-            inline=False
-        )
-
         roles_info_embed.set_footer(text="NM System | Game Roles")
 
         await send_to_channel(
@@ -2532,31 +2824,14 @@ async def setup_posts(ctx):
 
         announcements_embed = discord.Embed(
             title="📢 Announcements",
-            description=(
-                "هذا الروم مخصص للإعلانات الرسمية والمهمة.\n\n"
-                "أي تحديثات، أخبار، فعاليات، أو تنبيهات مهمة بتنزل هنا."
-            ),
+            description="هذا الروم مخصص للإعلانات الرسمية والمهمة.",
             color=COLOR_BLUE,
             timestamp=discord.utils.utcnow()
         )
 
         announcements_embed.add_field(
             name="✅ الاستخدام",
-            value=(
-                "`!اعلان نص الإعلان`\n\n"
-                "مثال:\n"
-                "`!اعلان بكرة عندنا فعالية الساعة 9 مساءً`"
-            ),
-            inline=False
-        )
-
-        announcements_embed.add_field(
-            name="📌 القوانين",
-            value=(
-                "• الإعلانات للإدارة فقط.\n"
-                "• لا تستخدم الروم للدردشة.\n"
-                "• تابع الروم عشان تعرف أخبار السيرفر."
-            ),
+            value="`!اعلان نص الإعلان`",
             inline=False
         )
 
@@ -2609,63 +2884,12 @@ async def setup_posts(ctx):
             timestamp=discord.utils.utcnow()
         )
 
-        commands_embed.add_field(
-            name="📁 اللوقات",
-            value="`!انشاء`",
-            inline=True
-        )
-
-        commands_embed.add_field(
-            name="⚙️ الإعداد",
-            value="`!اعداد`",
-            inline=True
-        )
-
-        commands_embed.add_field(
-            name="🛡️ الحماية",
-            value=(
-                "`!حماية`\n"
-                "`!حماية تشغيل`\n"
-                "`!حماية ايقاف`\n"
-                "`!اعدادات`"
-            ),
-            inline=True
-        )
-
-        commands_embed.add_field(
-            name="⚒️ الإدارة",
-            value=(
-                "`!مسح 10`\n"
-                "`!قفل`\n"
-                "`!فتح`\n"
-                "`!تحذير @user السبب`\n"
-                "`!تحذيرات @user`\n"
-                "`!تصفير @user`"
-            ),
-            inline=True
-        )
-
-        commands_embed.add_field(
-            name="🎮 المجتمع",
-            value=(
-                "`!لعب Valorant 5`\n"
-                "`!اقتراح فكرتك`\n"
-                "`!سحب Nitro 1h 1`\n"
-                "`!رولات`\n"
-                "`!اعلان نص الإعلان`"
-            ),
-            inline=True
-        )
-
-        commands_embed.add_field(
-            name="📊 اللفل",
-            value=(
-                "`!لفلي`\n"
-                "`!لفل @user`\n"
-                "`!ترتيب`"
-            ),
-            inline=True
-        )
+        commands_embed.add_field(name="📁 اللوقات", value="`!انشاء`", inline=True)
+        commands_embed.add_field(name="⚙️ الإعداد", value="`!اعداد`", inline=True)
+        commands_embed.add_field(name="👤 معلومات", value="`!معلومات @user`", inline=True)
+        commands_embed.add_field(name="🎮 اللعب", value="`!لعب Valorant 5`", inline=True)
+        commands_embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
+        commands_embed.add_field(name="📊 اللفل", value="`!لفلي`\n`!ترتيب`", inline=True)
 
         commands_embed.set_footer(text="NM System | Setup Completed")
 
