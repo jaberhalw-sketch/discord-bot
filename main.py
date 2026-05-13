@@ -8,6 +8,7 @@ import random
 import sqlite3
 import re
 import asyncio
+from pathlib import Path
 from flask import Flask
 from threading import Thread
 
@@ -60,6 +61,17 @@ SPAM_LIMIT = 10
 SPAM_SECONDS = 5
 MASS_MENTION_LIMIT = 8
 LEVEL_COOLDOWN = 25
+COMMANDS_CHANNEL_ID = 1504067161734516757
+MEMORY_BACKUP_CHANNEL_ID = 1504161977063178370
+MEMORY_BACKUP_INTERVAL_SECONDS = 60 * 60
+MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V1"
+MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE]
+
+COIN_NAME = "NM Coins"
+MESSAGE_COIN_COOLDOWN = 60
+DAILY_REWARD_BASE = 250
+LEVEL_UP_COIN_BONUS = 75
+
 
 COLOR_YELLOW = discord.Color.gold()
 COLOR_GREEN = discord.Color.green()
@@ -72,7 +84,9 @@ COLOR_ORANGE = discord.Color.orange()
 protection_enabled = True
 user_message_times = {}
 xp_cooldowns = {}
+coin_cooldowns = {}
 game_room_delete_tasks = {}
+memory_backup_task = None
 
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
@@ -257,6 +271,14 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS economy (
+            user_id INTEGER PRIMARY KEY,
+            balance INTEGER DEFAULT 0,
+            last_daily INTEGER DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -338,6 +360,138 @@ def get_top_levels(limit=10):
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_money_data(user_id):
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("SELECT balance, last_daily FROM economy WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.execute(
+            "INSERT INTO economy (user_id, balance, last_daily) VALUES (?, ?, ?)",
+            (user_id, 0, 0)
+        )
+        conn.commit()
+        conn.close()
+        return 0, 0
+
+    conn.close()
+    return row[0], row[1]
+
+
+def get_balance(user_id):
+    balance, last_daily = get_money_data(user_id)
+    return balance
+
+
+def add_money(user_id, amount):
+    balance, last_daily = get_money_data(user_id)
+    balance += int(amount)
+
+    if balance < 0:
+        balance = 0
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE economy SET balance = ? WHERE user_id = ?",
+        (balance, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return balance
+
+
+def remove_money(user_id, amount):
+    amount = int(amount)
+    balance, last_daily = get_money_data(user_id)
+
+    if amount <= 0:
+        return False, balance
+
+    if balance < amount:
+        return False, balance
+
+    balance -= amount
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE economy SET balance = ? WHERE user_id = ?",
+        (balance, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return True, balance
+
+
+def set_balance(user_id, amount):
+    get_money_data(user_id)
+    amount = max(0, int(amount))
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE economy SET balance = ? WHERE user_id = ?",
+        (amount, user_id)
+    )
+    conn.commit()
+    conn.close()
+    return amount
+
+
+def claim_daily(user_id, level):
+    balance, last_daily = get_money_data(user_id)
+    now = int(time.time())
+    cooldown = 24 * 60 * 60
+
+    if now - last_daily < cooldown:
+        remaining = cooldown - (now - last_daily)
+        return False, remaining, balance, 0
+
+    reward = DAILY_REWARD_BASE + (int(level) * 25)
+    balance += reward
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE economy SET balance = ?, last_daily = ? WHERE user_id = ?",
+        (balance, now, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return True, 0, balance, reward
+
+
+def get_top_money(limit=10):
+    conn = db_connect()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_id, balance
+        FROM economy
+        ORDER BY balance DESC
+        LIMIT ?
+    """, (limit,))
+
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def format_seconds(seconds):
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    if hours > 0:
+        return f"{hours} ساعة و {minutes} دقيقة"
+
+    return f"{minutes} دقيقة"
 
 
 def save_suggestion(user_id, suggestion):
@@ -468,6 +622,17 @@ def clean_text(text, limit=900):
 
 
 
+async def require_commands_channel(ctx):
+    if ctx.channel.id == COMMANDS_CHANNEL_ID:
+        return True
+
+    await ctx.send(
+        f"❌ استخدم هذا الأمر في روم الأوامر: <#{COMMANDS_CHANNEL_ID}>",
+        delete_after=8
+    )
+    return False
+
+
 async def dm_disabled_reply(ctx):
     await ctx.send(
         "❌ أوامر الخاص معطّلة حالياً لأن Discord حجز البوت بسبب نظام السبام.\n"
@@ -572,6 +737,164 @@ async def send_to_channel(guild, channel_id, embed=None, content=None, view=None
     except:
         return None
 
+
+
+# =========================
+# MEMORY BACKUP / RESTORE
+# =========================
+
+def local_memory_exists():
+    for file_name in MEMORY_FILES:
+        path = Path(file_name)
+        if path.exists() and path.stat().st_size > 0:
+            return True
+    return False
+
+
+def ensure_memory_placeholder_files():
+    if not Path(WARNINGS_FILE).exists():
+        save_json(WARNINGS_FILE, warnings)
+
+    if not Path(LOG_CHANNELS_FILE).exists():
+        save_json(LOG_CHANNELS_FILE, LOG_CHANNEL_IDS)
+
+
+def get_existing_memory_files():
+    ensure_memory_placeholder_files()
+    files = []
+
+    for file_name in MEMORY_FILES:
+        path = Path(file_name)
+        if path.exists() and path.is_file():
+            files.append(path)
+
+    return files
+
+
+async def create_memory_backup(guild, reason="Manual backup", requested_by=None):
+    channel = await get_channel_by_id(guild, MEMORY_BACKUP_CHANNEL_ID)
+
+    if not channel:
+        return False, "ما لقيت روم النسخ الاحتياطي. تأكد من MEMORY_BACKUP_CHANNEL_ID."
+
+    files = get_existing_memory_files()
+
+    if not files:
+        return False, "ما لقيت ملفات ذاكرة عشان أحفظها."
+
+    attachments = []
+
+    try:
+        for path in files:
+            attachments.append(discord.File(str(path), filename=path.name))
+
+        now_unix = int(time.time())
+        requester = requested_by.mention if requested_by else "النظام التلقائي"
+
+        embed = discord.Embed(
+            title="💾 نسخة احتياطية لذاكرة البوت",
+            description=(
+                f"`{MEMORY_BACKUP_MESSAGE_TAG}`\n\n"
+                f"**السبب:** {reason}\n"
+                f"**بواسطة:** {requester}\n"
+                f"**الوقت:** <t:{now_unix}:F> | <t:{now_unix}:R>"
+            ),
+            color=COLOR_BLUE,
+            timestamp=discord.utils.utcnow()
+        )
+
+        embed.add_field(
+            name="📦 الملفات المحفوظة",
+            value="\n".join([f"• `{path.name}`" for path in files]),
+            inline=False
+        )
+
+        embed.set_footer(text="NM System | Memory Backup")
+
+        await channel.send(embed=embed, files=attachments)
+        return True, f"تم حفظ النسخة في {channel.mention}."
+
+    except Exception as e:
+        return False, f"فشل حفظ النسخة: {e}"
+
+
+async def find_latest_memory_backup_message(channel, limit=50):
+    try:
+        async for message in channel.history(limit=limit):
+            has_tag = False
+
+            if message.embeds:
+                for embed in message.embeds:
+                    if embed.description and MEMORY_BACKUP_MESSAGE_TAG in embed.description:
+                        has_tag = True
+                        break
+
+            if not has_tag and message.content and MEMORY_BACKUP_MESSAGE_TAG in message.content:
+                has_tag = True
+
+            if not has_tag:
+                continue
+
+            attachment_names = {attachment.filename for attachment in message.attachments}
+            needed = set(MEMORY_FILES)
+
+            if needed.intersection(attachment_names):
+                return message
+
+    except Exception as e:
+        print(f"Find memory backup error: {e}")
+
+    return None
+
+
+async def restore_memory_from_backup(guild, force=False):
+    if local_memory_exists() and not force:
+        return False, "الذاكرة المحلية موجودة، ما احتجت أسترجع من الروم."
+
+    channel = await get_channel_by_id(guild, MEMORY_BACKUP_CHANNEL_ID)
+
+    if not channel:
+        return False, "ما لقيت روم النسخ الاحتياطي."
+
+    backup_message = await find_latest_memory_backup_message(channel)
+
+    if not backup_message:
+        return False, "ما لقيت أي نسخة احتياطية محفوظة في الروم."
+
+    restored_files = []
+
+    try:
+        for attachment in backup_message.attachments:
+            if attachment.filename not in MEMORY_FILES:
+                continue
+
+            file_bytes = await attachment.read()
+            Path(attachment.filename).write_bytes(file_bytes)
+            restored_files.append(attachment.filename)
+
+        if not restored_files:
+            return False, "لقيت رسالة Backup لكن ما لقيت ملفات ذاكرة داخلها."
+
+        return True, "تم استرجاع: " + ", ".join(restored_files)
+
+    except Exception as e:
+        return False, f"فشل الاسترجاع: {e}"
+
+
+async def memory_backup_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(GUILD_ID)
+
+            if guild:
+                await create_memory_backup(guild, reason="Auto backup")
+
+        except Exception as e:
+            print(f"Auto memory backup error: {e}")
+
+        await asyncio.sleep(MEMORY_BACKUP_INTERVAL_SECONDS)
 
 async def create_or_find_log_channels(guild):
     category = guild.get_channel(LOGS_CATEGORY_ID)
@@ -1253,9 +1576,21 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    global memory_backup_task
+
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild:
+        restored, restore_message = await restore_memory_from_backup(guild, force=False)
+        if restored:
+            print(f"Memory restored on startup: {restore_message}")
+
     init_db()
 
     bot.add_view(GameRolesView())
+
+    if memory_backup_task is None or memory_backup_task.done():
+        memory_backup_task = asyncio.create_task(memory_backup_loop())
 
     await bot.change_presence(
         status=discord.Status.online,
@@ -1293,10 +1628,18 @@ async def on_message(message):
         gained = random.randint(8, 16)
         xp, level, leveled_up = add_xp(message.author.id, gained)
 
+        last_coin = coin_cooldowns.get(message.author.id, 0)
+        if now - last_coin >= MESSAGE_COIN_COOLDOWN:
+            coin_cooldowns[message.author.id] = now
+            add_money(message.author.id, random.randint(3, 8))
+
         if leveled_up:
+            bonus = level * LEVEL_UP_COIN_BONUS
+            new_balance = add_money(message.author.id, bonus)
             await message.channel.send(
-                f"📊 {message.author.mention} وصل لفل **{level}**!",
-                delete_after=8
+                f"📊 {message.author.mention} وصل لفل **{level}**! 🎉\n"
+                f"💰 مكافأة اللفل: **{bonus:,} {COIN_NAME}** | رصيدك: **{new_balance:,}**",
+                delete_after=10
             )
 
     if protection_enabled and not is_bypass(message.author):
@@ -1937,10 +2280,22 @@ async def help_cmd(ctx):
 ❌ أوامر الخاص معطّلة مؤقتًا بسبب Quarantine من Discord.
 استخدم `!اعلان نص الإعلان` بدل إرسال الخاص.
 
-**Level**
+**Level - في روم commands فقط**
 `!لفلي`
 `!لفل @شخص`
 `!ترتيب`
+
+**Economy - في روم commands فقط**
+`!رصيدي`
+`!رصيد @شخص`
+`!يومي`
+`!تحويل @شخص 500`
+`!اغنى`
+
+**Economy Admin**
+`!اعطاءفلوس @شخص 1000`
+`!سحبفلوس @شخص 500`
+`!تصفيرفلوس @شخص`
 
 **إدارة**
 `!مسح 10`
@@ -2375,33 +2730,46 @@ async def dm_all_embed(ctx, *args, **kwargs):
 
 @bot.command(name="لفلي", aliases=["rank"])
 async def my_level(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
     xp, level = get_level_data(ctx.author.id)
     needed = level * 100
+    balance = get_balance(ctx.author.id)
 
     embed = discord.Embed(title="📊 لفلك", color=COLOR_BLUE)
     embed.add_field(name="👤 العضو", value=ctx.author.mention, inline=False)
     embed.add_field(name="Level", value=str(level), inline=True)
     embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
+    embed.add_field(name="💰 الرصيد", value=f"{balance:,} {COIN_NAME}", inline=True)
 
     await ctx.send(embed=embed)
 
 
 @bot.command(name="لفل", aliases=["level"])
 async def level(ctx, member: discord.Member = None):
+    if not await require_commands_channel(ctx):
+        return
+
     member = member or ctx.author
     xp, level_num = get_level_data(member.id)
     needed = level_num * 100
+    balance = get_balance(member.id)
 
     embed = discord.Embed(title="📊 Level", color=COLOR_BLUE)
     embed.add_field(name="👤 العضو", value=member.mention, inline=False)
     embed.add_field(name="Level", value=str(level_num), inline=True)
     embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
+    embed.add_field(name="💰 الرصيد", value=f"{balance:,} {COIN_NAME}", inline=True)
 
     await ctx.send(embed=embed)
 
 
 @bot.command(name="ترتيب", aliases=["leaderboard", "top"])
 async def leaderboard(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
     rows = get_top_levels(10)
 
     if not rows:
@@ -2415,6 +2783,167 @@ async def leaderboard(ctx):
 
     embed = discord.Embed(title="🏆 ترتيب اللفل", description=text, color=COLOR_YELLOW)
     await ctx.send(embed=embed)
+
+
+@bot.command(name="رصيدي", aliases=["balance", "bal", "فلوسي"])
+async def my_balance(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
+    balance = get_balance(ctx.author.id)
+    xp, level = get_level_data(ctx.author.id)
+
+    embed = discord.Embed(title="💰 رصيدك", color=COLOR_GREEN)
+    embed.add_field(name="👤 العضو", value=ctx.author.mention, inline=False)
+    embed.add_field(name="الرصيد", value=f"**{balance:,} {COIN_NAME}**", inline=True)
+    embed.add_field(name="Level", value=f"`{level}`", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="رصيد", aliases=["money", "coins"])
+async def balance(ctx, member: discord.Member = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    member = member or ctx.author
+    balance = get_balance(member.id)
+    xp, level = get_level_data(member.id)
+
+    embed = discord.Embed(title="💰 الرصيد", color=COLOR_GREEN)
+    embed.add_field(name="👤 العضو", value=member.mention, inline=False)
+    embed.add_field(name="الرصيد", value=f"**{balance:,} {COIN_NAME}**", inline=True)
+    embed.add_field(name="Level", value=f"`{level}`", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="يومي", aliases=["daily"])
+async def daily(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
+    xp, level = get_level_data(ctx.author.id)
+    success, remaining, balance, reward = claim_daily(ctx.author.id, level)
+
+    if not success:
+        await ctx.send(f"⏳ أخذت مكافأتك اليومية قبل. ارجع بعد **{format_seconds(remaining)}**.")
+        return
+
+    embed = discord.Embed(title="🎁 المكافأة اليومية", color=COLOR_GREEN)
+    embed.add_field(name="المكافأة", value=f"+{reward:,} {COIN_NAME}", inline=True)
+    embed.add_field(name="رصيدك الآن", value=f"{balance:,} {COIN_NAME}", inline=True)
+    embed.set_footer(text="كل ما زاد لفلك تزيد مكافأتك اليومية شوي")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="تحويل", aliases=["pay", "transfer"])
+async def transfer_money(ctx, member: discord.Member = None, amount: int = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if member is None or amount is None:
+        await ctx.send("استخدم: `!تحويل @شخص 500`")
+        return
+
+    if member.bot:
+        await ctx.send("❌ ما تقدر تحول للبوتات.")
+        return
+
+    if member.id == ctx.author.id:
+        await ctx.send("❌ ما تقدر تحول لنفسك.")
+        return
+
+    if amount <= 0:
+        await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
+        return
+
+    success, new_sender_balance = remove_money(ctx.author.id, amount)
+
+    if not success:
+        await ctx.send("❌ رصيدك ما يكفي.")
+        return
+
+    new_receiver_balance = add_money(member.id, amount)
+
+    embed = discord.Embed(title="✅ تم التحويل", color=COLOR_GREEN)
+    embed.add_field(name="من", value=ctx.author.mention, inline=True)
+    embed.add_field(name="إلى", value=member.mention, inline=True)
+    embed.add_field(name="المبلغ", value=f"{amount:,} {COIN_NAME}", inline=False)
+    embed.add_field(name="رصيدك الآن", value=f"{new_sender_balance:,} {COIN_NAME}", inline=True)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="اغنى", aliases=["rich", "topmoney"])
+async def richest(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
+    rows = get_top_money(10)
+
+    if not rows:
+        await ctx.send("مافي بيانات اقتصاد للحين.")
+        return
+
+    text = ""
+    for i, (user_id, balance) in enumerate(rows, start=1):
+        text += f"**{i}.** <@{user_id}> — `{balance:,}` {COIN_NAME}\n"
+
+    embed = discord.Embed(title="💎 أغنى الأعضاء", description=text, color=COLOR_YELLOW)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="اعطاءفلوس", aliases=["addmoney"])
+@commands.has_permissions(administrator=True)
+async def admin_add_money(ctx, member: discord.Member = None, amount: int = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if member is None or amount is None:
+        await ctx.send("استخدم: `!اعطاءفلوس @شخص 1000`")
+        return
+
+    if amount <= 0:
+        await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
+        return
+
+    balance = add_money(member.id, amount)
+    await ctx.send(f"✅ عطيت {member.mention} **{amount:,} {COIN_NAME}**. رصيده الآن: **{balance:,}**")
+
+
+@bot.command(name="سحبفلوس", aliases=["removemoney"])
+@commands.has_permissions(administrator=True)
+async def admin_remove_money(ctx, member: discord.Member = None, amount: int = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if member is None or amount is None:
+        await ctx.send("استخدم: `!سحبفلوس @شخص 500`")
+        return
+
+    if amount <= 0:
+        await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
+        return
+
+    success, balance = remove_money(member.id, amount)
+
+    if not success:
+        await ctx.send("❌ رصيد العضو ما يكفي للسحب.")
+        return
+
+    await ctx.send(f"✅ تم سحب **{amount:,} {COIN_NAME}** من {member.mention}. رصيده الآن: **{balance:,}**")
+
+
+@bot.command(name="تصفيرفلوس", aliases=["resetmoney"])
+@commands.has_permissions(administrator=True)
+async def admin_reset_money(ctx, member: discord.Member = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if member is None:
+        await ctx.send("استخدم: `!تصفيرفلوس @شخص`")
+        return
+
+    set_balance(member.id, 0)
+    await ctx.send(f"✅ تم تصفير رصيد {member.mention}.")
 
 
 @bot.command(name="حماية", aliases=["protection"])
@@ -2880,6 +3409,67 @@ async def setup_posts(ctx):
     except Exception as e:
         await loading.edit(content=f"❌ صار خطأ أثناء الإعداد:\n```{e}```")
 
+
+
+@bot.command(name="حفظ_الذاكرة", aliases=["backup", "حفظ", "نسخة"])
+@commands.has_permissions(administrator=True)
+async def backup_memory_command(ctx):
+    loading = await ctx.send("💾 جاري حفظ نسخة احتياطية من ذاكرة البوت...")
+    ok, message = await create_memory_backup(
+        ctx.guild,
+        reason="Manual backup command",
+        requested_by=ctx.author
+    )
+
+    if ok:
+        await loading.edit(content=f"✅ {message}")
+    else:
+        await loading.edit(content=f"❌ {message}")
+
+
+@bot.command(name="استرجاع_الذاكرة", aliases=["restore", "استرجاع"])
+@commands.has_permissions(administrator=True)
+async def restore_memory_command(ctx):
+    loading = await ctx.send("♻️ جاري استرجاع آخر نسخة احتياطية من الروم...")
+    ok, message = await restore_memory_from_backup(ctx.guild, force=True)
+
+    if not ok:
+        await loading.edit(content=f"❌ {message}")
+        return
+
+    init_db()
+    await loading.edit(
+        content=(
+            f"✅ {message}\n"
+            "⚠️ يفضّل تسوي Restart للبوت بعد الاسترجاع عشان كل شيء يقرأ الملفات الجديدة بشكل كامل."
+        )
+    )
+
+
+@bot.command(name="حالة_الذاكرة", aliases=["memory", "ذاكرة"])
+@commands.has_permissions(administrator=True)
+async def memory_status_command(ctx):
+    files = get_existing_memory_files()
+    text = ""
+
+    for path in files:
+        size_kb = round(path.stat().st_size / 1024, 2)
+        text += f"• `{path.name}` - `{size_kb} KB`\n"
+
+    if not text:
+        text = "مافي ملفات ذاكرة موجودة حالياً."
+
+    embed = discord.Embed(
+        title="🧠 حالة ذاكرة البوت",
+        description=text,
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="📌 روم النسخ", value=f"<#{MEMORY_BACKUP_CHANNEL_ID}>", inline=False)
+    embed.add_field(name="⏱️ النسخ التلقائي", value=f"كل {MEMORY_BACKUP_INTERVAL_SECONDS // 60} دقيقة", inline=False)
+    embed.set_footer(text="NM System | Memory")
+
+    await ctx.send(embed=embed)
 
 @bot.event
 async def on_command_error(ctx, error):
