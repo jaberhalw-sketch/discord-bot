@@ -64,6 +64,9 @@ LEVEL_COOLDOWN = 25
 COMMANDS_CHANNEL_ID = 1504067161734516757
 MEMORY_BACKUP_CHANNEL_ID = 1504161977063178370
 MEMORY_BACKUP_INTERVAL_SECONDS = 60 * 60
+ECONOMY_EXPLAIN_INTERVAL_SECONDS = 60 * 60
+ECONOMY_EXPLAIN_CHANNEL_ID = COMMANDS_CHANNEL_ID
+HOURLY_REWARD_COOLDOWN_SECONDS = 60 * 60
 MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V2"
 MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
 MEMORY_BACKUP_HISTORY_LIMIT = 100
@@ -92,6 +95,7 @@ xp_cooldowns = {}
 coin_cooldowns = {}
 game_room_delete_tasks = {}
 memory_backup_task = None
+economy_explain_task = None
 
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
@@ -451,7 +455,7 @@ def set_balance(user_id, amount):
 def claim_daily(user_id, level):
     balance, last_daily = get_money_data(user_id)
     now = int(time.time())
-    cooldown = 24 * 60 * 60
+    cooldown = HOURLY_REWARD_COOLDOWN_SECONDS
 
     if now - last_daily < cooldown:
         remaining = cooldown - (now - last_daily)
@@ -1091,6 +1095,99 @@ async def restore_memory_from_backup(guild, force=False):
 
     except Exception as e:
         return False, f"فشل الاسترجاع: {e}"
+
+
+
+def build_economy_guide_embed(auto=False):
+    title = "🪙 شرح نظام الاقتصاد واللفل"
+    description = (
+        "هذا شرح سريع للنظام. كل شيء يشتغل في روم الأوامر فقط.\n"
+        f"روم الأوامر: <#{COMMANDS_CHANNEL_ID}>"
+    )
+
+    if auto:
+        description = (
+            "تذكير تلقائي: تقدر تستخدم أوامر الاقتصاد واللفل هنا.\n"
+            f"روم الأوامر: <#{COMMANDS_CHANNEL_ID}>"
+        )
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.add_field(
+        name="💰 الفلوس",
+        value=(
+            f"العملة: **{COIN_NAME}**\n"
+            "`!رصيدي` يعرض رصيدك\n"
+            "`!رصيد @شخص` يعرض رصيد شخص\n"
+            "`!اغنى` يعرض أغنى 10 أعضاء"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🎁 المكافأة الساعية",
+        value=(
+            "`!يومي` أو `!ساعتي`\n"
+            "تقدر تاخذ مكافأة كل **ساعة**.\n"
+            "كل ما لفلك أعلى، المكافأة تزيد شوي."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📊 اللفل",
+        value=(
+            "`!لفلي` يعرض لفلك و XP\n"
+            "`!لفل @شخص` يعرض لفل شخص\n"
+            "`!ترتيب` يعرض ترتيب اللفلات\n"
+            "تجمع XP من النشاط والرسائل بدون سبام."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🔁 التحويل",
+        value="`!تحويل @شخص 500` يحول فلوس لشخص ثاني.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛡️ أوامر الإدارة",
+        value=(
+            "`!اعطاءفلوس @شخص 1000`\n"
+            "`!سحبفلوس @شخص 500`\n"
+            "`!تصفيرفلوس @شخص`"
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"{BOT_BRAND} | Economy Guide")
+    return embed
+
+
+async def economy_explain_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(60)
+
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(GUILD_ID)
+
+            if guild:
+                channel = await get_channel_by_id(guild, ECONOMY_EXPLAIN_CHANNEL_ID)
+
+                if channel:
+                    await channel.send(embed=build_economy_guide_embed(auto=True))
+
+        except Exception as e:
+            print(f"Auto economy guide error: {e}")
+
+        await asyncio.sleep(ECONOMY_EXPLAIN_INTERVAL_SECONDS)
 
 
 async def memory_backup_loop():
@@ -1789,7 +1886,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
-    global memory_backup_task
+    global memory_backup_task, economy_explain_task
 
     guild = bot.get_guild(GUILD_ID)
 
@@ -1804,6 +1901,9 @@ async def on_ready():
 
     if memory_backup_task is None or memory_backup_task.done():
         memory_backup_task = asyncio.create_task(memory_backup_loop())
+
+    if economy_explain_task is None or economy_explain_task.done():
+        economy_explain_task = asyncio.create_task(economy_explain_loop())
 
     await bot.change_presence(
         status=discord.Status.online,
@@ -2499,9 +2599,10 @@ async def help_cmd(ctx):
 `!ترتيب`
 
 **Economy - في روم commands فقط**
+`!اقتصاد` - شرح النظام
 `!رصيدي`
 `!رصيد @شخص`
-`!يومي`
+`!يومي` أو `!ساعتي`
 `!تحويل @شخص 500`
 `!اغنى`
 
@@ -3036,7 +3137,7 @@ async def my_balance(ctx):
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
     embed.add_field(name="💰 الرصيد", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
     embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
-    embed.add_field(name="🎁 Daily Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="🎁 Hourly Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Economy")
     await ctx.send(embed=embed)
 
@@ -3060,12 +3161,12 @@ async def balance(ctx, member: discord.Member = None):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="💰 الرصيد", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
     embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
-    embed.add_field(name="🎁 Daily Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="🎁 Hourly Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Economy")
     await ctx.send(embed=embed)
 
 
-@bot.command(name="يومي", aliases=["daily"])
+@bot.command(name="يومي", aliases=["daily", "ساعتي", "hourly"])
 async def daily(ctx):
     if not await require_commands_channel(ctx):
         return
@@ -3075,17 +3176,17 @@ async def daily(ctx):
 
     if not success:
         embed = discord.Embed(
-            title="⏳ Daily already claimed",
+            title="⏳ Hourly reward already claimed",
             description=f"ارجع بعد **{format_seconds(remaining)}**.",
             color=COLOR_ORANGE,
             timestamp=discord.utils.utcnow()
         )
-        embed.set_footer(text=f"{BOT_BRAND} | Daily Reward")
+        embed.set_footer(text=f"{BOT_BRAND} | Hourly Reward")
         await ctx.send(embed=embed)
         return
 
     embed = discord.Embed(
-        title="🎁 Daily Reward Claimed",
+        title="🎁 Hourly Reward Claimed",
         description=f"تم إضافة المكافأة لمحفظتك يا {ctx.author.mention}.",
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
@@ -3094,7 +3195,7 @@ async def daily(ctx):
     embed.add_field(name="المكافأة", value=f"**+{reward:,}**\n{COIN_NAME}", inline=True)
     embed.add_field(name="رصيدك الآن", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
     embed.add_field(name="Level bonus", value=f"Level `{level}`", inline=True)
-    embed.set_footer(text="كل ما زاد لفلك تزيد مكافأتك اليومية شوي")
+    embed.set_footer(text="تقدر تاخذها كل ساعة، وكل ما زاد لفلك تزيد المكافأة شوي")
     await ctx.send(embed=embed)
 
 
