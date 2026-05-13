@@ -64,13 +64,18 @@ LEVEL_COOLDOWN = 25
 COMMANDS_CHANNEL_ID = 1504067161734516757
 MEMORY_BACKUP_CHANNEL_ID = 1504161977063178370
 MEMORY_BACKUP_INTERVAL_SECONDS = 60 * 60
-MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V1"
+MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V2"
+MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
+MEMORY_BACKUP_HISTORY_LIMIT = 100
 MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE]
 
-COIN_NAME = "NM Coins"
+COIN_NAME = "Retard coin"
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
+ECONOMY_EMOJI = "🪙"
+LEVEL_EMOJI = "📊"
+BOT_BRAND = "Retards System"
 
 
 COLOR_YELLOW = discord.Color.gold()
@@ -494,6 +499,66 @@ def format_seconds(seconds):
     return f"{minutes} دقيقة"
 
 
+
+
+def xp_progress_bar(xp, needed, size=12):
+    try:
+        xp = int(xp)
+        needed = max(1, int(needed))
+        filled = min(size, max(0, round((xp / needed) * size)))
+        return "▰" * filled + "▱" * (size - filled)
+    except:
+        return "▱" * size
+
+
+def db_table_count(table_name):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {table_name}")
+        count = cur.fetchone()[0]
+        conn.close()
+        return int(count)
+    except:
+        return 0
+
+
+def db_sum_column(table_name, column_name):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COALESCE(SUM({column_name}), 0) FROM {table_name}")
+        total = cur.fetchone()[0]
+        conn.close()
+        return int(total or 0)
+    except:
+        return 0
+
+
+def safe_len_json(file_name):
+    try:
+        data = load_json(file_name, {})
+        if isinstance(data, dict):
+            return len(data)
+        if isinstance(data, list):
+            return len(data)
+        return 0
+    except:
+        return 0
+
+
+def format_money(amount):
+    try:
+        return f"{int(amount):,} {COIN_NAME}"
+    except:
+        return f"0 {COIN_NAME}"
+
+
+def member_display(member):
+    if not member:
+        return "غير معروف"
+    return member.mention
+
 def save_suggestion(user_id, suggestion):
     conn = db_connect()
     cur = conn.cursor()
@@ -626,10 +691,13 @@ async def require_commands_channel(ctx):
     if ctx.channel.id == COMMANDS_CHANNEL_ID:
         return True
 
-    await ctx.send(
-        f"❌ استخدم هذا الأمر في روم الأوامر: <#{COMMANDS_CHANNEL_ID}>",
-        delete_after=8
+    embed = discord.Embed(
+        title="📍 الروم الغلط",
+        description=f"استخدم أوامر اللفل والاقتصاد هنا: <#{COMMANDS_CHANNEL_ID}>",
+        color=COLOR_ORANGE
     )
+    embed.set_footer(text=f"{BOT_BRAND} | Commands")
+    await ctx.send(embed=embed, delete_after=8)
     return False
 
 
@@ -743,20 +811,70 @@ async def send_to_channel(guild, channel_id, embed=None, content=None, view=None
 # MEMORY BACKUP / RESTORE
 # =========================
 
-def local_memory_exists():
+def json_file_valid(file_name):
+    path = Path(file_name)
+    if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+        return False
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            json.load(file)
+        return True
+    except:
+        return False
+
+
+def db_file_valid():
+    path = Path(DB_FILE)
+    if not path.exists() or not path.is_file() or path.stat().st_size == 0:
+        return False
+
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = {row[0] for row in cur.fetchall()}
+        conn.close()
+        return "levels" in tables and "economy" in tables
+    except:
+        return False
+
+
+def local_memory_status():
+    status = {}
+
     for file_name in MEMORY_FILES:
         path = Path(file_name)
-        if path.exists() and path.stat().st_size > 0:
-            return True
-    return False
+        exists = path.exists() and path.is_file()
+        size = path.stat().st_size if exists else 0
+
+        if file_name == DB_FILE:
+            valid = db_file_valid()
+        elif file_name.endswith(".json"):
+            valid = json_file_valid(file_name)
+        else:
+            valid = exists and size > 0
+
+        status[file_name] = {
+            "exists": exists,
+            "size": size,
+            "valid": valid,
+        }
+
+    return status
+
+
+def memory_needs_auto_restore():
+    # The database is the main memory. If it is missing/corrupted, restore from Discord.
+    return not db_file_valid()
 
 
 def ensure_memory_placeholder_files():
-    if not Path(WARNINGS_FILE).exists():
-        save_json(WARNINGS_FILE, warnings)
+    if not Path(WARNINGS_FILE).exists() or not json_file_valid(WARNINGS_FILE):
+        save_json(WARNINGS_FILE, warnings if isinstance(warnings, dict) else {})
 
-    if not Path(LOG_CHANNELS_FILE).exists():
-        save_json(LOG_CHANNELS_FILE, LOG_CHANNEL_IDS)
+    if not Path(LOG_CHANNELS_FILE).exists() or not json_file_valid(LOG_CHANNELS_FILE):
+        save_json(LOG_CHANNELS_FILE, LOG_CHANNEL_IDS if isinstance(LOG_CHANNEL_IDS, dict) else {})
 
 
 def get_existing_memory_files():
@@ -771,12 +889,83 @@ def get_existing_memory_files():
     return files
 
 
+def build_memory_report_text():
+    status = local_memory_status()
+    level_users = db_table_count("levels")
+    economy_users = db_table_count("economy")
+    total_coins = db_sum_column("economy", "balance")
+    warning_users = safe_len_json(WARNINGS_FILE)
+    log_channels_saved = safe_len_json(LOG_CHANNELS_FILE)
+
+    lines = []
+    lines.append("```txt")
+    lines.append("RETARDS SYSTEM MEMORY REPORT")
+    lines.append("----------------------------")
+    lines.append(f"Level users      : {level_users}")
+    lines.append(f"Economy users    : {economy_users}")
+    lines.append(f"Total coins      : {total_coins:,} {COIN_NAME}")
+    lines.append(f"Warning users    : {warning_users}")
+    lines.append(f"Saved log rooms  : {log_channels_saved}")
+    lines.append("")
+    lines.append("FILES")
+
+    for file_name, info in status.items():
+        state = "OK" if info["valid"] else "CHECK"
+        size_kb = round(info["size"] / 1024, 2)
+        lines.append(f"- {file_name:<18} {state:<5} {size_kb} KB")
+
+    lines.append("```")
+    return "\n".join(lines)
+
+
+def add_memory_stats_fields(embed):
+    level_users = db_table_count("levels")
+    economy_users = db_table_count("economy")
+    total_coins = db_sum_column("economy", "balance")
+    warning_users = safe_len_json(WARNINGS_FILE)
+    log_channels_saved = safe_len_json(LOG_CHANNELS_FILE)
+
+    embed.add_field(
+        name="📊 اللفل والاقتصاد",
+        value=(
+            f"**Level users:** `{level_users}`\n"
+            f"**Economy users:** `{economy_users}`\n"
+            f"**Total coins:** `{total_coins:,}` {COIN_NAME}"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="🛡️ ملفات النظام",
+        value=(
+            f"**Warning users:** `{warning_users}`\n"
+            f"**Saved log rooms:** `{log_channels_saved}`"
+        ),
+        inline=True
+    )
+
+    top_money = get_top_money(5)
+    if top_money:
+        money_text = ""
+        for i, (user_id, balance) in enumerate(top_money, start=1):
+            money_text += f"`{i}.` <@{user_id}> — **{balance:,}**\n"
+        embed.add_field(name=f"{ECONOMY_EMOJI} Top Money", value=money_text[:1000], inline=False)
+
+    top_levels = get_top_levels(5)
+    if top_levels:
+        level_text = ""
+        for i, (user_id, xp, level) in enumerate(top_levels, start=1):
+            level_text += f"`{i}.` <@{user_id}> — **Lv.{level}** | XP `{xp}`\n"
+        embed.add_field(name="🏆 Top Levels", value=level_text[:1000], inline=False)
+
+
 async def create_memory_backup(guild, reason="Manual backup", requested_by=None):
     channel = await get_channel_by_id(guild, MEMORY_BACKUP_CHANNEL_ID)
 
     if not channel:
         return False, "ما لقيت روم النسخ الاحتياطي. تأكد من MEMORY_BACKUP_CHANNEL_ID."
 
+    init_db()
     files = get_existing_memory_files()
 
     if not files:
@@ -788,16 +977,27 @@ async def create_memory_backup(guild, reason="Manual backup", requested_by=None)
         for path in files:
             attachments.append(discord.File(str(path), filename=path.name))
 
+        report_text = build_memory_report_text()
+        report_path = Path("memory_report.txt")
+        report_path.write_text(report_text.replace("```txt\n", "").replace("```", ""), encoding="utf-8")
+        attachments.append(discord.File(str(report_path), filename="memory_report.txt"))
+
         now_unix = int(time.time())
         requester = requested_by.mention if requested_by else "النظام التلقائي"
+        file_lines = []
+
+        for path in files:
+            size_kb = round(path.stat().st_size / 1024, 2)
+            file_lines.append(f"• `{path.name}` — `{size_kb} KB`")
 
         embed = discord.Embed(
-            title="💾 نسخة احتياطية لذاكرة البوت",
+            title="💾 Memory Backup Saved",
             description=(
                 f"`{MEMORY_BACKUP_MESSAGE_TAG}`\n\n"
                 f"**السبب:** {reason}\n"
                 f"**بواسطة:** {requester}\n"
-                f"**الوقت:** <t:{now_unix}:F> | <t:{now_unix}:R>"
+                f"**الوقت:** <t:{now_unix}:F> | <t:{now_unix}:R>\n\n"
+                f"✅ تم حفظ ملفات الذاكرة + تقرير مقروء."
             ),
             color=COLOR_BLUE,
             timestamp=discord.utils.utcnow()
@@ -805,32 +1005,34 @@ async def create_memory_backup(guild, reason="Manual backup", requested_by=None)
 
         embed.add_field(
             name="📦 الملفات المحفوظة",
-            value="\n".join([f"• `{path.name}`" for path in files]),
+            value="\n".join(file_lines)[:1000],
             inline=False
         )
+        add_memory_stats_fields(embed)
+        embed.set_footer(text=f"{BOT_BRAND} | Auto Memory System")
 
-        embed.set_footer(text="NM System | Memory Backup")
-
-        await channel.send(embed=embed, files=attachments)
-        return True, f"تم حفظ النسخة في {channel.mention}."
+        await channel.send(content=MEMORY_BACKUP_MESSAGE_TAG, embed=embed, files=attachments)
+        return True, f"تم حفظ النسخة في {channel.mention} مع تقرير واضح."
 
     except Exception as e:
         return False, f"فشل حفظ النسخة: {e}"
 
 
-async def find_latest_memory_backup_message(channel, limit=50):
+async def find_latest_memory_backup_message(channel, limit=MEMORY_BACKUP_HISTORY_LIMIT):
     try:
         async for message in channel.history(limit=limit):
             has_tag = False
+            tags = set(MEMORY_BACKUP_OLD_TAGS + [MEMORY_BACKUP_MESSAGE_TAG])
 
-            if message.embeds:
+            if message.content and any(tag in message.content for tag in tags):
+                has_tag = True
+
+            if not has_tag and message.embeds:
                 for embed in message.embeds:
-                    if embed.description and MEMORY_BACKUP_MESSAGE_TAG in embed.description:
+                    parts = [embed.title or "", embed.description or ""]
+                    if any(any(tag in part for tag in tags) for part in parts):
                         has_tag = True
                         break
-
-            if not has_tag and message.content and MEMORY_BACKUP_MESSAGE_TAG in message.content:
-                has_tag = True
 
             if not has_tag:
                 continue
@@ -848,8 +1050,11 @@ async def find_latest_memory_backup_message(channel, limit=50):
 
 
 async def restore_memory_from_backup(guild, force=False):
-    if local_memory_exists() and not force:
-        return False, "الذاكرة المحلية موجودة، ما احتجت أسترجع من الروم."
+    global warnings, LOG_CHANNEL_IDS
+
+    if not force and not memory_needs_auto_restore():
+        ensure_memory_placeholder_files()
+        return False, "قاعدة البيانات موجودة وسليمة، ما احتجت أسترجع من الروم."
 
     channel = await get_channel_by_id(guild, MEMORY_BACKUP_CHANNEL_ID)
 
@@ -869,11 +1074,18 @@ async def restore_memory_from_backup(guild, force=False):
                 continue
 
             file_bytes = await attachment.read()
+            if not file_bytes:
+                continue
+
             Path(attachment.filename).write_bytes(file_bytes)
             restored_files.append(attachment.filename)
 
         if not restored_files:
             return False, "لقيت رسالة Backup لكن ما لقيت ملفات ذاكرة داخلها."
+
+        warnings = load_json(WARNINGS_FILE, {})
+        LOG_CHANNEL_IDS = load_json(LOG_CHANNELS_FILE, {})
+        init_db()
 
         return True, "تم استرجاع: " + ", ".join(restored_files)
 
@@ -883,6 +1095,7 @@ async def restore_memory_from_backup(guild, force=False):
 
 async def memory_backup_loop():
     await bot.wait_until_ready()
+    await asyncio.sleep(30)
 
     while not bot.is_closed():
         try:
@@ -1596,7 +1809,7 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="NM System | !مساعدة"
+            name="Retard coin Economy | !مساعدة"
         )
     )
 
@@ -2736,13 +2949,19 @@ async def my_level(ctx):
     xp, level = get_level_data(ctx.author.id)
     needed = level * 100
     balance = get_balance(ctx.author.id)
+    progress = xp_progress_bar(xp, needed)
 
-    embed = discord.Embed(title="📊 لفلك", color=COLOR_BLUE)
-    embed.add_field(name="👤 العضو", value=ctx.author.mention, inline=False)
-    embed.add_field(name="Level", value=str(level), inline=True)
-    embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
-    embed.add_field(name="💰 الرصيد", value=f"{balance:,} {COIN_NAME}", inline=True)
-
+    embed = discord.Embed(
+        title=f"{LEVEL_EMOJI} Level Profile",
+        description=f"{ctx.author.mention}\n`{progress}` **{xp}/{needed} XP**",
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
+    embed.add_field(name="⚡ XP", value=f"**{xp:,}/{needed:,}**", inline=True)
+    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Level System")
     await ctx.send(embed=embed)
 
 
@@ -2755,13 +2974,19 @@ async def level(ctx, member: discord.Member = None):
     xp, level_num = get_level_data(member.id)
     needed = level_num * 100
     balance = get_balance(member.id)
+    progress = xp_progress_bar(xp, needed)
 
-    embed = discord.Embed(title="📊 Level", color=COLOR_BLUE)
-    embed.add_field(name="👤 العضو", value=member.mention, inline=False)
-    embed.add_field(name="Level", value=str(level_num), inline=True)
-    embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
-    embed.add_field(name="💰 الرصيد", value=f"{balance:,} {COIN_NAME}", inline=True)
-
+    embed = discord.Embed(
+        title=f"{LEVEL_EMOJI} Level Profile",
+        description=f"{member.mention}\n`{progress}` **{xp}/{needed} XP**",
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
+    embed.add_field(name="⚡ XP", value=f"**{xp:,}/{needed:,}**", inline=True)
+    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Level System")
     await ctx.send(embed=embed)
 
 
@@ -2776,12 +3001,20 @@ async def leaderboard(ctx):
         await ctx.send("مافي بيانات لفل للحين.")
         return
 
+    medals = ["🥇", "🥈", "🥉"]
     text = ""
 
     for i, (user_id, xp, level) in enumerate(rows, start=1):
-        text += f"**{i}.** <@{user_id}> — Level `{level}` | XP `{xp}`\n"
+        icon = medals[i - 1] if i <= 3 else f"`#{i}`"
+        text += f"{icon} <@{user_id}> — **Level {level}** | `{xp:,} XP`\n"
 
-    embed = discord.Embed(title="🏆 ترتيب اللفل", description=text, color=COLOR_YELLOW)
+    embed = discord.Embed(
+        title="🏆 Level Leaderboard",
+        description=text,
+        color=COLOR_YELLOW,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Top 10 Levels")
     await ctx.send(embed=embed)
 
 
@@ -2792,11 +3025,19 @@ async def my_balance(ctx):
 
     balance = get_balance(ctx.author.id)
     xp, level = get_level_data(ctx.author.id)
+    daily_bonus = DAILY_REWARD_BASE + (int(level) * 25)
 
-    embed = discord.Embed(title="💰 رصيدك", color=COLOR_GREEN)
-    embed.add_field(name="👤 العضو", value=ctx.author.mention, inline=False)
-    embed.add_field(name="الرصيد", value=f"**{balance:,} {COIN_NAME}**", inline=True)
-    embed.add_field(name="Level", value=f"`{level}`", inline=True)
+    embed = discord.Embed(
+        title=f"{ECONOMY_EMOJI} Wallet",
+        description=f"محفظة {ctx.author.mention}",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="💰 الرصيد", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
+    embed.add_field(name="🎁 Daily Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Economy")
     await ctx.send(embed=embed)
 
 
@@ -2806,13 +3047,21 @@ async def balance(ctx, member: discord.Member = None):
         return
 
     member = member or ctx.author
-    balance = get_balance(member.id)
-    xp, level = get_level_data(member.id)
+    balance_amount = get_balance(member.id)
+    xp, level_num = get_level_data(member.id)
+    daily_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
 
-    embed = discord.Embed(title="💰 الرصيد", color=COLOR_GREEN)
-    embed.add_field(name="👤 العضو", value=member.mention, inline=False)
-    embed.add_field(name="الرصيد", value=f"**{balance:,} {COIN_NAME}**", inline=True)
-    embed.add_field(name="Level", value=f"`{level}`", inline=True)
+    embed = discord.Embed(
+        title=f"{ECONOMY_EMOJI} Wallet",
+        description=f"محفظة {member.mention}",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    embed.add_field(name="💰 الرصيد", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
+    embed.add_field(name="🎁 Daily Reward", value=f"**{daily_bonus:,}**\n{COIN_NAME}", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Economy")
     await ctx.send(embed=embed)
 
 
@@ -2822,15 +3071,29 @@ async def daily(ctx):
         return
 
     xp, level = get_level_data(ctx.author.id)
-    success, remaining, balance, reward = claim_daily(ctx.author.id, level)
+    success, remaining, balance_amount, reward = claim_daily(ctx.author.id, level)
 
     if not success:
-        await ctx.send(f"⏳ أخذت مكافأتك اليومية قبل. ارجع بعد **{format_seconds(remaining)}**.")
+        embed = discord.Embed(
+            title="⏳ Daily already claimed",
+            description=f"ارجع بعد **{format_seconds(remaining)}**.",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} | Daily Reward")
+        await ctx.send(embed=embed)
         return
 
-    embed = discord.Embed(title="🎁 المكافأة اليومية", color=COLOR_GREEN)
-    embed.add_field(name="المكافأة", value=f"+{reward:,} {COIN_NAME}", inline=True)
-    embed.add_field(name="رصيدك الآن", value=f"{balance:,} {COIN_NAME}", inline=True)
+    embed = discord.Embed(
+        title="🎁 Daily Reward Claimed",
+        description=f"تم إضافة المكافأة لمحفظتك يا {ctx.author.mention}.",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="المكافأة", value=f"**+{reward:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="رصيدك الآن", value=f"**{balance_amount:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name="Level bonus", value=f"Level `{level}`", inline=True)
     embed.set_footer(text="كل ما زاد لفلك تزيد مكافأتك اليومية شوي")
     await ctx.send(embed=embed)
 
@@ -2864,11 +3127,18 @@ async def transfer_money(ctx, member: discord.Member = None, amount: int = None)
 
     new_receiver_balance = add_money(member.id, amount)
 
-    embed = discord.Embed(title="✅ تم التحويل", color=COLOR_GREEN)
+    embed = discord.Embed(
+        title="✅ Transfer Complete",
+        description="تم التحويل بنجاح.",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
     embed.add_field(name="من", value=ctx.author.mention, inline=True)
     embed.add_field(name="إلى", value=member.mention, inline=True)
-    embed.add_field(name="المبلغ", value=f"{amount:,} {COIN_NAME}", inline=False)
-    embed.add_field(name="رصيدك الآن", value=f"{new_sender_balance:,} {COIN_NAME}", inline=True)
+    embed.add_field(name="المبلغ", value=f"**{amount:,}** {COIN_NAME}", inline=False)
+    embed.add_field(name="رصيد المرسل", value=f"**{new_sender_balance:,}**", inline=True)
+    embed.add_field(name="رصيد المستلم", value=f"**{new_receiver_balance:,}**", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Economy Transfer")
     await ctx.send(embed=embed)
 
 
@@ -2883,11 +3153,22 @@ async def richest(ctx):
         await ctx.send("مافي بيانات اقتصاد للحين.")
         return
 
+    medals = ["🥇", "🥈", "🥉"]
     text = ""
-    for i, (user_id, balance) in enumerate(rows, start=1):
-        text += f"**{i}.** <@{user_id}> — `{balance:,}` {COIN_NAME}\n"
+    total = db_sum_column("economy", "balance")
 
-    embed = discord.Embed(title="💎 أغنى الأعضاء", description=text, color=COLOR_YELLOW)
+    for i, (user_id, balance_amount) in enumerate(rows, start=1):
+        icon = medals[i - 1] if i <= 3 else f"`#{i}`"
+        text += f"{icon} <@{user_id}> — **{balance_amount:,}** {COIN_NAME}\n"
+
+    embed = discord.Embed(
+        title=f"💎 Richest Members",
+        description=text,
+        color=COLOR_YELLOW,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="🏦 Total Economy", value=f"**{total:,}** {COIN_NAME}", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Top 10 Economy")
     await ctx.send(embed=embed)
 
 
@@ -2905,8 +3186,12 @@ async def admin_add_money(ctx, member: discord.Member = None, amount: int = None
         await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
         return
 
-    balance = add_money(member.id, amount)
-    await ctx.send(f"✅ عطيت {member.mention} **{amount:,} {COIN_NAME}**. رصيده الآن: **{balance:,}**")
+    balance_amount = add_money(member.id, amount)
+    embed = discord.Embed(title="✅ Admin Economy", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+    embed.description = f"تم إعطاء {member.mention} **{amount:,} {COIN_NAME}**."
+    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {COIN_NAME}", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="سحبفلوس", aliases=["removemoney"])
@@ -2923,13 +3208,17 @@ async def admin_remove_money(ctx, member: discord.Member = None, amount: int = N
         await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
         return
 
-    success, balance = remove_money(member.id, amount)
+    success, balance_amount = remove_money(member.id, amount)
 
     if not success:
         await ctx.send("❌ رصيد العضو ما يكفي للسحب.")
         return
 
-    await ctx.send(f"✅ تم سحب **{amount:,} {COIN_NAME}** من {member.mention}. رصيده الآن: **{balance:,}**")
+    embed = discord.Embed(title="✅ Admin Economy", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
+    embed.description = f"تم سحب **{amount:,} {COIN_NAME}** من {member.mention}."
+    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {COIN_NAME}", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="تصفيرفلوس", aliases=["resetmoney"])
@@ -2943,7 +3232,14 @@ async def admin_reset_money(ctx, member: discord.Member = None):
         return
 
     set_balance(member.id, 0)
-    await ctx.send(f"✅ تم تصفير رصيد {member.mention}.")
+    embed = discord.Embed(
+        title="🧹 Balance Reset",
+        description=f"تم تصفير رصيد {member.mention}.",
+        color=COLOR_RED,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="حماية", aliases=["protection"])
@@ -3449,25 +3745,26 @@ async def restore_memory_command(ctx):
 @bot.command(name="حالة_الذاكرة", aliases=["memory", "ذاكرة"])
 @commands.has_permissions(administrator=True)
 async def memory_status_command(ctx):
-    files = get_existing_memory_files()
+    init_db()
+    status = local_memory_status()
     text = ""
 
-    for path in files:
-        size_kb = round(path.stat().st_size / 1024, 2)
-        text += f"• `{path.name}` - `{size_kb} KB`\n"
-
-    if not text:
-        text = "مافي ملفات ذاكرة موجودة حالياً."
+    for file_name, info in status.items():
+        state = "✅ سليم" if info["valid"] else "⚠️ يحتاج فحص"
+        size_kb = round(info["size"] / 1024, 2)
+        text += f"• `{file_name}` — {state} — `{size_kb} KB`\n"
 
     embed = discord.Embed(
-        title="🧠 حالة ذاكرة البوت",
-        description=text,
+        title="🧠 Memory Status",
+        description=text or "مافي ملفات ذاكرة موجودة حالياً.",
         color=COLOR_BLUE,
         timestamp=discord.utils.utcnow()
     )
+    add_memory_stats_fields(embed)
     embed.add_field(name="📌 روم النسخ", value=f"<#{MEMORY_BACKUP_CHANNEL_ID}>", inline=False)
-    embed.add_field(name="⏱️ النسخ التلقائي", value=f"كل {MEMORY_BACKUP_INTERVAL_SECONDS // 60} دقيقة", inline=False)
-    embed.set_footer(text="NM System | Memory")
+    embed.add_field(name="⏱️ النسخ التلقائي", value=f"كل {MEMORY_BACKUP_INTERVAL_SECONDS // 60} دقيقة", inline=True)
+    embed.add_field(name="🔁 Auto restore", value="إذا قاعدة البيانات ناقصة أو خربانة عند التشغيل", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Memory")
 
     await ctx.send(embed=embed)
 
