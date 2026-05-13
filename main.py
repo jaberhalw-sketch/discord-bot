@@ -1,37 +1,60 @@
 import discord
 from discord.ext import commands
-import random
 from datetime import timedelta
 import os
 import json
 import time
+import random
 import sqlite3
 import re
 from flask import Flask
 from threading import Thread
 
+# =========================
+# CONFIG
+# =========================
+
 TOKEN = os.getenv("TOKEN")
 
-MAIN_GUILD_ID = 1300038159446441985
-COMMUNITY_GUILD_ID = 1141143597350146048
-MAIN_GUILD_IDS = [MAIN_GUILD_ID, COMMUNITY_GUILD_ID]
+GUILD_ID = 1318663576210243616
 
-# =============================
-# NM COMMUNITY CHANNELS
-# =============================
-NM_RULES_CHANNEL_ID = 1188513798173233262
-NM_GENERAL_CHANNEL_ID = 1411358288758444114
-NM_BOT_COMMANDS_CHANNEL_ID = 1188513816443617340
-NM_LOOKING_FOR_GAME_CHANNEL_ID = 1499736964562292796
-NM_EVENTS_GIVEAWAYS_CHANNEL_ID = 1499736723310120960
-NM_SUGGESTIONS_CHANNEL_ID = 1499736996741124236
-NM_ROLES_CHANNEL_ID = 1499737022082842654
-NM_LOGS_CHANNEL_ID = 1499737094422134794
-NM_STAFF_CHAT_CHANNEL_ID = 1188513875268739162
+LOG_CHANNEL_ID = None
 
-# حط ايديات رتب الألعاب هنا إذا سويتها في NM.
-# إذا خليتها None، الزر بيقول للعضو إن الرتبة غير مضافة بالكود.
-NM_GAME_ROLE_IDS = {
+LOOKING_FOR_GAME_CHANNEL_ID = 1504066361876418703
+GIVEAWAYS_CHANNEL_ID = 1370418475314581524
+ROLES_CHANNEL_ID = 1504066503501152377
+ANNOUNCEMENTS_CHANNEL_ID = 1370433079377920130
+
+OWNER_USERNAMES = ["jr_7", "jbh.1"]
+
+BYPASS_USER_IDS = {
+    1125198908231004191
+}
+
+DB_FILE = "nm_system.db"
+WARNINGS_FILE = "warnings.json"
+
+PREFIX = "!"
+
+ANTI_LINKS = True
+SPAM_LIMIT = 10
+SPAM_SECONDS = 5
+MASS_MENTION_LIMIT = 8
+LEVEL_COOLDOWN = 25
+
+COLOR_YELLOW = discord.Color.gold()
+COLOR_GREEN = discord.Color.green()
+COLOR_RED = discord.Color.red()
+COLOR_BLUE = discord.Color.blue()
+COLOR_GREY = discord.Color.dark_grey()
+COLOR_PURPLE = discord.Color.purple()
+COLOR_ORANGE = discord.Color.orange()
+
+protection_enabled = True
+user_message_times = {}
+xp_cooldowns = {}
+
+GAME_ROLE_IDS = {
     "gta": None,
     "valorant": None,
     "fortnite": None,
@@ -39,110 +62,38 @@ NM_GAME_ROLE_IDS = {
     "minecraft": None,
 }
 
-# أوامر NM فقط، ما تشتغل في مقاطعة رسك.
-NM_ONLY_COMMANDS = {
-    "اعداد_nm", "nm_setup",
-    "اقتراح", "suggest",
-    "لعب", "play",
-    "فعالية", "event",
-    "سحب", "giveaway",
-    "رولات_nm", "nm_roles",
-}
-
-# أوامر مسموح تكون في السيرفرين.
-COMMON_COMMANDS = {"بنق", "ping", "هلا", "hello"}
-
-# =============================
-# RISK LOG SETTINGS
-# =============================
-# مقاطعة رسك: قفل كل اللوقات ما عدا لوقات التقديم.
-RISK_ADMIN_LOGS_ENABLED = False
-RISK_PROTECTION_LOGS_ENABLED = False
-RISK_LEAVE_LOGS_ENABLED = False
-RISK_SUPPORT_WAITING_LOGS_ENABLED = False
-RISK_APPLICATION_LOGS_ENABLED = True
-
-SUPPORT_WAITING_VOICE_ID = 1300051682809483294
-SUPPORT_CHAT_ID = 1498683004703215796
-SUPPORT_PING_ROLE_ID = 1300049212553302109
-
-FINAL_SUPPORT_ROLE_ID = 1300049180877787136
-
-LEAVE_LOG_CHANNEL_ID = 1498690187427844137
-PROTECTION_LOG_CHANNEL_ID = 1498727149388169378
-
-APPLICATION_CHANNEL_ID = 1498758805914259587
-INTERVIEW_VOICE_ROOM_ID = 1498759006024368289
-APPLICATION_LOG_CHANNEL_ID = 1498762366962368512
-ADMIN_LOG_CHANNEL_ID = 1498727149388169378
-
-OWNER_USERNAMES = ["jr_7", "jbh.1"]
-
-EXEMPT_USER_IDS = [
-    1125198908231004191
+bad_words = [
+    "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب",
+    "كس", "كس امك",
+    "طيزي", "كسي", "انيكك", "انيك", "ازغب", "جرار",
+    "bitch",
+    "معرس", "اعرسك", "ممحون", "محنه", "محنة",
+    "العقه", "العقة",
+    "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه"
 ]
-
-STAFF_MAIN_ROLE_ID = 1300049199332720652
-
-STAFF_ROLE_IDS = {
-    1300049171860164658: "ادمن +",
-    1300049176545067161: "ادمن",
-    1300049177769807882: "مشرف +",
-    1300049179426426932: "مشرف",
-    1494466779915878494: "مشرف متدرب",
-    1300049180877787136: "دعم فني"
-}
-
-ANTI_LINKS = True
-SPAM_LIMIT = 10
-SPAM_SECONDS = 5
-MASS_MENTION_LIMIT = 10
-
-COLOR_YELLOW = discord.Color.gold()
-COLOR_GREY = discord.Color.dark_grey()
-COLOR_RED = discord.Color.red()
-COLOR_GREEN = discord.Color.green()
-COLOR_BLUE = discord.Color.blue()
-COLOR_PURPLE = discord.Color.purple()
-
-WARNINGS_FILE = "warnings.json"
-DB_FILE = "bot_data.db"
-
-user_message_times = {}
-protection_enabled = True
 
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.voice_states = True
+intents.guilds = True
+intents.messages = True
+intents.reactions = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+try:
+    intents.moderation = True
+except:
+    pass
 
-bad_words = [
-    "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب", "كس", "كس امك",
-    "طيزي", "كسي", "انيكك", "انيك", "ازغب", "جرار", "bitch",
-    "معرس", "اعرسك", "ممحون", "محنه", "محنة", "العقه", "العقة",
-    "قضي", "زبي", "فقحة", "زبري", "عيري", "منيكه"
-]
+bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 
-def contains_bad_word(content):
-    for word in bad_words:
-        pattern = r'(?<!\w)' + re.escape(word.lower()) + r'(?!\w)'
-        if re.search(pattern, content.lower()):
-            return True
-    return False
-
+# =========================
+# DATABASE
+# =========================
 
 def db_connect():
     return sqlite3.connect(DB_FILE)
-
-
-def add_column_if_missing(cur, table, column, column_type):
-    cur.execute(f"PRAGMA table_info({table})")
-    columns = [row[1] for row in cur.fetchall()]
-    if column not in columns:
-        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
 
 def init_db():
@@ -150,210 +101,109 @@ def init_db():
     cur = conn.cursor()
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            app_id TEXT UNIQUE,
-            user_id INTEGER,
-            message_id INTEGER,
-            channel_id INTEGER,
-            status TEXT,
-            name TEXT,
-            age TEXT,
-            daily_time TEXT,
-            experience TEXT,
-            why_you TEXT,
-            reviewer_id INTEGER,
-            reject_reason TEXT,
-            final_reviewer_id INTEGER,
-            final_reason TEXT,
-            created_at TEXT,
-            updated_at TEXT
+        CREATE TABLE IF NOT EXISTS levels (
+            user_id INTEGER PRIMARY KEY,
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1
         )
     """)
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS application_blacklist (
-            user_id INTEGER PRIMARY KEY,
-            reason TEXT,
-            moderator_id INTEGER,
+        CREATE TABLE IF NOT EXISTS suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            suggestion TEXT,
             created_at TEXT
         )
     """)
 
-    needed_columns = {
-        "app_id": "TEXT",
-        "user_id": "INTEGER",
-        "message_id": "INTEGER",
-        "channel_id": "INTEGER",
-        "status": "TEXT",
-        "name": "TEXT",
-        "age": "TEXT",
-        "daily_time": "TEXT",
-        "experience": "TEXT",
-        "why_you": "TEXT",
-        "reviewer_id": "INTEGER",
-        "reject_reason": "TEXT",
-        "final_reviewer_id": "INTEGER",
-        "final_reason": "TEXT",
-        "created_at": "TEXT",
-        "updated_at": "TEXT"
-    }
-
-    for col, col_type in needed_columns.items():
-        add_column_if_missing(cur, "applications", col, col_type)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS giveaways (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            prize TEXT,
+            winners INTEGER,
+            created_by INTEGER,
+            created_at TEXT
+        )
+    """)
 
     conn.commit()
     conn.close()
 
 
-def create_application(user_id, channel_id, name, age, daily_time, experience, why_you):
+def get_level_data(user_id):
     conn = db_connect()
     cur = conn.cursor()
-    now = discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    cur.execute("""
-        INSERT INTO applications (
-            app_id, user_id, message_id, channel_id, status,
-            name, age, daily_time, experience, why_you,
-            reviewer_id, reject_reason, final_reviewer_id, final_reason,
-            created_at, updated_at
+    cur.execute("SELECT xp, level FROM levels WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+
+    if not row:
+        cur.execute(
+            "INSERT INTO levels (user_id, xp, level) VALUES (?, ?, ?)",
+            (user_id, 0, 1)
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        "TEMP", user_id, None, channel_id, "pending",
-        name, age, daily_time, experience, why_you,
-        None, None, None, None, now, now
-    ))
+        conn.commit()
+        conn.close()
+        return 0, 1
 
-    app_number = cur.lastrowid
-    app_id = f"SUP-{app_number:04d}"
-
-    cur.execute("UPDATE applications SET app_id = ? WHERE id = ?", (app_id, app_number))
-
-    conn.commit()
     conn.close()
-    return app_id
+    return row[0], row[1]
 
 
-def update_application_message(app_id, message_id):
+def add_xp(user_id, amount):
+    xp, level = get_level_data(user_id)
+
+    xp += amount
+    needed = level * 100
+    leveled_up = False
+
+    while xp >= needed:
+        xp -= needed
+        level += 1
+        needed = level * 100
+        leveled_up = True
+
     conn = db_connect()
     cur = conn.cursor()
     cur.execute(
-        "UPDATE applications SET message_id = ?, updated_at = ? WHERE app_id = ?",
-        (message_id, discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"), app_id)
+        "UPDATE levels SET xp = ?, level = ? WHERE user_id = ?",
+        (xp, level, user_id)
     )
     conn.commit()
     conn.close()
 
+    return xp, level, leveled_up
 
-def get_active_application(user_id):
+
+def get_top_levels(limit=10):
     conn = db_connect()
     cur = conn.cursor()
+
     cur.execute("""
-        SELECT app_id, status FROM applications
-        WHERE user_id = ? AND status IN ('pending', 'accepted', 'interview_done')
-        ORDER BY id DESC LIMIT 1
-    """, (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
+        SELECT user_id, xp, level
+        FROM levels
+        ORDER BY level DESC, xp DESC
+        LIMIT ?
+    """, (limit,))
 
-
-def update_application_status(app_id, status, reviewer_id=None, reject_reason=None, final_reviewer_id=None, final_reason=None):
-    conn = db_connect()
-    cur = conn.cursor()
-
-    if status in ["final_accepted", "final_rejected"]:
-        cur.execute("""
-            UPDATE applications
-            SET status = ?, final_reviewer_id = ?, final_reason = ?, updated_at = ?
-            WHERE app_id = ?
-        """, (
-            status,
-            final_reviewer_id,
-            final_reason,
-            discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-            app_id
-        ))
-    else:
-        cur.execute("""
-            UPDATE applications
-            SET status = ?, reviewer_id = ?, reject_reason = ?, updated_at = ?
-            WHERE app_id = ?
-        """, (
-            status,
-            reviewer_id,
-            reject_reason,
-            discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC"),
-            app_id
-        ))
-
-    conn.commit()
-    conn.close()
-
-
-def get_unfinished_applications():
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT app_id, user_id, message_id, status
-        FROM applications
-        WHERE status IN ('pending', 'accepted', 'interview_done')
-        AND message_id IS NOT NULL
-    """)
     rows = cur.fetchall()
     conn.close()
     return rows
 
 
-def get_user_application_summary(user_id):
-    conn = db_connect()
-    cur = conn.cursor()
-
-    cur.execute("SELECT COUNT(*) FROM applications WHERE user_id = ?", (user_id,))
-    total = cur.fetchone()[0]
-
-    cur.execute("""
-        SELECT app_id, status, created_at
-        FROM applications
-        WHERE user_id = ?
-        ORDER BY id DESC LIMIT 1
-    """, (user_id,))
-    latest = cur.fetchone()
-
-    conn.close()
-    return total, latest
-
-
-def add_to_blacklist(user_id, reason, moderator_id):
+def save_suggestion(user_id, suggestion):
     conn = db_connect()
     cur = conn.cursor()
     now = discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    cur.execute("""
-        INSERT OR REPLACE INTO application_blacklist (user_id, reason, moderator_id, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, reason, moderator_id, now))
+    cur.execute(
+        "INSERT INTO suggestions (user_id, suggestion, created_at) VALUES (?, ?, ?)",
+        (user_id, suggestion, now)
+    )
 
     conn.commit()
     conn.close()
-
-
-def remove_from_blacklist(user_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM application_blacklist WHERE user_id = ?", (user_id,))
-    conn.commit()
-    conn.close()
-
-
-def get_blacklist(user_id):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("SELECT reason, moderator_id, created_at FROM application_blacklist WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-    return row
 
 
 def load_json(file_name, default):
@@ -376,78 +226,34 @@ def save_warnings():
     save_json(WARNINGS_FILE, warnings)
 
 
-def is_admin(member):
-    return member.guild_permissions.administrator
+# =========================
+# HELPERS
+# =========================
 
+def contains_bad_word(content):
+    content = content.lower()
 
-@bot.check
-async def restrict_guild(ctx):
-    if not ctx.guild or ctx.guild.id not in MAIN_GUILD_IDS:
-        return False
+    for word in bad_words:
+        pattern = r'(?<![\w\u0600-\u06FF])' + re.escape(word.lower()) + r'(?![\w\u0600-\u06FF])'
 
-    command_name = ctx.command.name if ctx.command else ""
-
-    # NM: يشغل أوامر NM فقط + الأوامر العامة البسيطة
-    if ctx.guild.id == COMMUNITY_GUILD_ID:
-        return command_name in NM_ONLY_COMMANDS or command_name in COMMON_COMMANDS
-
-    # مقاطعة رسك: يمنع أوامر NM عشان ما تختلط السيرفرات
-    if ctx.guild.id == MAIN_GUILD_ID:
-        return command_name not in NM_ONLY_COMMANDS
+        if re.search(pattern, content):
+            return True
 
     return False
 
 
-@bot.event
-async def on_guild_join(guild):
-    if guild.id not in MAIN_GUILD_IDS:
-        await guild.leave()
+def is_admin(member):
+    return member.guild_permissions.administrator
 
 
-async def send_admin_log(guild, title, description, color=COLOR_GREY):
-    # مقاطعة رسك: اللوقات الإدارية مقفلة، التقديم فقط يظل شغال.
-    if guild and guild.id == MAIN_GUILD_ID and not RISK_ADMIN_LOGS_ENABLED:
-        return
-
-    channel = guild.get_channel(ADMIN_LOG_CHANNEL_ID)
-    if not channel:
-        return
-
-    embed = discord.Embed(title=title, description=description, color=color)
-    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
-    await channel.send(embed=embed)
-
-
-async def send_app_log(guild, title, description, color):
-    # لوقات التقديم في مقاطعة رسك تظل شغالة.
-    if guild and guild.id == MAIN_GUILD_ID and not RISK_APPLICATION_LOGS_ENABLED:
-        return
-
-    channel = guild.get_channel(APPLICATION_LOG_CHANNEL_ID)
-    if not channel:
-        return
-
-    embed = discord.Embed(title=title, description=description, color=color)
-    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
-    await channel.send(embed=embed)
-
-
-async def send_nm_log(guild, title, description, color=COLOR_GREY):
-    if not guild or guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    channel = guild.get_channel(NM_LOGS_CHANNEL_ID)
-    if not channel:
-        return
-
-    embed = discord.Embed(title=title, description=description, color=color)
-    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
-    await channel.send(embed=embed)
+def is_bypass(member):
+    return member.id in BYPASS_USER_IDS or is_admin(member)
 
 
 def parse_duration_to_seconds(duration_text):
     text = duration_text.strip().lower()
     match = re.fullmatch(r"(\d+)\s*([mhd])", text)
+
     if not match:
         return None
 
@@ -456,131 +262,116 @@ def parse_duration_to_seconds(duration_text):
 
     if unit == "m":
         return amount * 60
+
     if unit == "h":
         return amount * 60 * 60
+
     if unit == "d":
         return amount * 60 * 60 * 24
+
     return None
 
 
-class JoinPlayView(discord.ui.View):
-    def __init__(self, creator_id):
-        super().__init__(timeout=None)
-        self.creator_id = creator_id
-        self.players = set()
+def clean_text(text, limit=900):
+    if not text:
+        return "بدون نص"
 
-    @discord.ui.button(label="بدخل", style=discord.ButtonStyle.green, emoji="🎮")
-    async def join_play(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.players.add(interaction.user.id)
-        players_text = "\n".join([f"• <@{uid}>" for uid in self.players]) or "لا يوجد"
+    text = text.replace("```", "'''")
 
-        embed = interaction.message.embeds[0]
-        new_embed = discord.Embed(title=embed.title, description=embed.description, color=embed.color)
-        for field in embed.fields:
-            if field.name != "👥 اللي بيدخلون":
-                new_embed.add_field(name=field.name, value=field.value, inline=field.inline)
-        new_embed.add_field(name="👥 اللي بيدخلون", value=players_text[:1000], inline=False)
-        new_embed.set_footer(text="NM Community | طلب لعب")
+    if len(text) > limit:
+        text = text[:limit] + "..."
 
-        await interaction.message.edit(embed=new_embed, view=self)
-        await interaction.response.send_message("✅ تم تسجيلك مع التجمع.", ephemeral=True)
+    return text
 
 
-class GiveawayView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.entries = set()
+def clean_channel_name(name):
+    name = name.lower()
+    name = re.sub(r"[^a-zA-Z0-9\u0600-\u06FF\- ]", "", name)
+    name = name.replace(" ", "-")
+    name = name[:80]
 
-    @discord.ui.button(label="دخول السحب", style=discord.ButtonStyle.green, emoji="🎁")
-    async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        self.entries.add(interaction.user.id)
-        await interaction.response.send_message("✅ دخلت السحب.", ephemeral=True)
+    if not name:
+        name = "game-room"
 
-
-class GameRolesView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    async def toggle_role(self, interaction: discord.Interaction, role_key: str):
-        role_id = NM_GAME_ROLE_IDS.get(role_key)
-        if not role_id:
-            await interaction.response.send_message("⚠️ الرتبة هذي ما انحط ايديها في الكود للحين.", ephemeral=True)
-            return
-
-        role = interaction.guild.get_role(role_id)
-        if not role:
-            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر.", ephemeral=True)
-            return
-
-        if role in interaction.user.roles:
-            await interaction.user.remove_roles(role)
-            await interaction.response.send_message(f"✅ شلت منك رتبة {role.mention}", ephemeral=True)
-        else:
-            await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
-
-    @discord.ui.button(label="GTA", style=discord.ButtonStyle.secondary, emoji="🚗", custom_id="nm_role_gta")
-    async def gta(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.toggle_role(interaction, "gta")
-
-    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.secondary, emoji="🎯", custom_id="nm_role_valorant")
-    async def valorant(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.toggle_role(interaction, "valorant")
-
-    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="nm_role_fortnite")
-    async def fortnite(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.toggle_role(interaction, "fortnite")
-
-    @discord.ui.button(label="Roblox", style=discord.ButtonStyle.secondary, emoji="🧱", custom_id="nm_role_roblox")
-    async def roblox(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.toggle_role(interaction, "roblox")
-
-    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.secondary, emoji="⛏️", custom_id="nm_role_minecraft")
-    async def minecraft(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.toggle_role(interaction, "minecraft")
+    return name
 
 
-async def send_protection_log(guild, member, violation, message_text, punishment):
-    # مقاطعة رسك: لوقات الحماية مقفلة، لكن الحماية نفسها تظل تشتغل.
-    if guild and guild.id == MAIN_GUILD_ID and not RISK_PROTECTION_LOGS_ENABLED:
-        return
+async def get_channel_by_id(guild, channel_id):
+    if not channel_id:
+        return None
 
-    log_channel = guild.get_channel(PROTECTION_LOG_CHANNEL_ID)
-    if not log_channel:
-        return
+    channel = guild.get_channel(channel_id)
 
-    embed = discord.Embed(title="🛡️ سجل مخالفة حماية", color=COLOR_YELLOW)
-    embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.id}`", inline=False)
-    embed.add_field(name="⚠️ المخالفة", value=violation, inline=True)
-    embed.add_field(name="🔨 العقوبة", value=punishment, inline=True)
-    embed.add_field(name="💬 الرسالة", value=f"```{message_text[:900]}```", inline=False)
-    embed.add_field(name="🕒 الوقت", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
-    embed.set_thumbnail(url=member.display_avatar.url)
-    await log_channel.send(embed=embed)
+    if channel:
+        return channel
 
-
-async def apply_punishment(member, channel, count):
     try:
-        if count == 2:
-            await member.timeout(discord.utils.utcnow() + timedelta(minutes=5))
-            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت 5 دقائق 🔇", delete_after=6)
-            return "تايم أوت 5 دقائق"
+        channel = await guild.fetch_channel(channel_id)
+        return channel
+    except:
+        return None
 
-        elif count == 3:
-            await member.timeout(discord.utils.utcnow() + timedelta(minutes=30))
-            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت 30 دقيقة 🔇", delete_after=6)
-            return "تايم أوت 30 دقيقة"
 
-        elif count >= 4:
-            await member.timeout(discord.utils.utcnow() + timedelta(days=1))
-            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت يوم كامل 🔇", delete_after=6)
-            return "تايم أوت يوم كامل"
+async def send_to_channel(guild, channel_id, embed=None, content=None, view=None):
+    channel = await get_channel_by_id(guild, channel_id)
 
-        return "تحذير فقط"
+    if not channel:
+        return None
 
-    except Exception as e:
-        await channel.send(f"ما قدرت أعطي تايم أوت. السبب: `{e}`", delete_after=8)
-        return f"فشل التايم أوت: {e}"
+    try:
+        return await channel.send(content=content, embed=embed, view=view)
+    except:
+        return None
+
+
+async def get_log_channel(guild):
+    if LOG_CHANNEL_ID:
+        channel = await get_channel_by_id(guild, LOG_CHANNEL_ID)
+        if channel:
+            return channel
+
+    names = ["logs", "log", "audit-log", "audit-logs", "لوق", "لوقات"]
+
+    for channel in guild.text_channels:
+        if channel.name.lower() in names:
+            return channel
+
+    return None
+
+
+async def send_log(guild, title, description, color=COLOR_GREY):
+    channel = await get_log_channel(guild)
+
+    if not channel:
+        return
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.set_footer(text="NM System | Audit Logs")
+
+    try:
+        await channel.send(embed=embed)
+    except:
+        pass
+
+
+async def get_audit_executor(guild, action, target_id=None):
+    try:
+        async for entry in guild.audit_logs(limit=5, action=action):
+            if target_id is None:
+                return entry.user
+
+            if entry.target and getattr(entry.target, "id", None) == target_id:
+                return entry.user
+
+        return None
+    except:
+        return None
 
 
 def add_warning(member, reason, message_text, moderator):
@@ -600,6 +391,29 @@ def add_warning(member, reason, message_text, moderator):
     return len(warnings[user_id])
 
 
+async def apply_punishment(member, channel, count):
+    try:
+        if count == 2:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=5))
+            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت 5 دقائق.", delete_after=6)
+            return "تايم أوت 5 دقائق"
+
+        if count == 3:
+            await member.timeout(discord.utils.utcnow() + timedelta(minutes=30))
+            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت 30 دقيقة.", delete_after=6)
+            return "تايم أوت 30 دقيقة"
+
+        if count >= 4:
+            await member.timeout(discord.utils.utcnow() + timedelta(days=1))
+            await channel.send(f"{member.mention} تم إعطاؤه تايم أوت يوم.", delete_after=6)
+            return "تايم أوت يوم"
+
+        return "تحذير فقط"
+
+    except Exception as e:
+        return f"فشل العقوبة: {e}"
+
+
 async def handle_violation(message, reason):
     old_message = message.content
 
@@ -609,294 +423,313 @@ async def handle_violation(message, reason):
         pass
 
     count = add_warning(message.author, reason, old_message, "النظام التلقائي")
+    punishment = await apply_punishment(message.author, message.channel, count)
 
     embed = discord.Embed(
         title="⚠️ تحذير تلقائي",
-        description=f"{message.author.mention} أخذت تحذير رقم **{count}**",
+        description=f"{message.author.mention} أخذ تحذير رقم **{count}**",
         color=COLOR_YELLOW
     )
     embed.add_field(name="السبب", value=reason, inline=False)
+    embed.add_field(name="الإجراء", value=punishment, inline=False)
 
     await message.channel.send(embed=embed, delete_after=8)
 
-    punishment = await apply_punishment(message.author, message.channel, count)
-    await send_protection_log(message.guild, message.author, reason, old_message, punishment)
+    await send_log(
+        message.guild,
+        "🛡️ مخالفة حماية",
+        f"""
+**العضو:** {message.author.mention}
+**ID:** `{message.author.id}`
+**الروم:** {message.channel.mention}
+**السبب:** {reason}
+**الإجراء:** {punishment}
+
+**الرسالة:**
+```{clean_text(old_message, 800)}```
+""",
+        COLOR_YELLOW
+    )
 
 
-class SupportApplyModal(discord.ui.Modal, title="تقديم الدعم الفني"):
-    name = discord.ui.TextInput(label="اسمك", placeholder="مثال: جابر", required=True, max_length=50)
-    age = discord.ui.TextInput(label="عمرك", placeholder="مثال: 18", required=True, max_length=10)
-    daily_time = discord.ui.TextInput(label="كم ساعة تقدر تتواجد؟", placeholder="مثال: من 3 إلى 5 ساعات يومياً", required=True, max_length=60)
-    experience = discord.ui.TextInput(label="خبرتك في الدعم أو الإدارة", placeholder="اكتب خبرتك السابقة أو إذا ما عندك خبرة اكتب: لا يوجد", required=True, style=discord.TextStyle.paragraph, max_length=600)
-    why_you = discord.ui.TextInput(label="ليش نختارك؟", placeholder="اكتب سبب رغبتك بالانضمام للدعم الفني", required=True, style=discord.TextStyle.paragraph, max_length=600)
+# =========================
+# VIEWS
+# =========================
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
+class JoinPlayView(discord.ui.View):
+    def __init__(self, game, max_players, host_id, note=""):
+        super().__init__(timeout=None)
 
-        blacklisted = get_blacklist(interaction.user.id)
-        if blacklisted:
-            await interaction.followup.send(f"❌ أنت ممنوع من التقديم.\nالسبب: `{blacklisted[0]}`", ephemeral=True)
+        self.game = game
+        self.max_players = max_players
+        self.host_id = host_id
+        self.note = note
+
+        self.players = set()
+        self.players.add(host_id)
+
+        self.channel_created = False
+        self.created_channel_id = None
+
+    def make_players_text(self):
+        return "\n".join([f"• <@{uid}>" for uid in self.players]) or "لا يوجد"
+
+    async def create_private_game_voice(self, interaction):
+        if self.channel_created:
             return
 
-        active_app = get_active_application(interaction.user.id)
-        if active_app:
-            await interaction.followup.send(f"❌ عندك تقديم سابق مفتوح.\nرقم الطلب: `{active_app[0]}`\nالحالة: `{active_app[1]}`", ephemeral=True)
+        guild = interaction.guild
+
+        if not guild:
             return
 
-        app_channel = interaction.guild.get_channel(APPLICATION_CHANNEL_ID)
+        members = []
 
-        if not app_channel:
-            await interaction.followup.send("❌ روم التقديمات غير موجود.", ephemeral=True)
-            return
+        for user_id in self.players:
+            member = guild.get_member(user_id)
 
-        app_id = create_application(
-            user_id=interaction.user.id,
-            channel_id=APPLICATION_CHANNEL_ID,
-            name=str(self.name),
-            age=str(self.age),
-            daily_time=str(self.daily_time),
-            experience=str(self.experience),
-            why_you=str(self.why_you)
+            if member:
+                members.append(member)
+
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                connect=False
+            ),
+            guild.me: discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+                manage_channels=True
+            )
+        }
+
+        for member in members:
+            overwrites[member] = discord.PermissionOverwrite(
+                view_channel=True,
+                connect=True,
+                speak=True,
+                stream=True,
+                use_voice_activation=True
+            )
+
+        category = interaction.channel.category
+
+        channel_name = f"🎮-{clean_channel_name(self.game)}"
+
+        voice_channel = await guild.create_voice_channel(
+            name=channel_name,
+            overwrites=overwrites,
+            category=category,
+            reason="NM System LFG private voice room"
         )
+
+        self.channel_created = True
+        self.created_channel_id = voice_channel.id
+
+        players_text = self.make_players_text()
 
         embed = discord.Embed(
-            title="📋 تقديم دعم فني جديد",
-            description=f"**رقم الطلب:** `{app_id}`\n**الحالة:** ⏳ قيد المراجعة\n\nيرجى مراجعة بيانات المتقدم بعناية قبل القبول أو الرفض.",
-            color=COLOR_YELLOW
+            title="✅ تم اكتمال التجمع",
+            description=(
+                f"اللعبة: **{self.game}**\n"
+                f"العدد: **{len(self.players)}/{self.max_players}**\n\n"
+                f"تم فتح روم فويس خاص:\n{voice_channel.mention}\n\n"
+                f"الكل يقدر يشوف الروم، لكن الدخول فقط للمسجلين."
+            ),
+            color=COLOR_GREEN,
+            timestamp=discord.utils.utcnow()
         )
 
-        embed.add_field(name="👤 المتقدم", value=f"{interaction.user.mention}\n`{interaction.user.id}`", inline=False)
-        embed.add_field(name="📝 الاسم", value=str(self.name), inline=True)
-        embed.add_field(name="🎂 العمر", value=str(self.age), inline=True)
-        embed.add_field(name="⏰ التواجد", value=str(self.daily_time), inline=False)
-        embed.add_field(name="🧠 الخبرة", value=str(self.experience), inline=False)
-        embed.add_field(name="⭐ لماذا نختارك؟", value=str(self.why_you), inline=False)
-        embed.add_field(name="🕒 وقت التقديم", value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>", inline=False)
-        embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        embed.set_footer(text="مقاطعة رسك | نظام تقديم الدعم الفني")
-
-        msg = await app_channel.send(
-            content=f"📥 تقديم جديد من {interaction.user.mention} | `{app_id}`",
-            embed=embed,
-            view=SupportReviewView(interaction.user.id, app_id)
+        embed.add_field(
+            name="👥 اللاعبين",
+            value=players_text[:1000],
+            inline=False
         )
 
-        update_application_message(app_id, msg.id)
+        embed.set_footer(text="NM System | Looking For Game")
 
-        await interaction.followup.send(f"✅ تم إرسال تقديمك بنجاح.\nرقم طلبك: `{app_id}`\nانتظر مراجعة الإدارة.", ephemeral=True)
+        await interaction.channel.send(embed=embed)
 
+        await send_log(
+            guild,
+            "🎮 تم فتح روم لعب خاص",
+            f"""
+**اللعبة:** {self.game}
+**الروم:** {voice_channel.mention}
+**العدد:** {len(self.players)}/{self.max_players}
 
-class SupportApplyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="بدء التقديم", style=discord.ButtonStyle.green, emoji="📝", custom_id="support_apply_start_button_v4")
-    async def support_apply(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(SupportApplyModal())
-
-
-class RejectReasonModal(discord.ui.Modal, title="سبب رفض التقديم"):
-    def __init__(self, user_id: int, app_id: str):
-        super().__init__()
-        self.user_id = user_id
-        self.app_id = app_id
-
-    reason = discord.ui.TextInput(label="سبب الرفض", placeholder="اكتب سبب الرفض", required=True, style=discord.TextStyle.paragraph, max_length=500)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        member = interaction.guild.get_member(self.user_id)
-        reason_text = str(self.reason)
-
-        if member:
-            try:
-                dm_embed = discord.Embed(title="❌ تم رفض تقديمك للدعم الفني", description="نشكر لك رغبتك في الانضمام لفريق الدعم الفني.", color=COLOR_RED)
-                dm_embed.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
-                dm_embed.add_field(name="📝 سبب الرفض", value=reason_text, inline=False)
-                dm_embed.add_field(name="🤝 ملاحظة", value="نتمنى لك التوفيق.", inline=False)
-                await member.send(embed=dm_embed)
-            except:
-                pass
-
-        update_application_status(app_id=self.app_id, status="rejected", reviewer_id=interaction.user.id, reject_reason=reason_text)
-
-        await interaction.message.edit(
-            content=f"❌ **تم رفض الطلب** | المتقدم: <@{self.user_id}> | `{self.app_id}`",
-            view=None
-        )
-
-        await send_app_log(
-            interaction.guild,
-            "❌ تم رفض تقديم دعم فني",
-            f"المتقدم: <@{self.user_id}>\nرقم الطلب: `{self.app_id}`\nبواسطة: {interaction.user.mention}\nالسبب: {reason_text}",
-            COLOR_RED
-        )
-
-        await interaction.followup.send("❌ تم رفض الطلب وتحديث حالته.", ephemeral=True)
-
-
-class SupportReviewView(discord.ui.View):
-    def __init__(self, user_id: int, app_id: str):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-        self.app_id = app_id
-
-    @discord.ui.button(label="قبول مبدئي", style=discord.ButtonStyle.green, emoji="✅", custom_id="support_accept_v4")
-    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
-            return
-
-        member = interaction.guild.get_member(self.user_id)
-
-        if member:
-            try:
-                dm_embed = discord.Embed(title="✅ تم قبول تقديمك مبدئيًا كدعم فني", description="تمت مراجعة طلبك وقبولك مبدئيًا.", color=COLOR_GREEN)
-                dm_embed.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
-                dm_embed.add_field(name="🎙️ المطلوب الآن", value=f"توجه إلى روم المقابلة الصوتية: <#{INTERVIEW_VOICE_ROOM_ID}>", inline=False)
-                dm_embed.add_field(name="⚠️ ملاحظة", value="هذا قبول مبدئي فقط، والقبول النهائي يكون بعد المقابلة.", inline=False)
-                await member.send(embed=dm_embed)
-            except:
-                pass
-
-        update_application_status(app_id=self.app_id, status="accepted", reviewer_id=interaction.user.id)
-
-        await interaction.message.edit(
-            content=f"✅ **تم قبول الطلب مبدئيًا** | المتقدم: <@{self.user_id}> | `{self.app_id}`",
-            view=InterviewDoneView(self.user_id, self.app_id)
-        )
-
-        await send_app_log(
-            interaction.guild,
-            "✅ تم قبول تقديم دعم فني مبدئيًا",
-            f"المتقدم: <@{self.user_id}>\nرقم الطلب: `{self.app_id}`\nبواسطة: {interaction.user.mention}\nروم المقابلة: <#{INTERVIEW_VOICE_ROOM_ID}>",
+**اللاعبين:**
+{players_text}
+""",
             COLOR_GREEN
         )
 
-        await interaction.followup.send("✅ تم قبول الطلب مبدئيًا وتحديث حالته.", ephemeral=True)
+    async def refresh_embed(self, interaction, button=None):
+        players_text = self.make_players_text()
+        current_count = len(self.players)
 
-    @discord.ui.button(label="رفض", style=discord.ButtonStyle.red, emoji="❌", custom_id="support_reject_v4")
-    async def reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+        embed = discord.Embed(
+            title="🎮 Looking For Game",
+            description=f"تجمع على **{self.game}**",
+            color=COLOR_GREEN,
+            timestamp=discord.utils.utcnow()
+        )
+
+        embed.add_field(
+            name="👤 صاحب التجمع",
+            value=f"<@{self.host_id}>",
+            inline=True
+        )
+
+        embed.add_field(
+            name="👥 العدد",
+            value=f"{current_count}/{self.max_players}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="📝 ملاحظة",
+            value=self.note if self.note else "لا يوجد",
+            inline=False
+        )
+
+        embed.add_field(
+            name="👥 اللي بيدخلون",
+            value=players_text[:1000],
+            inline=False
+        )
+
+        if current_count >= self.max_players:
+            embed.add_field(
+                name="🔒 الحالة",
+                value="اكتمل العدد وتم قفل الدخول.",
+                inline=False
+            )
+
+        embed.set_footer(text="NM System | اضغط بدخل إذا بتشارك")
+
+        if button and current_count >= self.max_players:
+            button.disabled = True
+            button.label = "اكتمل العدد"
+
+        await interaction.message.edit(embed=embed, view=self)
+
+    @discord.ui.button(
+        label="بدخل",
+        style=discord.ButtonStyle.green,
+        emoji="🎮",
+        custom_id="join_play_button"
+    )
+    async def join_play(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id in self.players:
+            await interaction.response.send_message(
+                "✅ أنت داخل التجمع أصلًا.",
+                ephemeral=True
+            )
             return
 
-        await interaction.response.send_modal(RejectReasonModal(self.user_id, self.app_id))
+        if len(self.players) >= self.max_players:
+            button.disabled = True
+            button.label = "اكتمل العدد"
+
+            await interaction.message.edit(view=self)
+
+            await interaction.response.send_message(
+                "❌ التجمع اكتمل، ما تقدر تدخل.",
+                ephemeral=True
+            )
+            return
+
+        self.players.add(interaction.user.id)
+
+        if len(self.players) >= self.max_players:
+            await self.refresh_embed(interaction, button)
+            await interaction.response.send_message(
+                "✅ دخلت التجمع، واكتمل العدد. تم فتح الروم الخاص.",
+                ephemeral=True
+            )
+
+            await self.create_private_game_voice(interaction)
+            return
+
+        await self.refresh_embed(interaction, button)
+        await interaction.response.send_message(
+            f"✅ تم تسجيلك. العدد الآن {len(self.players)}/{self.max_players}.",
+            ephemeral=True
+        )
 
 
-class InterviewDoneView(discord.ui.View):
-    def __init__(self, user_id, app_id):
+class GiveawayView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.app_id = app_id
+        self.entries = set()
 
-    @discord.ui.button(label="تمت المقابلة", style=discord.ButtonStyle.blurple, emoji="🎙️", custom_id="interview_done_v4")
-    async def done(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
-            return
-
-        update_application_status(self.app_id, "interview_done", reviewer_id=interaction.user.id)
-
-        await interaction.message.edit(
-            content=f"🎙️ **تمت مقابلة المتقدم** | <@{self.user_id}> | `{self.app_id}`",
-            view=FinalDecisionView(self.user_id, self.app_id)
-        )
-
-        await interaction.followup.send("🎙️ تم تسجيل المقابلة وتحديث حالة الطلب.", ephemeral=True)
+    @discord.ui.button(
+        label="دخول السحب",
+        style=discord.ButtonStyle.green,
+        emoji="🎁",
+        custom_id="giveaway_join_button"
+    )
+    async def join_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.entries.add(interaction.user.id)
+        await interaction.response.send_message("✅ دخلت السحب.", ephemeral=True)
 
 
-class FinalRejectReasonModal(discord.ui.Modal, title="سبب الرفض النهائي"):
-    def __init__(self, user_id: int, app_id: str):
-        super().__init__()
-        self.user_id = user_id
-        self.app_id = app_id
-
-    reason = discord.ui.TextInput(label="سبب الرفض النهائي", placeholder="اكتب سبب الرفض النهائي", required=True, style=discord.TextStyle.paragraph, max_length=500)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.defer(ephemeral=True)
-
-        reason_text = str(self.reason)
-        member = interaction.guild.get_member(self.user_id)
-
-        if member:
-            try:
-                embed_dm = discord.Embed(title="❌ تم رفضك بعد المقابلة", description="نشكر لك وقتك واهتمامك.", color=COLOR_RED)
-                embed_dm.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
-                embed_dm.add_field(name="📝 السبب", value=reason_text, inline=False)
-                await member.send(embed=embed_dm)
-            except:
-                pass
-
-        update_application_status(self.app_id, "final_rejected", final_reviewer_id=interaction.user.id, final_reason=reason_text)
-
-        await interaction.message.edit(
-            content=f"❌ **تم رفض المتقدم نهائيًا** | <@{self.user_id}> | `{self.app_id}`",
-            view=None
-        )
-
-        await interaction.followup.send("❌ تم الرفض النهائي وتحديث الحالة.", ephemeral=True)
-
-
-class FinalDecisionView(discord.ui.View):
-    def __init__(self, user_id, app_id):
+class GameRolesView(discord.ui.View):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.user_id = user_id
-        self.app_id = app_id
 
-    @discord.ui.button(label="قبول نهائي", style=discord.ButtonStyle.green, emoji="🔥", custom_id="final_accept_v4")
-    async def final_accept(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
+    async def toggle_role(self, interaction, role_key):
+        role_id = GAME_ROLE_IDS.get(role_key)
 
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.followup.send("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+        if not role_id:
+            await interaction.response.send_message("⚠️ الرتبة ما انحط آيديها في الكود.", ephemeral=True)
             return
 
-        member = interaction.guild.get_member(self.user_id)
-        role = interaction.guild.get_role(FINAL_SUPPORT_ROLE_ID)
+        role = interaction.guild.get_role(role_id)
 
-        if member and role:
-            try:
-                await member.add_roles(role)
-            except Exception as e:
-                await interaction.followup.send(f"⚠️ ما قدرت أعطي الرتبة: `{e}`", ephemeral=True)
-
-            try:
-                dm_embed = discord.Embed(title="🎉 تم قبولك رسميًا كدعم فني", description="مبروك، تم اعتمادك ضمن فريق الدعم الفني.", color=COLOR_GREEN)
-                dm_embed.add_field(name="📌 رقم الطلب", value=f"`{self.app_id}`", inline=False)
-                await member.send(embed=dm_embed)
-            except:
-                pass
-
-        update_application_status(self.app_id, "final_accepted", final_reviewer_id=interaction.user.id)
-
-        await interaction.message.edit(
-            content=f"🔥 **تم قبول المتقدم نهائيًا** | <@{self.user_id}> | `{self.app_id}`",
-            view=None
-        )
-
-        await interaction.followup.send("🔥 تم القبول النهائي وإعطاء الرتبة.", ephemeral=True)
-
-    @discord.ui.button(label="رفض نهائي", style=discord.ButtonStyle.red, emoji="❌", custom_id="final_reject_v4")
-    async def final_reject(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ هذا الزر للإدارة فقط.", ephemeral=True)
+        if not role:
+            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر.", ephemeral=True)
             return
 
-        await interaction.response.send_modal(FinalRejectReasonModal(self.user_id, self.app_id))
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role)
+            await interaction.response.send_message(f"✅ شلت منك رتبة {role.mention}", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
 
+    @discord.ui.button(label="GTA", style=discord.ButtonStyle.secondary, emoji="🚗", custom_id="role_gta")
+    async def gta(self, interaction, button):
+        await self.toggle_role(interaction, "gta")
+
+    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.secondary, emoji="🎯", custom_id="role_valorant")
+    async def valorant(self, interaction, button):
+        await self.toggle_role(interaction, "valorant")
+
+    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="role_fortnite")
+    async def fortnite(self, interaction, button):
+        await self.toggle_role(interaction, "fortnite")
+
+    @discord.ui.button(label="Roblox", style=discord.ButtonStyle.secondary, emoji="🧱", custom_id="role_roblox")
+    async def roblox(self, interaction, button):
+        await self.toggle_role(interaction, "roblox")
+
+    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.secondary, emoji="⛏️", custom_id="role_minecraft")
+    async def minecraft(self, interaction, button):
+        await self.toggle_role(interaction, "minecraft")
+
+
+# =========================
+# KEEP ALIVE
+# =========================
 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return "online"
+    return "NM System online"
 
 
 def run():
@@ -908,97 +741,36 @@ def keep_alive():
     Thread(target=run).start()
 
 
+# =========================
+# BOT EVENTS
+# =========================
+
+@bot.check
+async def only_one_guild(ctx):
+    return ctx.guild and ctx.guild.id == GUILD_ID
+
+
+@bot.event
+async def on_guild_join(guild):
+    if guild.id != GUILD_ID:
+        await guild.leave()
+
+
 @bot.event
 async def on_ready():
     init_db()
 
-    try:
-        bot.add_view(SupportApplyView())
-        bot.add_view(GameRolesView())
-    except Exception as e:
-        print(f"View Error: {e}")
+    bot.add_view(GameRolesView())
 
-    for app_id, user_id, message_id, status in get_unfinished_applications():
-        try:
-            if status == "pending":
-                bot.add_view(SupportReviewView(user_id, app_id), message_id=message_id)
-            elif status == "accepted":
-                bot.add_view(InterviewDoneView(user_id, app_id), message_id=message_id)
-            elif status == "interview_done":
-                bot.add_view(FinalDecisionView(user_id, app_id), message_id=message_id)
-        except Exception as e:
-            print(f"Restore View Error {app_id}: {e}")
+    await bot.change_presence(
+        status=discord.Status.online,
+        activity=discord.Activity(
+            type=discord.ActivityType.watching,
+            name="NM System | !مساعدة"
+        )
+    )
 
-    print(f"Bot Ready: {bot.user}")
-
-
-@bot.event
-async def on_member_remove(member):
-    if member.guild.id != MAIN_GUILD_ID:
-        return
-
-    log_channel = bot.get_channel(LEAVE_LOG_CHANNEL_ID)
-    if not log_channel:
-        return
-
-    reason = "خرج من نفسه"
-    executor = "غير معروف"
-
-    try:
-        async for entry in member.guild.audit_logs(limit=5):
-            if entry.target and entry.target.id == member.id:
-                if entry.action == discord.AuditLogAction.ban:
-                    reason = "باند"
-                    executor = entry.user.mention
-                    break
-                elif entry.action == discord.AuditLogAction.kick:
-                    reason = "طرد"
-                    executor = entry.user.mention
-                    break
-    except:
-        pass
-
-    roles = [role.mention for role in member.roles if role.name != "@everyone"]
-    roles_text = "\n".join(roles) if roles else "ما كان معه رولات"
-
-    embed = discord.Embed(title="📤 عضو خرج من السيرفر", color=COLOR_GREY)
-    embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.name}`", inline=False)
-    embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=False)
-    embed.add_field(name="🚪 طريقة الخروج", value=reason, inline=True)
-    embed.add_field(name="👮 بواسطة", value=executor, inline=True)
-    embed.add_field(name="🎭 الرولات", value=roles_text, inline=False)
-
-    if member.joined_at:
-        embed.add_field(name="📅 دخل السيرفر", value=f"<t:{int(member.joined_at.timestamp())}:F>", inline=False)
-
-    embed.set_thumbnail(url=member.display_avatar.url)
-    await log_channel.send(embed=embed)
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if member.guild.id != MAIN_GUILD_ID:
-        return
-
-    if member.bot:
-        return
-
-    if after.channel and after.channel.id == SUPPORT_WAITING_VOICE_ID:
-        support_chat = bot.get_channel(SUPPORT_CHAT_ID)
-        support_role = member.guild.get_role(SUPPORT_PING_ROLE_ID)
-
-        if support_chat and support_role:
-            embed = discord.Embed(
-                title="🎧 طلب دعم فني",
-                description="في شخص دخل انتظار الدعم الفني",
-                color=COLOR_YELLOW
-            )
-            embed.add_field(name="👤 العضو", value=member.mention, inline=True)
-            embed.add_field(name="🆔 ID", value=f"`{member.id}`", inline=True)
-            embed.add_field(name="🎧 الروم", value=after.channel.mention, inline=False)
-            embed.set_thumbnail(url=member.display_avatar.url)
-
-            await support_chat.send(content=support_role.mention, embed=embed)
+    print(f"NM System Ready: {bot.user}")
 
 
 @bot.event
@@ -1012,12 +784,16 @@ async def on_message(message):
         sent_to = set()
 
         for guild in bot.guilds:
+            if guild.id != GUILD_ID:
+                continue
+
             for member in guild.members:
                 if member.name in OWNER_USERNAMES and member.id not in sent_to:
                     try:
                         embed = discord.Embed(
                             title="📩 رسالة خاصة وصلت للبوت",
-                            color=discord.Color.orange()
+                            color=COLOR_ORANGE,
+                            timestamp=discord.utils.utcnow()
                         )
                         embed.add_field(
                             name="👤 المرسل",
@@ -1029,46 +805,48 @@ async def on_message(message):
                             value=message.content if message.content else "بدون نص",
                             inline=False
                         )
-                        embed.add_field(
-                            name="🕒 الوقت",
-                            value=f"<t:{int(discord.utils.utcnow().timestamp())}:F>",
-                            inline=False
-                        )
                         embed.set_thumbnail(url=message.author.display_avatar.url)
+                        embed.set_footer(text="NM System | DM Forward")
 
                         await member.send(embed=embed)
                         sent_to.add(member.id)
 
-                        if message.attachments:
-                            for attachment in message.attachments:
-                                await member.send(f"📎 مرفق من {message.author}: {attachment.url}")
+                        for attachment in message.attachments:
+                            await member.send(f"📎 مرفق من {message.author}: {attachment.url}")
 
                     except:
                         pass
+
         return
 
-    if not message.guild or message.guild.id not in MAIN_GUILD_IDS:
-        return
-
-    # NM منفصل تماماً: ما نطبق عليه حماية رسك ولا لوقات رسك
-    if message.guild.id == COMMUNITY_GUILD_ID:
-        await bot.process_commands(message)
-        return
-
-    if message.author.id in EXEMPT_USER_IDS:
-        await bot.process_commands(message)
+    if not message.guild or message.guild.id != GUILD_ID:
         return
 
     content = message.content.lower()
 
-    if protection_enabled and not is_admin(message.author):
+    now = time.time()
+    last_xp = xp_cooldowns.get(message.author.id, 0)
+
+    if now - last_xp >= LEVEL_COOLDOWN and not message.content.startswith(PREFIX):
+        xp_cooldowns[message.author.id] = now
+        gained = random.randint(8, 16)
+        xp, level, leveled_up = add_xp(message.author.id, gained)
+
+        if leveled_up:
+            await message.channel.send(
+                f"📊 {message.author.mention} وصل لفل **{level}**!",
+                delete_after=8
+            )
+
+    if protection_enabled and not is_bypass(message.author):
 
         if contains_bad_word(content):
             await handle_violation(message, "كلمة ممنوعة / سب")
             return
 
         if ANTI_LINKS:
-            link_words = ["http://", "https://", "discord.gg", ".com", ".net", ".gg"]
+            link_words = ["discord.gg", "discord.com/invite", "http://", "https://"]
+
             if any(link in content for link in link_words):
                 await handle_violation(message, "إرسال رابط ممنوع")
                 return
@@ -1083,25 +861,460 @@ async def on_message(message):
             return
 
         user_id = message.author.id
-        now = time.time()
+        msg_now = time.time()
 
         if user_id not in user_message_times:
             user_message_times[user_id] = []
 
-        user_message_times[user_id].append(now)
-        user_message_times[user_id] = [t for t in user_message_times[user_id] if now - t <= SPAM_SECONDS]
+        user_message_times[user_id].append(msg_now)
+        user_message_times[user_id] = [
+            t for t in user_message_times[user_id]
+            if msg_now - t <= SPAM_SECONDS
+        ]
 
         if len(user_message_times[user_id]) >= SPAM_LIMIT:
             user_message_times[user_id] = []
-            await handle_violation(message, f"سبام: {SPAM_LIMIT} رسائل خلال {SPAM_SECONDS} ثواني")
+            await handle_violation(
+                message,
+                f"سبام: {SPAM_LIMIT} رسائل خلال {SPAM_SECONDS} ثواني"
+            )
             return
 
     await bot.process_commands(message)
 
 
+# =========================
+# AUDIT LOGS
+# =========================
+
+@bot.event
+async def on_message_delete(message):
+    if not message.guild or message.guild.id != GUILD_ID or message.author.bot:
+        return
+
+    await send_log(
+        message.guild,
+        "🗑️ رسالة محذوفة",
+        f"""
+**العضو:** {message.author.mention}
+**ID:** `{message.author.id}`
+**الروم:** {message.channel.mention}
+
+**المحتوى:**
+```{clean_text(message.content, 900)}```
+""",
+        COLOR_RED
+    )
+
+
+@bot.event
+async def on_message_edit(before, after):
+    if not before.guild or before.guild.id != GUILD_ID or before.author.bot:
+        return
+
+    if before.content == after.content:
+        return
+
+    await send_log(
+        before.guild,
+        "✏️ رسالة معدلة",
+        f"""
+**العضو:** {before.author.mention}
+**ID:** `{before.author.id}`
+**الروم:** {before.channel.mention}
+
+**قبل:**
+```{clean_text(before.content, 700)}```
+
+**بعد:**
+```{clean_text(after.content, 700)}```
+""",
+        COLOR_YELLOW
+    )
+
+
+@bot.event
+async def on_member_join(member):
+    if member.guild.id != GUILD_ID:
+        return
+
+    created = int(member.created_at.timestamp())
+
+    await send_log(
+        member.guild,
+        "📥 عضو دخل",
+        f"""
+**العضو:** {member.mention}
+**ID:** `{member.id}`
+**الحساب انشأ:** <t:{created}:R>
+""",
+        COLOR_GREEN
+    )
+
+
+@bot.event
+async def on_member_remove(member):
+    if member.guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(member.guild, discord.AuditLogAction.kick, member.id)
+
+    if executor:
+        title = "👢 عضو انطرد"
+        extra = f"**بواسطة:** {executor.mention}"
+        color = COLOR_RED
+    else:
+        title = "📤 عضو خرج"
+        extra = "**النوع:** خروج عادي أو غير معروف"
+        color = COLOR_GREY
+
+    await send_log(
+        member.guild,
+        title,
+        f"""
+**العضو:** `{member}`
+**ID:** `{member.id}`
+{extra}
+""",
+        color
+    )
+
+
+@bot.event
+async def on_member_ban(guild, user):
+    if guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(guild, discord.AuditLogAction.ban, user.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        guild,
+        "🔨 عضو تبند",
+        f"""
+**العضو:** `{user}`
+**ID:** `{user.id}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_RED
+    )
+
+
+@bot.event
+async def on_member_unban(guild, user):
+    if guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(guild, discord.AuditLogAction.unban, user.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        guild,
+        "✅ فك باند",
+        f"""
+**العضو:** `{user}`
+**ID:** `{user.id}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_GREEN
+    )
+
+
+@bot.event
+async def on_member_update(before, after):
+    if before.guild.id != GUILD_ID:
+        return
+
+    before_roles = set(before.roles)
+    after_roles = set(after.roles)
+
+    added = after_roles - before_roles
+    removed = before_roles - after_roles
+
+    if added:
+        roles_text = ", ".join([r.mention for r in added if r.name != "@everyone"])
+        executor = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
+        executor_text = executor.mention if executor else "غير معروف"
+
+        if roles_text:
+            await send_log(
+                after.guild,
+                "➕ رتبة انضافت",
+                f"""
+**العضو:** {after.mention}
+**الرول:** {roles_text}
+**بواسطة:** {executor_text}
+""",
+                COLOR_GREEN
+            )
+
+    if removed:
+        roles_text = ", ".join([r.mention for r in removed if r.name != "@everyone"])
+        executor = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
+        executor_text = executor.mention if executor else "غير معروف"
+
+        if roles_text:
+            await send_log(
+                after.guild,
+                "➖ رتبة انشالت",
+                f"""
+**العضو:** {after.mention}
+**الرول:** {roles_text}
+**بواسطة:** {executor_text}
+""",
+                COLOR_RED
+            )
+
+    if before.nick != after.nick:
+        await send_log(
+            after.guild,
+            "📝 تغيير نك نيم",
+            f"""
+**العضو:** {after.mention}
+**قبل:** `{before.nick}`
+**بعد:** `{after.nick}`
+""",
+            COLOR_YELLOW
+        )
+
+    if before.timed_out_until != after.timed_out_until:
+        if after.timed_out_until:
+            await send_log(
+                after.guild,
+                "⏳ تايم أوت",
+                f"""
+**العضو:** {after.mention}
+**ينتهي:** <t:{int(after.timed_out_until.timestamp())}:R>
+""",
+                COLOR_RED
+            )
+        else:
+            await send_log(
+                after.guild,
+                "✅ فك تايم أوت",
+                f"**العضو:** {after.mention}",
+                COLOR_GREEN
+            )
+
+
+@bot.event
+async def on_guild_channel_create(channel):
+    if channel.guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        channel.guild,
+        "➕ روم جديد",
+        f"""
+**الروم:** {channel.mention if hasattr(channel, 'mention') else channel.name}
+**الاسم:** `{channel.name}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_GREEN
+    )
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    if channel.guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        channel.guild,
+        "🗑️ روم انحذف",
+        f"""
+**الاسم:** `{channel.name}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_RED
+    )
+
+
+@bot.event
+async def on_guild_channel_update(before, after):
+    if before.guild.id != GUILD_ID:
+        return
+
+    changes = []
+
+    if before.name != after.name:
+        changes.append(f"**الاسم:** `{before.name}` → `{after.name}`")
+
+    if before.category != after.category:
+        before_cat = before.category.name if before.category else "بدون"
+        after_cat = after.category.name if after.category else "بدون"
+        changes.append(f"**الكاتقوري:** `{before_cat}` → `{after_cat}`")
+
+    if before.position != after.position:
+        changes.append(f"**المكان:** `{before.position}` → `{after.position}`")
+
+    if not changes:
+        return
+
+    executor = await get_audit_executor(after.guild, discord.AuditLogAction.channel_update, after.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        after.guild,
+        "📝 تعديل روم",
+        "\n".join(changes) + f"\n**بواسطة:** {executor_text}",
+        COLOR_YELLOW
+    )
+
+
+@bot.event
+async def on_guild_role_create(role):
+    if role.guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(role.guild, discord.AuditLogAction.role_create, role.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        role.guild,
+        "➕ رتبة جديدة",
+        f"""
+**الرول:** {role.mention}
+**الاسم:** `{role.name}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_GREEN
+    )
+
+
+@bot.event
+async def on_guild_role_delete(role):
+    if role.guild.id != GUILD_ID:
+        return
+
+    executor = await get_audit_executor(role.guild, discord.AuditLogAction.role_delete, role.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        role.guild,
+        "🗑️ رتبة انحذفت",
+        f"""
+**الاسم:** `{role.name}`
+**بواسطة:** {executor_text}
+""",
+        COLOR_RED
+    )
+
+
+@bot.event
+async def on_guild_role_update(before, after):
+    if before.guild.id != GUILD_ID:
+        return
+
+    changes = []
+
+    if before.name != after.name:
+        changes.append(f"**الاسم:** `{before.name}` → `{after.name}`")
+
+    if before.color != after.color:
+        changes.append(f"**اللون:** `{before.color}` → `{after.color}`")
+
+    if before.permissions.value != after.permissions.value:
+        changes.append("**الصلاحيات:** تغيرت")
+
+    if before.mentionable != after.mentionable:
+        changes.append(f"**Mentionable:** `{before.mentionable}` → `{after.mentionable}`")
+
+    if before.hoist != after.hoist:
+        changes.append(f"**Hoist:** `{before.hoist}` → `{after.hoist}`")
+
+    if not changes:
+        return
+
+    executor = await get_audit_executor(after.guild, discord.AuditLogAction.role_update, after.id)
+    executor_text = executor.mention if executor else "غير معروف"
+
+    await send_log(
+        after.guild,
+        "🛠️ تعديل رتبة",
+        f"""
+**الرول:** {after.mention}
+
+{chr(10).join(changes)}
+
+**بواسطة:** {executor_text}
+""",
+        COLOR_YELLOW
+    )
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    if member.guild.id != GUILD_ID or member.bot:
+        return
+
+    if before.channel is None and after.channel is not None:
+        await send_log(
+            member.guild,
+            "🔊 دخول فويس",
+            f"**العضو:** {member.mention}\n**الروم:** `{after.channel.name}`",
+            COLOR_GREEN
+        )
+
+    elif before.channel is not None and after.channel is None:
+        await send_log(
+            member.guild,
+            "🔇 خروج من فويس",
+            f"**العضو:** {member.mention}\n**الروم:** `{before.channel.name}`",
+            COLOR_GREY
+        )
+
+    elif before.channel != after.channel:
+        await send_log(
+            member.guild,
+            "🔁 نقل فويس",
+            f"""
+**العضو:** {member.mention}
+**من:** `{before.channel.name}`
+**إلى:** `{after.channel.name}`
+""",
+            COLOR_BLUE
+        )
+
+
+@bot.event
+async def on_guild_update(before, after):
+    if before.id != GUILD_ID:
+        return
+
+    changes = []
+
+    if before.name != after.name:
+        changes.append(f"**اسم السيرفر:** `{before.name}` → `{after.name}`")
+
+    if before.icon != after.icon:
+        changes.append("**الصورة:** تغيرت")
+
+    if not changes:
+        return
+
+    await send_log(
+        after,
+        "⚙️ تعديل السيرفر",
+        "\n".join(changes),
+        COLOR_YELLOW
+    )
+
+
+# =========================
+# COMMANDS
+# =========================
+
 @bot.command(name="مساعدة", aliases=["helpme"])
 async def help_cmd(ctx):
-    embed = discord.Embed(title="📖 أوامر البوت", color=COLOR_PURPLE)
+    embed = discord.Embed(title="📖 أوامر NM System", color=COLOR_PURPLE)
+
     embed.description = """
 **عامة**
 `!بنق`
@@ -1109,185 +1322,418 @@ async def help_cmd(ctx):
 `!طقطق @شخص`
 `!تقييم الشي`
 
-**إدارة**
-`!مسح 10`
-`!قفل`
-`!فتح`
-`!الادارة @رتبة`
-`!لوحة`
-
 **الحماية**
 `!حماية`
 `!حماية تشغيل`
 `!حماية ايقاف`
 `!اعدادات`
-
-**التحذيرات**
 `!تحذير @شخص السبب`
 `!تحذيرات @شخص`
 `!تصفير @شخص`
 
-**التقديم**
-`!ارسال_التقديم`
-`!منع_تقديم @شخص السبب`
-`!سماح_تقديم @شخص`
-`!ملف @شخص`
+**Community**
+`!اقتراح اقتراحك`
+`!لعب Valorant 5 ملاحظة`
+`!سحب Nitro 1h 1`
+`!رولات`
+`!اعداد`
+
+**Level**
+`!لفلي`
+`!لفل @شخص`
+`!ترتيب`
+
+**إدارة**
+`!مسح 10`
+`!قفل`
+`!فتح`
+`!لوحة`
+`!اعلان نص الإعلان`
 """
+
     await ctx.send(embed=embed)
 
 
 @bot.command(name="بنق", aliases=["ping"])
 async def ping(ctx):
-    await ctx.send(embed=discord.Embed(title="🏓 Pong", description="البوت شغال.", color=COLOR_YELLOW))
+    await ctx.send(
+        embed=discord.Embed(
+            title="🏓 Pong",
+            description="NM System شغال.",
+            color=COLOR_GREEN
+        )
+    )
 
 
 @bot.command(name="هلا", aliases=["hello"])
 async def hello(ctx):
-    await ctx.send(embed=discord.Embed(title="👋 أهلاً", description=f"مرحباً {ctx.author.mention}", color=COLOR_GREY))
+    await ctx.send(
+        embed=discord.Embed(
+            title="👋 أهلاً",
+            description=f"مرحباً {ctx.author.mention}",
+            color=COLOR_GREY
+        )
+    )
 
 
 @bot.command(name="طقطق", aliases=["roast"])
 async def roast(ctx, member: discord.Member = None):
-    if member is None:
-        member = ctx.author
+    member = member or ctx.author
 
     roasts = [
-        "ذكاء اصطناعي وأنا مستغرب منك 😂",
-        "وجودك لحاله حدث نادر 💀",
-        "ياخي أنت glitch في الحياة 😂",
-        "لو الكسل بطولة كان أخذت المركز الأول 👑",
-        "حتى البوت احتار كيف يرد عليك 💀"
+        "حتى البوت احتار في وضعك.",
+        "وجودك لحاله حدث نادر.",
+        "لو الكسل بطولة كان أخذت المركز الأول.",
+        "ياخي أنت glitch في الحياة.",
+        "واضح إنك تحتاج تحديث نظام."
     ]
 
-    await ctx.send(embed=discord.Embed(title="😂 طقطقة", description=f"{member.mention} {random.choice(roasts)}", color=COLOR_YELLOW))
+    await ctx.send(
+        embed=discord.Embed(
+            title="😂 طقطقة",
+            description=f"{member.mention} {random.choice(roasts)}",
+            color=COLOR_YELLOW
+        )
+    )
 
 
 @bot.command(name="تقييم", aliases=["rate"])
 async def rate(ctx, *, thing="أنت"):
-    await ctx.send(embed=discord.Embed(title="⭐ تقييم", description=f"تقييمي لـ **{thing}**: **{random.randint(1, 10)}/10**", color=COLOR_YELLOW))
+    await ctx.send(
+        embed=discord.Embed(
+            title="⭐ تقييم",
+            description=f"تقييمي لـ **{thing}**: **{random.randint(1, 10)}/10**",
+            color=COLOR_YELLOW
+        )
+    )
 
 
-@bot.command(name="مسح", aliases=["clear"])
-@commands.has_permissions(administrator=True)
-async def clear(ctx, amount: int = 5):
-    await ctx.channel.purge(limit=amount + 1)
-    await ctx.send(embed=discord.Embed(title="🧹 تم المسح", description=f"تم حذف **{amount}** رسالة.", color=COLOR_GREY), delete_after=3)
-    await send_admin_log(ctx.guild, "🧹 مسح رسائل", f"بواسطة: {ctx.author.mention}\nالروم: {ctx.channel.mention}\nالعدد: `{amount}`")
+@bot.command(name="اقتراح", aliases=["suggest"])
+async def suggest(ctx, *, idea=None):
+    if not idea:
+        await ctx.send("اكتب كذا: `!اقتراح نسوي فعالية يوم الجمعة`")
+        return
+
+    save_suggestion(ctx.author.id, idea)
+
+    embed = discord.Embed(title="💡 اقتراح جديد", description=idea, color=COLOR_YELLOW)
+    embed.add_field(name="👤 صاحب الاقتراح", value=ctx.author.mention, inline=False)
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.set_footer(text="صوّت على الاقتراح")
+
+    msg = await ctx.send(embed=embed)
+    await msg.add_reaction("✅")
+    await msg.add_reaction("❌")
+
+    await send_log(
+        ctx.guild,
+        "💡 اقتراح جديد",
+        f"**من:** {ctx.author.mention}\n**الاقتراح:** {idea[:800]}",
+        COLOR_YELLOW
+    )
 
 
-@bot.command(name="قفل", aliases=["lock"])
-@commands.has_permissions(administrator=True)
-async def lock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
-    await ctx.send(embed=discord.Embed(title="🔒 تم قفل الروم", description="تم منع الأعضاء من الكتابة هنا.", color=COLOR_RED))
-    await send_admin_log(ctx.guild, "🔒 قفل روم", f"بواسطة: {ctx.author.mention}\nالروم: {ctx.channel.mention}", COLOR_RED)
+@bot.command(name="لعب", aliases=["play"])
+async def play(ctx, game=None, players: int = None, *, note=""):
+    if not game or not players:
+        await ctx.send("استخدم: `!لعب Valorant 5 نبي قيم سريع`")
+        return
 
+    if players < 1:
+        await ctx.send("❌ العدد لازم يكون 1 أو أكثر.")
+        return
 
-@bot.command(name="فتح", aliases=["unlock"])
-@commands.has_permissions(administrator=True)
-async def unlock(ctx):
-    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
-    await ctx.send(embed=discord.Embed(title="🔓 تم فتح الروم", description="تم السماح للأعضاء بالكتابة هنا.", color=COLOR_GREEN))
-    await send_admin_log(ctx.guild, "🔓 فتح روم", f"بواسطة: {ctx.author.mention}\nالروم: {ctx.channel.mention}", COLOR_GREEN)
+    if players > 20:
+        await ctx.send("❌ الحد الأقصى للتجمع 20 لاعب.")
+        return
 
+    view = JoinPlayView(
+        game=game,
+        max_players=players,
+        host_id=ctx.author.id,
+        note=note
+    )
 
-@bot.command(name="ارسال_التقديم")
-@commands.has_permissions(administrator=True)
-async def send_support_apply(ctx):
     embed = discord.Embed(
-        title="🎧 تقديم الدعم الفني",
-        description=(
-            "**هل ترغب بالانضمام إلى فريق الدعم الفني؟**\n\n"
-            "قبل التقديم تأكد من التالي:\n"
-            "```diff\n"
-            "+ قراءة قوانين السيرفر كاملة\n"
-            "+ التعامل باحترام مع اللاعبين\n"
-            "+ وجود وقت كافي للتواجد\n"
-            "+ كتابة إجابات واضحة وجدية\n"
-            "- التقديم العشوائي قد يتم رفضه مباشرة\n"
-            "```\n"
-            "اضغط الزر بالأسفل لبدء التقديم."
-        ),
+        title="🎮 Looking For Game",
+        description=f"تجمع على **{game}**",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+
+    embed.add_field(name="👤 صاحب التجمع", value=ctx.author.mention, inline=True)
+    embed.add_field(name="👥 العدد", value=f"1/{players}", inline=True)
+    embed.add_field(name="📝 ملاحظة", value=note if note else "لا يوجد", inline=False)
+    embed.add_field(name="👥 اللي بيدخلون", value=f"• {ctx.author.mention}", inline=False)
+
+    if players == 1:
+        embed.add_field(
+            name="🔒 الحالة",
+            value="اكتمل العدد، سيتم فتح الروم الخاص.",
+            inline=False
+        )
+
+    embed.set_footer(text="NM System | اضغط بدخل إذا بتشارك")
+
+    target_msg = await send_to_channel(
+        ctx.guild,
+        LOOKING_FOR_GAME_CHANNEL_ID,
+        embed=embed,
+        view=view
+    )
+
+    if target_msg:
+        await ctx.message.add_reaction("✅")
+    else:
+        target_msg = await ctx.send(embed=embed, view=view)
+
+    await send_log(
+        ctx.guild,
+        "🎮 طلب لعب",
+        f"""
+**من:** {ctx.author.mention}
+**اللعبة:** {game}
+**العدد:** {players}
+**ملاحظة:** {note or 'لا يوجد'}
+""",
+        COLOR_GREEN
+    )
+
+
+@bot.command(name="سحب", aliases=["giveaway"])
+@commands.has_permissions(manage_guild=True)
+async def giveaway(ctx, prize=None, duration=None, winners: int = 1):
+    if not prize or not duration:
+        await ctx.send("استخدم: `!سحب Nitro 1h 1`")
+        return
+
+    seconds = parse_duration_to_seconds(duration)
+
+    if seconds is None:
+        await ctx.send("صيغة المدة غلط. استخدم: `30m` أو `1h` أو `1d`")
+        return
+
+    view = GiveawayView()
+    end_time = int(time.time() + seconds)
+
+    embed = discord.Embed(
+        title="🎁 Giveaway",
+        description=f"**الجائزة:** {prize}\n**عدد الفائزين:** {winners}\n**ينتهي:** <t:{end_time}:R>",
         color=COLOR_YELLOW
     )
+    embed.add_field(name="طريقة الدخول", value="اضغط زر **دخول السحب**.", inline=False)
+    embed.set_footer(text="NM System | Giveaway")
 
-    embed.add_field(
-        name="📌 ملاحظة مهمة",
-        value="القبول مبدئي فقط، وبعدها لازم تدخل مقابلة صوتية.",
-        inline=False
+    msg = await send_to_channel(
+        ctx.guild,
+        GIVEAWAYS_CHANNEL_ID,
+        embed=embed,
+        view=view
     )
 
-    embed.set_footer(text="مقاطعة رسك | نظام التقديم")
-    await ctx.send(embed=embed, view=SupportApplyView())
+    if not msg:
+        msg = await ctx.send(embed=embed, view=view)
+    else:
+        await ctx.message.add_reaction("✅")
 
+    await send_log(
+        ctx.guild,
+        "🎁 سحب جديد",
+        f"**بواسطة:** {ctx.author.mention}\n**الجائزة:** {prize}\n**المدة:** {duration}\n**الفائزين:** {winners}",
+        COLOR_YELLOW
+    )
 
-@bot.command(name="الادارة", aliases=["staff"])
-@commands.has_permissions(administrator=True)
-async def staff_list(ctx, role: discord.Role):
-    if role.id == STAFF_MAIN_ROLE_ID:
-        text = ""
+    await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=seconds))
 
-        for staff_role_id, staff_role_name in STAFF_ROLE_IDS.items():
-            staff_role = ctx.guild.get_role(staff_role_id)
+    entries = list(view.entries)
 
-            if staff_role and staff_role.members:
-                text += f"\n**{staff_role_name}** {staff_role.mention}\n"
-
-                for member in staff_role.members:
-                    if not member.bot:
-                        text += f"• {member.mention} — {staff_role_name}\n"
-
-        if text == "":
-            text = "مافي أحد معه رتب إدارية."
-
-        await ctx.send(
-            content=role.mention,
-            embed=discord.Embed(title="📋 طاقم إدارة مقاطعة رسك", description=text[:4000], color=COLOR_YELLOW)
+    if not entries:
+        await send_to_channel(
+            ctx.guild,
+            GIVEAWAYS_CHANNEL_ID,
+            embed=discord.Embed(
+                title="🎁 انتهى السحب",
+                description=f"الجائزة: **{prize}**\nمافي أحد دخل.",
+                color=COLOR_RED
+            )
         )
         return
 
-    members = [member for member in role.members if not member.bot]
+    winners_count = min(winners, len(entries))
+    selected = random.sample(entries, winners_count)
+    winners_text = " ".join([f"<@{uid}>" for uid in selected])
 
-    if not members:
-        await ctx.send(f"مافي أحد معه رتبة {role.mention}")
+    result_embed = discord.Embed(
+        title="🎉 انتهى السحب",
+        description=f"**الجائزة:** {prize}\n**الفائزين:** {winners_text}",
+        color=COLOR_GREEN
+    )
+
+    await send_to_channel(
+        ctx.guild,
+        GIVEAWAYS_CHANNEL_ID,
+        content=winners_text,
+        embed=result_embed
+    )
+
+
+@bot.command(name="رولات", aliases=["roles"])
+@commands.has_permissions(administrator=True)
+async def roles(ctx):
+    embed = discord.Embed(
+        title="🎭 Game Roles",
+        description="اختار اللعبة اللي تهمك من الأزرار تحت.\nاضغط مرة تأخذ الرتبة، واضغط مرة ثانية تشيلها.",
+        color=COLOR_BLUE
+    )
+
+    msg = await send_to_channel(
+        ctx.guild,
+        ROLES_CHANNEL_ID,
+        embed=embed,
+        view=GameRolesView()
+    )
+
+    if msg:
+        await ctx.message.add_reaction("✅")
+    else:
+        await ctx.send(embed=embed, view=GameRolesView())
+
+
+@bot.command(name="لفلي", aliases=["rank"])
+async def my_level(ctx):
+    xp, level = get_level_data(ctx.author.id)
+    needed = level * 100
+
+    embed = discord.Embed(title="📊 لفلك", color=COLOR_BLUE)
+    embed.add_field(name="👤 العضو", value=ctx.author.mention, inline=False)
+    embed.add_field(name="Level", value=str(level), inline=True)
+    embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="لفل", aliases=["level"])
+async def level(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    xp, level_num = get_level_data(member.id)
+    needed = level_num * 100
+
+    embed = discord.Embed(title="📊 Level", color=COLOR_BLUE)
+    embed.add_field(name="👤 العضو", value=member.mention, inline=False)
+    embed.add_field(name="Level", value=str(level_num), inline=True)
+    embed.add_field(name="XP", value=f"{xp}/{needed}", inline=True)
+
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="ترتيب", aliases=["leaderboard", "top"])
+async def leaderboard(ctx):
+    rows = get_top_levels(10)
+
+    if not rows:
+        await ctx.send("مافي بيانات لفل للحين.")
         return
 
     text = ""
-    for member in members:
-        text += f"• {member.mention} — {role.name}\n"
 
-    await ctx.send(
-        content=role.mention,
-        embed=discord.Embed(title=f"📋 أعضاء رتبة {role.name}", description=text[:4000], color=COLOR_YELLOW)
-    )
+    for i, (user_id, xp, level) in enumerate(rows, start=1):
+        text += f"**{i}.** <@{user_id}> — Level `{level}` | XP `{xp}`\n"
+
+    embed = discord.Embed(title="🏆 ترتيب اللفل", description=text, color=COLOR_YELLOW)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="حماية", aliases=["protection"])
+@commands.has_permissions(administrator=True)
+async def protection(ctx, mode=None):
+    global protection_enabled
+
+    if mode is None:
+        status = "مفعلة ✅" if protection_enabled else "مطفية ❌"
+        await ctx.send(
+            embed=discord.Embed(
+                title="🛡️ حالة الحماية",
+                description=f"الحماية الآن: **{status}**",
+                color=COLOR_YELLOW
+            )
+        )
+        return
+
+    if mode in ["تشغيل", "on"]:
+        protection_enabled = True
+        await ctx.send("🛡️ تم تشغيل الحماية.")
+
+    elif mode in ["ايقاف", "إيقاف", "off"]:
+        protection_enabled = False
+        await ctx.send("🛡️ تم إيقاف الحماية.")
+
+    else:
+        await ctx.send("استخدم: `!حماية تشغيل` أو `!حماية ايقاف`")
+
+
+@bot.command(name="اعدادات", aliases=["settings"])
+@commands.has_permissions(administrator=True)
+async def settings(ctx):
+    embed = discord.Embed(title="⚙️ إعدادات الحماية", color=COLOR_GREY)
+    embed.add_field(name="الحماية", value="مفعلة ✅" if protection_enabled else "مطفية ❌", inline=True)
+    embed.add_field(name="Anti-Link", value="شغال ✅" if ANTI_LINKS else "مغلق ❌", inline=True)
+    embed.add_field(name="Spam", value=f"{SPAM_LIMIT} رسائل / {SPAM_SECONDS} ثواني", inline=True)
+    embed.add_field(name="Mass Mention", value=f"{MASS_MENTION_LIMIT} منشن", inline=True)
+    embed.add_field(name="Bypass Users", value=str(len(BYPASS_USER_IDS)), inline=True)
+
+    await ctx.send(embed=embed)
 
 
 @bot.command(name="تحذير", aliases=["warn"])
 @commands.has_permissions(administrator=True)
 async def warn(ctx, member: discord.Member, *, reason="بدون سبب"):
-    count = add_warning(member, reason, "تحذير يدوي من الإدارة", f"{ctx.author} ({ctx.author.id})")
+    count = add_warning(member, reason, "تحذير يدوي", f"{ctx.author} ({ctx.author.id})")
 
-    embed = discord.Embed(title="🚫 تحذير إداري", description=f"{member.mention} أخذ تحذير", color=COLOR_YELLOW)
+    embed = discord.Embed(
+        title="🚫 تحذير إداري",
+        description=f"{member.mention} أخذ تحذير.",
+        color=COLOR_YELLOW
+    )
     embed.add_field(name="السبب", value=reason, inline=False)
-    embed.add_field(name="عدد التحذيرات الآن", value=str(count), inline=True)
+    embed.add_field(name="عدد التحذيرات", value=str(count), inline=True)
 
     await ctx.send(embed=embed)
 
     punishment = await apply_punishment(member, ctx.channel, count)
-    await send_protection_log(ctx.guild, member, f"تحذير يدوي: {reason}", "تحذير يدوي من الإدارة", punishment)
+
+    await send_log(
+        ctx.guild,
+        "🚫 تحذير إداري",
+        f"""
+**العضو:** {member.mention}
+**بواسطة:** {ctx.author.mention}
+**السبب:** {reason}
+**الإجراء:** {punishment}
+""",
+        COLOR_YELLOW
+    )
 
 
 @bot.command(name="تحذيرات", aliases=["warnings"])
 @commands.has_permissions(administrator=True)
 async def warnings_count(ctx, member: discord.Member):
-    user_id = str(member.id)
-    user_warnings = warnings.get(user_id, [])
+    user_warnings = warnings.get(str(member.id), [])
 
     if not user_warnings:
-        await ctx.send(embed=discord.Embed(title="✅ لا يوجد تحذيرات", description=f"{member.mention} ما عليه أي تحذيرات", color=COLOR_GREEN))
+        await ctx.send(
+            embed=discord.Embed(
+                title="✅ لا يوجد تحذيرات",
+                description=f"{member.mention} ما عليه تحذيرات.",
+                color=COLOR_GREEN
+            )
+        )
         return
 
-    embed = discord.Embed(title=f"🚫 تحذيرات {member.name}", description=f"عدد التحذيرات: **{len(user_warnings)}**", color=COLOR_YELLOW)
+    embed = discord.Embed(
+        title=f"🚫 تحذيرات {member.name}",
+        description=f"عدد التحذيرات: **{len(user_warnings)}**",
+        color=COLOR_YELLOW
+    )
 
     for i, warn_data in enumerate(user_warnings[-10:], start=1):
         embed.add_field(
@@ -1306,428 +1752,462 @@ async def warnings_count(ctx, member: discord.Member):
 
 @bot.command(name="تصفير", aliases=["resetwarnings"])
 @commands.has_permissions(administrator=True)
-async def resetwarnings(ctx, member: discord.Member):
+async def reset_warnings(ctx, member: discord.Member):
     warnings[str(member.id)] = []
     save_warnings()
-    await ctx.send(embed=discord.Embed(title="✅ تم التصفير", description=f"تم تصفير إنذارات {member.mention}", color=COLOR_GREEN))
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="✅ تم التصفير",
+            description=f"تم تصفير تحذيرات {member.mention}.",
+            color=COLOR_GREEN
+        )
+    )
 
 
-@bot.command(name="حماية", aliases=["protection"])
-@commands.has_permissions(administrator=True)
-async def protection(ctx, mode=None):
-    global protection_enabled
+@bot.command(name="مسح", aliases=["clear"])
+@commands.has_permissions(manage_messages=True)
+async def clear(ctx, amount: int = 5):
+    await ctx.channel.purge(limit=amount + 1)
 
-    if mode is None:
-        status = "مفعلة ✅" if protection_enabled else "مطفية ❌"
-        await ctx.send(embed=discord.Embed(title="🛡️ حالة الحماية", description=f"الحماية الآن: **{status}**", color=COLOR_YELLOW))
-        return
+    await ctx.send(
+        embed=discord.Embed(
+            title="🧹 تم المسح",
+            description=f"تم حذف **{amount}** رسالة.",
+            color=COLOR_GREY
+        ),
+        delete_after=3
+    )
 
-    if mode in ["تشغيل", "on"]:
-        protection_enabled = True
-        await ctx.send("🛡️ تم تشغيل الحماية.")
-    elif mode in ["ايقاف", "إيقاف", "off"]:
-        protection_enabled = False
-        await ctx.send("🛡️ تم إيقاف الحماية.")
-    else:
-        await ctx.send("استخدم: `!حماية تشغيل` أو `!حماية إيقاف`")
-
-
-@bot.command(name="اعدادات", aliases=["settings"])
-@commands.has_permissions(administrator=True)
-async def settings(ctx):
-    embed = discord.Embed(title="⚙️ إعدادات الحماية", color=COLOR_GREY)
-    embed.add_field(name="Anti-Link", value="شغال ✅" if ANTI_LINKS else "مغلق ❌", inline=True)
-    embed.add_field(name="Spam", value=f"{SPAM_LIMIT} رسائل / {SPAM_SECONDS} ثواني", inline=True)
-    embed.add_field(name="Mass Mention", value=f"{MASS_MENTION_LIMIT} منشن", inline=True)
-    protection_log_status = "مقفل في مقاطعة رسك ❌" if ctx.guild.id == MAIN_GUILD_ID and not RISK_PROTECTION_LOGS_ENABLED else f"<#{PROTECTION_LOG_CHANNEL_ID}>"
-    embed.add_field(name="Protection Log", value=protection_log_status, inline=False)
-    await ctx.send(embed=embed)
+    await send_log(
+        ctx.guild,
+        "🧹 مسح رسائل",
+        f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}\n**العدد:** {amount}",
+        COLOR_GREY
+    )
 
 
-@bot.command(name="ملف")
-async def profile(ctx, member: discord.Member = None):
-    if member is None:
-        member = ctx.author
+@bot.command(name="قفل", aliases=["lock"])
+@commands.has_permissions(manage_channels=True)
+async def lock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=False)
 
-    total, latest = get_user_application_summary(member.id)
-    user_warnings = warnings.get(str(member.id), [])
-    blacklist = get_blacklist(member.id)
+    await ctx.send(
+        embed=discord.Embed(
+            title="🔒 تم قفل الروم",
+            description="تم منع الأعضاء من الكتابة هنا.",
+            color=COLOR_RED
+        )
+    )
 
-    embed = discord.Embed(title="📊 ملف العضو", color=COLOR_BLUE)
-    embed.add_field(name="👤 العضو", value=f"{member.mention}\n`{member.id}`", inline=False)
-    embed.add_field(name="🚫 التحذيرات", value=str(len(user_warnings)), inline=True)
-    embed.add_field(name="📨 عدد التقديمات", value=str(total), inline=True)
-
-    if latest:
-        embed.add_field(name="آخر طلب", value=f"`{latest[0]}` | `{latest[1]}`", inline=False)
-    else:
-        embed.add_field(name="آخر طلب", value="لا يوجد", inline=False)
-
-    if blacklist:
-        embed.add_field(name="منع التقديم", value=f"ممنوع ❌\nالسبب: {blacklist[0]}", inline=False)
-    else:
-        embed.add_field(name="منع التقديم", value="غير ممنوع ✅", inline=False)
-
-    if member.joined_at:
-        embed.add_field(name="دخل السيرفر", value=f"<t:{int(member.joined_at.timestamp())}:F>", inline=False)
-
-    embed.set_thumbnail(url=member.display_avatar.url)
-    await ctx.send(embed=embed)
+    await send_log(
+        ctx.guild,
+        "🔒 قفل روم",
+        f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}",
+        COLOR_RED
+    )
 
 
-@bot.command(name="منع_تقديم")
-@commands.has_permissions(administrator=True)
-async def blacklist(ctx, member: discord.Member, *, reason="بدون سبب"):
-    add_to_blacklist(member.id, reason, ctx.author.id)
-    await ctx.send(f"🚫 تم منع {member.mention} من التقديم.")
-    await send_admin_log(ctx.guild, "🚫 منع تقديم", f"العضو: {member.mention}\nبواسطة: {ctx.author.mention}\nالسبب: {reason}", COLOR_RED)
+@bot.command(name="فتح", aliases=["unlock"])
+@commands.has_permissions(manage_channels=True)
+async def unlock(ctx):
+    await ctx.channel.set_permissions(ctx.guild.default_role, send_messages=True)
+
+    await ctx.send(
+        embed=discord.Embed(
+            title="🔓 تم فتح الروم",
+            description="تم السماح للأعضاء بالكتابة هنا.",
+            color=COLOR_GREEN
+        )
+    )
+
+    await send_log(
+        ctx.guild,
+        "🔓 فتح روم",
+        f"**بواسطة:** {ctx.author.mention}\n**الروم:** {ctx.channel.mention}",
+        COLOR_GREEN
+    )
 
 
-@bot.command(name="سماح_تقديم")
-@commands.has_permissions(administrator=True)
-async def unblacklist(ctx, member: discord.Member):
-    remove_from_blacklist(member.id)
-    await ctx.send(f"✅ تم السماح لـ {member.mention} بالتقديم.")
-    await send_admin_log(ctx.guild, "✅ سماح تقديم", f"العضو: {member.mention}\nبواسطة: {ctx.author.mention}", COLOR_GREEN)
-
-
-@bot.command(name="لوحة")
+@bot.command(name="لوحة", aliases=["panel"])
 @commands.has_permissions(administrator=True)
 async def panel(ctx):
-    status = "مفعلة ✅" if protection_enabled else "مطفية ❌"
-
-    embed = discord.Embed(title="🎛️ لوحة التحكم", color=COLOR_PURPLE)
-    embed.add_field(name="🛡️ الحماية", value=status, inline=True)
-    embed.add_field(name="📨 التقديم", value="`!ارسال_التقديم`", inline=True)
-    embed.add_field(name="⚙️ الإعدادات", value="`!اعدادات`", inline=True)
-    embed.add_field(name="👤 ملف عضو", value="`!ملف @شخص`", inline=True)
-    embed.add_field(name="🚫 منع تقديم", value="`!منع_تقديم @شخص السبب`", inline=True)
+    embed = discord.Embed(title="🎛️ لوحة NM System", color=COLOR_PURPLE)
+    embed.add_field(name="🛡️ الحماية", value="`!حماية`", inline=True)
+    embed.add_field(name="📊 اللفل", value="`!ترتيب`", inline=True)
+    embed.add_field(name="🎮 لعب", value="`!لعب Valorant 5`", inline=True)
+    embed.add_field(name="💡 اقتراح", value="`!اقتراح فكرتك`", inline=True)
+    embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
+    embed.add_field(name="🎁 سحب", value="`!سحب Nitro 1h 1`", inline=True)
+    embed.add_field(name="📢 إعلان", value="`!اعلان نص الإعلان`", inline=True)
+    embed.add_field(name="⚙️ إعداد", value="`!اعداد`", inline=True)
     embed.add_field(name="📖 مساعدة", value="`!مساعدة`", inline=True)
 
     await ctx.send(embed=embed)
 
 
-
-# =============================
-# NM COMMUNITY COMMANDS
-# =============================
-
-@bot.command(name="اعداد_nm", aliases=["nm_setup"])
+@bot.command(name="اعلان", aliases=["announce"])
 @commands.has_permissions(administrator=True)
-async def nm_setup(ctx):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    channels = {
-        "rules": ctx.guild.get_channel(NM_RULES_CHANNEL_ID),
-        "general": ctx.guild.get_channel(NM_GENERAL_CHANNEL_ID),
-        "bot": ctx.guild.get_channel(NM_BOT_COMMANDS_CHANNEL_ID),
-        "lfg": ctx.guild.get_channel(NM_LOOKING_FOR_GAME_CHANNEL_ID),
-        "events": ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID),
-        "suggestions": ctx.guild.get_channel(NM_SUGGESTIONS_CHANNEL_ID),
-        "roles": ctx.guild.get_channel(NM_ROLES_CHANNEL_ID),
-        "logs": ctx.guild.get_channel(NM_LOGS_CHANNEL_ID),
-        "staff": ctx.guild.get_channel(NM_STAFF_CHAT_CHANNEL_ID),
-    }
-
-    rules_embed = discord.Embed(
-        title="📜 قوانين NM Community",
-        description=(
-            "القوانين عندنا بسيطة لأن الهدف إننا نسولف وننبسط، بس نحتاج نحافظ على احترام المكان.\n\n"
-            "`1` القوانين بسيطة، وحنا أكبر من إننا نكثّرها.\n"
-            "`2` الاحترام مطلوب مع الصغار والكبار.\n"
-            "`3` ممنوع نشر سيرفرات ثانية.\n"
-            "`4` ممنوع مناقشة أو نشر أمور تخص سيرفرات أخرى.\n"
-            "`5` استمتعوا، ولا تخربون الجو على غيركم."
-        ),
-        color=COLOR_YELLOW
-    )
-    rules_embed.set_footer(text="NM Community | قوانين خفيفة وجو محترم")
-
-    general_embed = discord.Embed(
-        title="💬 الشات العام",
-        description=(
-            "هنا سوالفكم اليومية وتجميعكم وكلامكم العادي.\n"
-            "خلوا الجو خفيف ومحترم، وبدون إزعاج أو سبام."
-        ),
-        color=COLOR_GREY
-    )
-
-    bot_embed = discord.Embed(
-        title="🤖 أوامر البوت",
-        description=(
-            "استخدم أوامر NM هنا عشان الشات العام يبقى مرتب.\n\n"
-            "**الأوامر المتوفرة:**\n"
-            "`!لعب اسم_اللعبة عدد_اللاعبين ملاحظة`\n"
-            "`!اقتراح اقتراحك`\n"
-            "`!فعالية اسم | لعبة | وقت | جائزة`\n"
-            "`!سحب الجائزة 1h 1`"
-        ),
-        color=COLOR_BLUE
-    )
-
-    lfg_embed = discord.Embed(
-        title="🎮 طلب لعب",
-        description=(
-            "تبي تجمع ناس بسرعة؟ استخدم أمر `!لعب`.\n\n"
-            "مثال:\n"
-            "```\n!لعب Valorant 5 نبي قيم سريع\n```\n"
-            "البوت بينزل طلب مرتب وفيه زر للناس اللي بتدخل."
-        ),
-        color=COLOR_GREEN
-    )
-
-    events_embed = discord.Embed(
-        title="🎉 الفعاليات والسحوبات",
-        description=(
-            "هنا تنزل فعاليات وسحوبات NM بشكل مرتب.\n\n"
-            "مثال فعالية:\n"
-            "```\n!فعالية بطولة فالورانت | Valorant | اليوم 9 مساءً | Nitro\n```\n"
-            "مثال سحب:\n"
-            "```\n!سحب Nitro 1h 1\n```"
-        ),
-        color=COLOR_PURPLE
-    )
-
-    suggestions_embed = discord.Embed(
-        title="💡 الاقتراحات",
-        description=(
-            "عندك فكرة تطور الكميونتي؟ اكتبها بأمر `!اقتراح`.\n\n"
-            "مثال:\n"
-            "```\n!اقتراح نسوي فعالية ميمز يوم الجمعة\n```\n"
-            "البوت بينزل اقتراحك هنا مع تصويت ✅ ❌."
-        ),
-        color=COLOR_YELLOW
-    )
-
-    roles_embed = discord.Embed(
-        title="🎭 رولات الألعاب",
-        description=(
-            "اختار الألعاب اللي تهمك عشان توصلك منشنات التجمعات المناسبة لك.\n\n"
-            "اضغط الزر حق اللعبة، وإذا ضغطته مرة ثانية يشيل الرتبة منك."
-        ),
-        color=COLOR_BLUE
-    )
-
-    logs_embed = discord.Embed(
-        title="📋 NM Logs",
-        description=(
-            "هذا الروم خاص بلوقات NM فقط.\n"
-            "أي اقتراح، فعالية، سحب، أو طلب لعب مهم بينسجل هنا بدون ما يروح لسيرفر مقاطعة رسك."
-        ),
-        color=COLOR_GREY
-    )
-
-    staff_embed = discord.Embed(
-        title="🛡️ Staff Chat",
-        description=(
-            "روم الإدارة الخاص بـ NM.\n"
-            "هنا تنسيق الفعاليات، متابعة الاقتراحات، وترتيب الكميونتي."
-        ),
-        color=COLOR_RED
-    )
-
-    if channels["rules"]:
-        await channels["rules"].send(embed=rules_embed)
-    if channels["general"]:
-        await channels["general"].send(embed=general_embed)
-    if channels["bot"]:
-        await channels["bot"].send(embed=bot_embed)
-    if channels["lfg"]:
-        await channels["lfg"].send(embed=lfg_embed)
-    if channels["events"]:
-        await channels["events"].send(embed=events_embed)
-    if channels["suggestions"]:
-        await channels["suggestions"].send(embed=suggestions_embed)
-    if channels["roles"]:
-        await channels["roles"].send(embed=roles_embed, view=GameRolesView())
-    if channels["logs"]:
-        await channels["logs"].send(embed=logs_embed)
-    if channels["staff"]:
-        await channels["staff"].send(embed=staff_embed)
-
-    await send_nm_log(ctx.guild, "✅ تم إعداد رومات NM", f"بواسطة: {ctx.author.mention}", COLOR_GREEN)
-    await ctx.send("✅ تم إرسال شرح الرومات والقوانين في رومات NM.", delete_after=8)
-
-
-@bot.command(name="اقتراح", aliases=["suggest"])
-async def nm_suggest(ctx, *, idea: str = None):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    if not idea:
-        await ctx.send("اكتب اقتراحك كذا: `!اقتراح نسوي فعالية يوم الجمعة`")
-        return
-
-    channel = ctx.guild.get_channel(NM_SUGGESTIONS_CHANNEL_ID)
-    if not channel:
-        await ctx.send("ما لقيت روم الاقتراحات.")
-        return
-
-    embed = discord.Embed(title="💡 اقتراح جديد", description=idea, color=COLOR_YELLOW)
-    embed.add_field(name="👤 صاحب الاقتراح", value=ctx.author.mention, inline=False)
-    embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.set_footer(text="صوّت على الاقتراح")
-
-    msg = await channel.send(embed=embed)
-    await msg.add_reaction("✅")
-    await msg.add_reaction("❌")
-
-    await send_nm_log(ctx.guild, "💡 اقتراح جديد", f"من: {ctx.author.mention}\nالروم: {channel.mention}\nالاقتراح: {idea[:500]}", COLOR_YELLOW)
-    await ctx.send("✅ تم إرسال اقتراحك.", delete_after=5)
-
-
-@bot.command(name="لعب", aliases=["play"])
-async def nm_play(ctx, game: str = None, players: int = None, *, note: str = ""):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    if not game or not players:
-        await ctx.send("استخدم الأمر كذا: `!لعب Valorant 5 نبي قيم سريع`")
-        return
-
-    channel = ctx.guild.get_channel(NM_LOOKING_FOR_GAME_CHANNEL_ID)
-    if not channel:
-        await ctx.send("ما لقيت روم طلب اللعب.")
+async def announce(ctx, *, text=None):
+    if not text:
+        await ctx.send("استخدم: `!اعلان نص الإعلان`")
         return
 
     embed = discord.Embed(
-        title="🎮 تجمع لعب جديد",
-        description=f"في تجمع على **{game}**",
-        color=COLOR_GREEN
+        title="📢 Announcement",
+        description=text,
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
     )
-    embed.add_field(name="👤 صاحب التجمع", value=ctx.author.mention, inline=True)
-    embed.add_field(name="👥 العدد المطلوب", value=str(players), inline=True)
-    embed.add_field(name="📝 ملاحظة", value=note if note else "لا يوجد", inline=False)
-    embed.add_field(name="👥 اللي بيدخلون", value="لا يوجد", inline=False)
-    embed.set_footer(text="NM Community | اضغط بدخل إذا بتشارك")
+    embed.set_footer(text=f"By {ctx.author}")
 
-    await channel.send(embed=embed, view=JoinPlayView(ctx.author.id))
-    await send_nm_log(ctx.guild, "🎮 طلب لعب", f"من: {ctx.author.mention}\nاللعبة: `{game}`\nالعدد: `{players}`", COLOR_GREEN)
-    await ctx.send("✅ تم نشر طلب اللعب.", delete_after=5)
-
-
-@bot.command(name="فعالية", aliases=["event"])
-@commands.has_permissions(manage_guild=True)
-async def nm_event(ctx, *, data: str = None):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    if not data or "|" not in data:
-        await ctx.send("استخدم الأمر كذا: `!فعالية بطولة فالورانت | Valorant | اليوم 9 مساءً | Nitro`")
-        return
-
-    parts = [p.strip() for p in data.split("|")]
-    while len(parts) < 4:
-        parts.append("لا يوجد")
-
-    name, game, event_time, prize = parts[0], parts[1], parts[2], parts[3]
-
-    channel = ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID)
-    if not channel:
-        await ctx.send("ما لقيت روم الفعاليات والسحوبات.")
-        return
-
-    embed = discord.Embed(
-        title="🎉 فعالية جديدة",
-        description=f"**{name}**",
-        color=COLOR_PURPLE
+    msg = await send_to_channel(
+        ctx.guild,
+        ANNOUNCEMENTS_CHANNEL_ID,
+        embed=embed
     )
-    embed.add_field(name="🎮 اللعبة", value=game, inline=True)
-    embed.add_field(name="🕒 الوقت", value=event_time, inline=True)
-    embed.add_field(name="🎁 الجائزة", value=prize, inline=False)
-    embed.add_field(name="👮 المنظم", value=ctx.author.mention, inline=False)
-    embed.set_footer(text="NM Community | فعاليات وسحوبات")
 
-    await channel.send(embed=embed)
-    await send_nm_log(ctx.guild, "🎉 فعالية جديدة", f"بواسطة: {ctx.author.mention}\nالفعالية: `{name}`\nاللعبة: `{game}`", COLOR_PURPLE)
-    await ctx.send("✅ تم نشر الفعالية.", delete_after=5)
+    if msg:
+        await ctx.message.add_reaction("✅")
+    else:
+        await ctx.send("❌ ما قدرت أرسل في روم announcements. تأكد من صلاحيات البوت.")
 
-
-@bot.command(name="سحب", aliases=["giveaway"])
-@commands.has_permissions(manage_guild=True)
-async def nm_giveaway(ctx, prize: str = None, duration: str = None, winners: int = 1):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
-        return
-
-    if not prize or not duration:
-        await ctx.send("استخدم الأمر كذا: `!سحب Nitro 1h 1`\nالمدة: `30m` أو `1h` أو `1d`")
-        return
-
-    seconds = parse_duration_to_seconds(duration)
-    if seconds is None:
-        await ctx.send("صيغة المدة غلط. استخدم مثل: `30m` أو `1h` أو `1d`")
-        return
-
-    channel = ctx.guild.get_channel(NM_EVENTS_GIVEAWAYS_CHANNEL_ID)
-    if not channel:
-        await ctx.send("ما لقيت روم الفعاليات والسحوبات.")
-        return
-
-    view = GiveawayView()
-    end_time = int(time.time() + seconds)
-
-    embed = discord.Embed(
-        title="🎁 سحب جديد",
-        description=f"**الجائزة:** {prize}\n**عدد الفائزين:** {winners}\n**ينتهي:** <t:{end_time}:R>",
-        color=COLOR_YELLOW
+    await send_log(
+        ctx.guild,
+        "📢 إعلان جديد",
+        f"**بواسطة:** {ctx.author.mention}\n**الإعلان:** {clean_text(text, 900)}",
+        COLOR_BLUE
     )
-    embed.add_field(name="طريقة الدخول", value="اضغط زر **دخول السحب** تحت.", inline=False)
-    embed.set_footer(text="NM Community | Giveaway")
-
-    await channel.send(embed=embed, view=view)
-    await send_nm_log(ctx.guild, "🎁 سحب جديد", f"بواسطة: {ctx.author.mention}\nالجائزة: `{prize}`\nالمدة: `{duration}`", COLOR_YELLOW)
-    await ctx.send("✅ تم نشر السحب.", delete_after=5)
-
-    await discord.utils.sleep_until(discord.utils.utcnow() + timedelta(seconds=seconds))
-
-    entries = list(view.entries)
-    if not entries:
-        result_embed = discord.Embed(title="🎁 انتهى السحب", description=f"الجائزة: **{prize}**\nمافي أحد دخل السحب.", color=COLOR_RED)
-        await channel.send(embed=result_embed)
-        return
-
-    winners_count = min(winners, len(entries))
-    selected = random.sample(entries, winners_count)
-    winners_text = " ".join([f"<@{uid}>" for uid in selected])
-
-    result_embed = discord.Embed(
-        title="🎉 انتهى السحب",
-        description=f"**الجائزة:** {prize}\n**الفائزين:** {winners_text}",
-        color=COLOR_GREEN
-    )
-    await channel.send(content=winners_text, embed=result_embed)
-    await send_nm_log(ctx.guild, "🎉 انتهى السحب", f"الجائزة: `{prize}`\nالفائزين: {winners_text}", COLOR_GREEN)
 
 
-@bot.command(name="رولات_nm", aliases=["nm_roles"])
+@bot.command(name="اعداد", aliases=["setup"])
 @commands.has_permissions(administrator=True)
-async def nm_roles(ctx):
-    if ctx.guild.id != COMMUNITY_GUILD_ID:
+async def setup_posts(ctx):
+    guild = ctx.guild
+
+    if not guild or guild.id != GUILD_ID:
+        await ctx.send("❌ هذا الأمر يشتغل بس في السيرفر الأساسي.")
         return
 
-    channel = ctx.guild.get_channel(NM_ROLES_CHANNEL_ID)
-    if not channel:
-        await ctx.send("ما لقيت روم الرولات.")
-        return
+    loading = await ctx.send("⚙️ جاري تنزيل رسائل الإعداد في الرومات...")
 
-    embed = discord.Embed(
-        title="🎭 رولات الألعاب",
-        description="اختار الألعاب اللي تهمك من الأزرار تحت.\nاضغط مرة تاخذ الرتبة، واضغط مرة ثانية تشيلها.",
-        color=COLOR_BLUE
-    )
+    try:
+        lfg_embed = discord.Embed(
+            title="🎮 Looking For Game",
+            description=(
+                "هذا الروم مخصص للتجمعات والبحث عن لاعبين.\n\n"
+                "تقدر تستخدم أمر التجمع، والبوت بينزل رسالة فيها زر **بدخل**.\n"
+                "إذا اكتمل العدد، البوت يفتح روم فويس خاص باسم اللعبة.\n"
+                "الكل يشوف الروم، لكن الدخول فقط للمسجلين."
+            ),
+            color=COLOR_GREEN,
+            timestamp=discord.utils.utcnow()
+        )
 
-    await channel.send(embed=embed, view=GameRolesView())
-    await ctx.send("✅ تم إرسال لوحة الرولات.", delete_after=5)
+        lfg_embed.add_field(
+            name="✅ الاستخدام",
+            value=(
+                "`!لعب Valorant 5 نبي قيم سريع`\n"
+                "`!لعب Roblox 4 نبي نلعب`\n"
+                "`!لعب Fortnite 2 دو`"
+            ),
+            inline=False
+        )
+
+        lfg_embed.add_field(
+            name="📌 القوانين",
+            value=(
+                "• لا تكرر نفس الطلب أكثر من مرة.\n"
+                "• لا تسوي سبام منشن.\n"
+                "• اكتب اسم اللعبة والعدد بوضوح.\n"
+                "• اللي بيدخل يضغط زر **بدخل**.\n"
+                "• إذا اكتمل العدد، ما يقدر أحد يدخل زيادة."
+            ),
+            inline=False
+        )
+
+        lfg_embed.add_field(
+            name="🔐 الصلاحيات المقترحة",
+            value=(
+                "الأعضاء: يشوفون الروم ويكتبون.\n"
+                "البوت: Manage Channels + Send Messages + Embed Links.\n"
+                "الفويس الخاص: الكل يشوفه، الدخول فقط للمسجلين."
+            ),
+            inline=False
+        )
+
+        lfg_embed.set_footer(text="NM System | Looking For Game")
+
+        await send_to_channel(
+            guild,
+            LOOKING_FOR_GAME_CHANNEL_ID,
+            embed=lfg_embed
+        )
+
+        giveaways_embed = discord.Embed(
+            title="🎁 Giveaways",
+            description=(
+                "هذا الروم مخصص للسحوبات فقط.\n\n"
+                "السحوبات تنزل هنا بزر دخول، والاختيار يكون تلقائي بعد انتهاء الوقت."
+            ),
+            color=COLOR_YELLOW,
+            timestamp=discord.utils.utcnow()
+        )
+
+        giveaways_embed.add_field(
+            name="✅ الاستخدام",
+            value=(
+                "`!سحب Nitro 1h 1`\n"
+                "`!سحب Robux 30m 1`\n"
+                "`!سحب GiftCard 1d 2`"
+            ),
+            inline=False
+        )
+
+        giveaways_embed.add_field(
+            name="📌 القوانين",
+            value=(
+                "• السحوبات للإدارة فقط.\n"
+                "• الدخول يكون من الزر فقط.\n"
+                "• ممنوع السبام أو طلب الفوز.\n"
+                "• إذا انتهى السحب البوت يعلن الفائزين."
+            ),
+            inline=False
+        )
+
+        giveaways_embed.add_field(
+            name="🔐 الصلاحيات المقترحة",
+            value=(
+                "الأعضاء: يشوفون الروم ويتفاعلون مع الأزرار.\n"
+                "الأعضاء: يفضل ما يكتبون فيه.\n"
+                "الإدارة والبوت: يرسلون السحوبات."
+            ),
+            inline=False
+        )
+
+        giveaways_embed.set_footer(text="NM System | Giveaways")
+
+        await send_to_channel(
+            guild,
+            GIVEAWAYS_CHANNEL_ID,
+            embed=giveaways_embed
+        )
+
+        roles_info_embed = discord.Embed(
+            title="🎭 Roles",
+            description=(
+                "هذا الروم مخصص لاختيار رتب الألعاب.\n\n"
+                "اضغط على الزر المناسب للعبة، وإذا ضغطت مرة ثانية تنشال منك الرتبة."
+            ),
+            color=COLOR_PURPLE,
+            timestamp=discord.utils.utcnow()
+        )
+
+        roles_info_embed.add_field(
+            name="✅ طريقة الاستخدام",
+            value=(
+                "اضغط على زر اللعبة اللي تلعبها:\n"
+                "🚗 GTA\n"
+                "🎯 Valorant\n"
+                "🏗️ Fortnite\n"
+                "🧱 Roblox\n"
+                "⛏️ Minecraft"
+            ),
+            inline=False
+        )
+
+        roles_info_embed.add_field(
+            name="📌 القوانين",
+            value=(
+                "• خذ الرتبة اللي تخص الألعاب اللي تلعبها فقط.\n"
+                "• الرتب تساعد الناس يمنشنون لاعبين نفس لعبتك.\n"
+                "• لا تسوي إزعاج أو منشن عشوائي للرتب."
+            ),
+            inline=False
+        )
+
+        roles_info_embed.add_field(
+            name="🔐 الصلاحيات المقترحة",
+            value=(
+                "الأعضاء: يشوفون الروم ويتفاعلون مع الأزرار.\n"
+                "الأعضاء: يفضل ما يكتبون فيه.\n"
+                "البوت: Manage Roles + Send Messages + Embed Links."
+            ),
+            inline=False
+        )
+
+        roles_info_embed.set_footer(text="NM System | Game Roles")
+
+        await send_to_channel(
+            guild,
+            ROLES_CHANNEL_ID,
+            embed=roles_info_embed
+        )
+
+        roles_panel_embed = discord.Embed(
+            title="🎮 اختر رتب الألعاب",
+            description=(
+                "اضغط على الزر عشان تأخذ رتبة اللعبة.\n"
+                "اضغط مرة ثانية عشان تشيل الرتبة من نفسك."
+            ),
+            color=COLOR_BLUE,
+            timestamp=discord.utils.utcnow()
+        )
+
+        roles_panel_embed.set_footer(text="NM System | Role Panel")
+
+        await send_to_channel(
+            guild,
+            ROLES_CHANNEL_ID,
+            embed=roles_panel_embed,
+            view=GameRolesView()
+        )
+
+        announcements_embed = discord.Embed(
+            title="📢 Announcements",
+            description=(
+                "هذا الروم مخصص للإعلانات الرسمية والمهمة.\n\n"
+                "أي تحديثات، أخبار، فعاليات، أو تنبيهات مهمة بتنزل هنا."
+            ),
+            color=COLOR_BLUE,
+            timestamp=discord.utils.utcnow()
+        )
+
+        announcements_embed.add_field(
+            name="✅ الاستخدام",
+            value=(
+                "`!اعلان نص الإعلان`\n\n"
+                "مثال:\n"
+                "`!اعلان بكرة عندنا فعالية الساعة 9 مساءً`"
+            ),
+            inline=False
+        )
+
+        announcements_embed.add_field(
+            name="📌 القوانين",
+            value=(
+                "• الإعلانات للإدارة فقط.\n"
+                "• لا تستخدم الروم للدردشة.\n"
+                "• تابع الروم عشان تعرف أخبار السيرفر."
+            ),
+            inline=False
+        )
+
+        announcements_embed.add_field(
+            name="🔐 الصلاحيات المقترحة",
+            value=(
+                "الأعضاء: يشوفون الروم فقط.\n"
+                "الإدارة والبوت: يرسلون.\n"
+                "يفضل منع الكتابة العادية للأعضاء."
+            ),
+            inline=False
+        )
+
+        announcements_embed.set_footer(text="NM System | Announcements")
+
+        await send_to_channel(
+            guild,
+            ANNOUNCEMENTS_CHANNEL_ID,
+            embed=announcements_embed
+        )
+
+        commands_embed = discord.Embed(
+            title="🤖 NM System Commands",
+            description="هذي أهم أوامر البوت:",
+            color=COLOR_GREY,
+            timestamp=discord.utils.utcnow()
+        )
+
+        commands_embed.add_field(
+            name="🛡️ الحماية",
+            value=(
+                "`!حماية`\n"
+                "`!حماية تشغيل`\n"
+                "`!حماية ايقاف`\n"
+                "`!اعدادات`"
+            ),
+            inline=True
+        )
+
+        commands_embed.add_field(
+            name="⚒️ الإدارة",
+            value=(
+                "`!مسح 10`\n"
+                "`!قفل`\n"
+                "`!فتح`\n"
+                "`!تحذير @user السبب`\n"
+                "`!تحذيرات @user`\n"
+                "`!تصفير @user`"
+            ),
+            inline=True
+        )
+
+        commands_embed.add_field(
+            name="🎮 المجتمع",
+            value=(
+                "`!لعب Valorant 5`\n"
+                "`!اقتراح فكرتك`\n"
+                "`!سحب Nitro 1h 1`\n"
+                "`!رولات`\n"
+                "`!اعلان نص الإعلان`"
+            ),
+            inline=True
+        )
+
+        commands_embed.add_field(
+            name="📊 اللفل",
+            value=(
+                "`!لفلي`\n"
+                "`!لفل @user`\n"
+                "`!ترتيب`"
+            ),
+            inline=True
+        )
+
+        commands_embed.add_field(
+            name="😎 عامة",
+            value=(
+                "`!بنق`\n"
+                "`!هلا`\n"
+                "`!طقطق @user`\n"
+                "`!تقييم الشي`\n"
+                "`!لوحة`"
+            ),
+            inline=True
+        )
+
+        commands_embed.set_footer(text="NM System | Setup Completed")
+
+        await ctx.send(embed=commands_embed)
+
+        await send_log(
+            guild,
+            "⚙️ إعداد الرومات",
+            f"""
+**بواسطة:** {ctx.author.mention}
+**الأمر:** `!اعداد`
+
+تم تنزيل:
+• شرح looking-for-game
+• شرح giveaways
+• شرح roles
+• لوحة الرولات
+• شرح announcements
+• لوحة الأوامر
+""",
+            COLOR_BLUE
+        )
+
+        await loading.edit(content="✅ تم تنزيل إعدادات الرومات ولوحة الرولات بنجاح.")
+
+    except Exception as e:
+        await loading.edit(content=f"❌ صار خطأ أثناء الإعداد:\n```{e}```")
 
 
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
-        if ctx.guild and ctx.guild.id == COMMUNITY_GUILD_ID:
-            await ctx.send("⚠️ هذا الأمر مو مخصص لـ NM أو ما عندك صلاحية تستخدمه.", delete_after=6)
-        elif ctx.guild and ctx.guild.id == MAIN_GUILD_ID:
-            await ctx.send("⚠️ هذا الأمر مو مخصص لمقاطعة رسك أو ما عندك صلاحية تستخدمه.", delete_after=6)
+        await ctx.send("⚠️ هذا الأمر مو مسموح هنا أو ما عندك صلاحية.", delete_after=6)
         return
 
     if isinstance(error, commands.MissingPermissions):
@@ -1735,7 +2215,11 @@ async def on_command_error(ctx, error):
         return
 
     if isinstance(error, commands.BadArgument):
-        await ctx.send("❌ في قيمة غلط بالأمر. تأكد من المنشن أو الأرقام.", delete_after=6)
+        await ctx.send("❌ تأكد من المنشن أو الرقم.", delete_after=6)
+        return
+
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("❌ ناقصك شيء في الأمر. اكتب `!مساعدة`.", delete_after=6)
         return
 
     print(f"Command Error: {error}")
