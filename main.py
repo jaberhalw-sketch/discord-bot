@@ -76,6 +76,10 @@ COIN_NAME = "Retard coin"
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
+SERVER_BOOSTER_ROLE_ID = 1349381214120706218
+BOOSTER_WEEKLY_REWARD = 5000
+BOOSTER_WEEKLY_COOLDOWN_SECONDS = 7 * 24 * 60 * 60
+BOOSTER_WEEKLY_CHECK_INTERVAL_SECONDS = 60 * 60
 GAMBLING_CHANNEL_ID = 1504165660341571684
 GAMBLE_COOLDOWN_SECONDS = 2
 ECONOMY_EMOJI = "🪙"
@@ -99,6 +103,7 @@ gamble_cooldowns = {}
 game_room_delete_tasks = {}
 memory_backup_task = None
 economy_explain_task = None
+booster_weekly_task = None
 
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
@@ -290,6 +295,12 @@ def init_db():
         )
     """)
 
+    cur.execute("PRAGMA table_info(economy)")
+    economy_columns = [row[1] for row in cur.fetchall()]
+
+    if "last_boost_weekly" not in economy_columns:
+        cur.execute("ALTER TABLE economy ADD COLUMN last_boost_weekly INTEGER DEFAULT 0")
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -479,6 +490,52 @@ def claim_daily(user_id, level):
     return True, 0, balance, reward
 
 
+def is_server_booster(member):
+    if not member or not getattr(member, "guild", None):
+        return False
+
+    return any(role.id == SERVER_BOOSTER_ROLE_ID for role in member.roles)
+
+
+def get_booster_last_claim(user_id):
+    get_money_data(user_id)
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT last_boost_weekly FROM economy WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    conn.close()
+
+    if not row:
+        return 0
+
+    return int(row[0] or 0)
+
+
+def claim_booster_weekly(user_id):
+    balance, last_daily = get_money_data(user_id)
+    last_boost = get_booster_last_claim(user_id)
+    now = int(time.time())
+
+    if now - last_boost < BOOSTER_WEEKLY_COOLDOWN_SECONDS:
+        remaining = BOOSTER_WEEKLY_COOLDOWN_SECONDS - (now - last_boost)
+        return False, remaining, balance, 0
+
+    reward = int(BOOSTER_WEEKLY_REWARD)
+    balance += reward
+
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE economy SET balance = ?, last_boost_weekly = ? WHERE user_id = ?",
+        (balance, now, user_id)
+    )
+    conn.commit()
+    conn.close()
+
+    return True, 0, balance, reward
+
+
 def get_top_money(limit=10):
     conn = db_connect()
     cur = conn.cursor()
@@ -497,8 +554,12 @@ def get_top_money(limit=10):
 
 def format_seconds(seconds):
     seconds = int(seconds)
-    hours = seconds // 3600
+    days = seconds // 86400
+    hours = (seconds % 86400) // 3600
     minutes = (seconds % 3600) // 60
+
+    if days > 0:
+        return f"{days} يوم و {hours} ساعة"
 
     if hours > 0:
         return f"{hours} ساعة و {minutes} دقيقة"
@@ -2074,6 +2135,42 @@ def keep_alive():
     Thread(target=run).start()
 
 
+async def booster_weekly_loop():
+    await bot.wait_until_ready()
+
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(GUILD_ID)
+
+            if guild:
+                role = guild.get_role(SERVER_BOOSTER_ROLE_ID)
+                channel = guild.get_channel(COMMANDS_CHANNEL_ID)
+
+                if role:
+                    for member in list(role.members):
+                        if member.bot:
+                            continue
+
+                        success, remaining, balance_amount, reward = claim_booster_weekly(member.id)
+
+                        if success and channel:
+                            embed = discord.Embed(
+                                title="🚀 Booster Weekly Auto Reward",
+                                description=f"{member.mention} استلم مكافأة البوست الأسبوعية تلقائيًا.",
+                                color=COLOR_PURPLE,
+                                timestamp=discord.utils.utcnow()
+                            )
+                            embed.add_field(name="🎁 Reward", value=money_delta(reward), inline=True)
+                            embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
+                            embed.set_footer(text=f"{BOT_BRAND} • Auto Booster Weekly")
+                            await channel.send(embed=embed)
+
+        except Exception as e:
+            print(f"Booster weekly auto reward error: {e}")
+
+        await asyncio.sleep(BOOSTER_WEEKLY_CHECK_INTERVAL_SECONDS)
+
+
 # =========================
 # BOT EVENTS
 # =========================
@@ -2091,7 +2188,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
-    global memory_backup_task, economy_explain_task
+    global memory_backup_task, economy_explain_task, booster_weekly_task
 
     guild = bot.get_guild(GUILD_ID)
 
@@ -2109,6 +2206,9 @@ async def on_ready():
 
     if economy_explain_task is None or economy_explain_task.done():
         economy_explain_task = asyncio.create_task(economy_explain_loop())
+
+    if booster_weekly_task is None or booster_weekly_task.done():
+        booster_weekly_task = asyncio.create_task(booster_weekly_loop())
 
     await bot.change_presence(
         status=discord.Status.online,
@@ -2466,6 +2566,22 @@ async def on_member_update(before, after):
         entry = await get_audit_executor(after.guild, discord.AuditLogAction.member_role_update, after.id)
         executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
+        if any(role.id == SERVER_BOOSTER_ROLE_ID for role in added):
+            channel = after.guild.get_channel(COMMANDS_CHANNEL_ID)
+            success, remaining, balance_amount, reward = claim_booster_weekly(after.id)
+
+            if channel and success:
+                embed = discord.Embed(
+                    title="🚀 شكراً على Server Boost",
+                    description=f"{after.mention} استلمت مكافأة البوست الأسبوعية.",
+                    color=COLOR_PURPLE,
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.add_field(name="🎁 Reward", value=money_delta(reward), inline=True)
+                embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
+                embed.set_footer(text=f"{BOT_BRAND} • Booster Reward")
+                await channel.send(embed=embed)
+
         if roles_text:
             await send_log(
                 after.guild,
@@ -2808,6 +2924,7 @@ async def help_cmd(ctx):
 `!رصيدي`
 `!رصيد @شخص`
 `!يومي` أو `!ساعتي`
+`!بوست` أو `!اسبوعي`
 `!تحويل @شخص 500`
 `!اغنى`
 
@@ -3424,6 +3541,51 @@ async def daily(ctx):
     embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
     embed.add_field(name="🏅 Level Bonus", value=f"Level **{level}**", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} • كل ساعة تقدر تاخذ المكافأة")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="بوست", aliases=["boost", "booster", "اسبوعي", "weekly"])
+async def booster_weekly(ctx):
+    if not await require_commands_channel(ctx):
+        return
+
+    if not is_server_booster(ctx.author):
+        embed = discord.Embed(
+            title="🚀 مكافأة البوست الأسبوعية",
+            description=f"هذي المكافأة خاصة للي عندهم رتبة <@&{SERVER_BOOSTER_ROLE_ID}>.",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="المطلوب", value="سو Server Boost أو خذ رتبة البوست عشان تقدر تستلمها.", inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} • Booster Weekly")
+        await ctx.send(embed=embed)
+        return
+
+    success, remaining, balance_amount, reward = claim_booster_weekly(ctx.author.id)
+
+    if not success:
+        embed = discord.Embed(
+            title="⏳ مكافأة البوست مو جاهزة",
+            description=f"ارجع بعد **{format_seconds(remaining)}**.",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} • Booster Weekly")
+        await ctx.send(embed=embed)
+        return
+
+    embed = discord.Embed(
+        title="🚀 Booster Weekly Claimed",
+        description=f"شكراً على دعم السيرفر يا {ctx.author.mention}.",
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.add_field(name="🎁 Weekly Reward", value=money_delta(reward), inline=True)
+    embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
+    embed.add_field(name="⏳ Cooldown", value="كل أسبوع", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Server Booster Reward")
     await ctx.send(embed=embed)
 
 
