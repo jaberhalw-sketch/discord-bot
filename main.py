@@ -25,14 +25,17 @@ GIVEAWAYS_CHANNEL_ID = 1370418475314581524
 ROLES_CHANNEL_ID = 1504066503501152377
 ANNOUNCEMENTS_CHANNEL_ID = 1370433079377920130
 
+GAME_VOICE_CATEGORY_ID = 1504071883006677172
+
 OWNER_USERNAMES = ["jr_7", "jbh.1"]
 
 BYPASS_USER_IDS = {
-    1125198908231004191
+    
 }
 
 DB_FILE = "nm_system.db"
 WARNINGS_FILE = "warnings.json"
+GAME_ROLES_FILE = "game_roles.json"
 
 PREFIX = "!"
 
@@ -54,13 +57,30 @@ protection_enabled = True
 user_message_times = {}
 xp_cooldowns = {}
 
-GAME_ROLE_IDS = {
-    "gta": None,
-    "valorant": None,
-    "fortnite": None,
-    "roblox": None,
-    "minecraft": None,
+GAME_ROLES = {
+    "gta": {"name": "GTA", "emoji": "🚗"},
+    "valorant": {"name": "Valorant", "emoji": "🎯"},
+    "fortnite": {"name": "Fortnite", "emoji": "🏗️"},
+    "roblox": {"name": "Roblox", "emoji": "🧱"},
+    "minecraft": {"name": "Minecraft", "emoji": "⛏️"},
+    "counter_strike": {"name": "Counter Strike", "emoji": "🔫"},
+    "dead_by_daylight": {"name": "Dead by Daylight", "emoji": "💀"},
+    "overwatch": {"name": "Overwatch", "emoji": "🛡️"},
+    "arc_raiders": {"name": "ARC Raiders", "emoji": "🚀"},
+    "rocket_league": {"name": "Rocket League", "emoji": "⚽"},
+    "apex": {"name": "Apex Legends", "emoji": "🏹"},
+    "warzone": {"name": "Warzone", "emoji": "🪖"},
+    "rainbow_six": {"name": "Rainbow Six Siege", "emoji": "🏢"},
+    "fifa": {"name": "EA FC", "emoji": "⚽"},
+    "rust": {"name": "Rust", "emoji": "🪓"},
+    "league": {"name": "League of Legends", "emoji": "⚔️"},
+    "cod": {"name": "Call of Duty", "emoji": "🎖️"},
+    "among_us": {"name": "Among Us", "emoji": "🛸"},
+    "the_finals": {"name": "The Finals", "emoji": "💥"},
+    "helldivers": {"name": "Helldivers 2", "emoji": "🌌"},
 }
+
+GAME_ROLE_IDS = {}
 
 bad_words = [
     "قواد", "خنيث", "قحبه", "قحبة", "شرموط", "سالب",
@@ -86,6 +106,35 @@ except:
     pass
 
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
+
+
+# =========================
+# JSON
+# =========================
+
+def load_json(file_name, default):
+    try:
+        with open(file_name, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except:
+        return default
+
+
+def save_json(file_name, data):
+    with open(file_name, "w", encoding="utf-8") as file:
+        json.dump(data, file, indent=4, ensure_ascii=False)
+
+
+warnings = load_json(WARNINGS_FILE, {})
+GAME_ROLE_IDS = load_json(GAME_ROLES_FILE, {})
+
+
+def save_warnings():
+    save_json(WARNINGS_FILE, warnings)
+
+
+def save_game_roles():
+    save_json(GAME_ROLES_FILE, GAME_ROLE_IDS)
 
 
 # =========================
@@ -204,26 +253,6 @@ def save_suggestion(user_id, suggestion):
 
     conn.commit()
     conn.close()
-
-
-def load_json(file_name, default):
-    try:
-        with open(file_name, "r", encoding="utf-8") as file:
-            return json.load(file)
-    except:
-        return default
-
-
-def save_json(file_name, data):
-    with open(file_name, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4, ensure_ascii=False)
-
-
-warnings = load_json(WARNINGS_FILE, {})
-
-
-def save_warnings():
-    save_json(WARNINGS_FILE, warnings)
 
 
 # =========================
@@ -452,6 +481,27 @@ async def handle_violation(message, reason):
     )
 
 
+async def create_or_find_game_roles(guild):
+    created_or_found = []
+
+    for key, data in GAME_ROLES.items():
+        role_name = data["name"]
+        role = discord.utils.get(guild.roles, name=role_name)
+
+        if not role:
+            role = await guild.create_role(
+                name=role_name,
+                mentionable=True,
+                reason="NM System game role setup"
+            )
+
+        GAME_ROLE_IDS[key] = role.id
+        created_or_found.append(role)
+
+    save_game_roles()
+    return created_or_found
+
+
 # =========================
 # VIEWS
 # =========================
@@ -513,7 +563,10 @@ class JoinPlayView(discord.ui.View):
                 use_voice_activation=True
             )
 
-        category = interaction.channel.category
+        category = guild.get_channel(GAME_VOICE_CATEGORY_ID)
+
+        if not category or not isinstance(category, discord.CategoryChannel):
+            category = interaction.channel.category
 
         channel_name = f"🎮-{clean_channel_name(self.game)}"
 
@@ -557,6 +610,7 @@ class JoinPlayView(discord.ui.View):
             f"""
 **اللعبة:** {self.game}
 **الروم:** {voice_channel.mention}
+**الكاتقوري:** `{category.name if category else 'غير معروف'}`
 **العدد:** {len(self.players)}/{self.max_players}
 
 **اللاعبين:**
@@ -676,21 +730,33 @@ class GiveawayView(discord.ui.View):
         await interaction.response.send_message("✅ دخلت السحب.", ephemeral=True)
 
 
-class GameRolesView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
+class GameRoleButton(discord.ui.Button):
+    def __init__(self, role_key, label, emoji):
+        super().__init__(
+            label=label,
+            emoji=emoji,
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"game_role_{role_key}"
+        )
+        self.role_key = role_key
 
-    async def toggle_role(self, interaction, role_key):
-        role_id = GAME_ROLE_IDS.get(role_key)
+    async def callback(self, interaction: discord.Interaction):
+        role_id = GAME_ROLE_IDS.get(self.role_key)
 
         if not role_id:
-            await interaction.response.send_message("⚠️ الرتبة ما انحط آيديها في الكود.", ephemeral=True)
+            await interaction.response.send_message(
+                "⚠️ الرتبة ما تجهزت. اكتب `!اعداد` أول.",
+                ephemeral=True
+            )
             return
 
-        role = interaction.guild.get_role(role_id)
+        role = interaction.guild.get_role(int(role_id))
 
         if not role:
-            await interaction.response.send_message("⚠️ ما لقيت الرتبة في السيرفر.", ephemeral=True)
+            await interaction.response.send_message(
+                "⚠️ ما لقيت الرتبة في السيرفر. اكتب `!اعداد` عشان البوت يسويها من جديد.",
+                ephemeral=True
+            )
             return
 
         if role in interaction.user.roles:
@@ -700,25 +766,13 @@ class GameRolesView(discord.ui.View):
             await interaction.user.add_roles(role)
             await interaction.response.send_message(f"✅ عطيتك رتبة {role.mention}", ephemeral=True)
 
-    @discord.ui.button(label="GTA", style=discord.ButtonStyle.secondary, emoji="🚗", custom_id="role_gta")
-    async def gta(self, interaction, button):
-        await self.toggle_role(interaction, "gta")
 
-    @discord.ui.button(label="Valorant", style=discord.ButtonStyle.secondary, emoji="🎯", custom_id="role_valorant")
-    async def valorant(self, interaction, button):
-        await self.toggle_role(interaction, "valorant")
+class GameRolesView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
 
-    @discord.ui.button(label="Fortnite", style=discord.ButtonStyle.secondary, emoji="🏗️", custom_id="role_fortnite")
-    async def fortnite(self, interaction, button):
-        await self.toggle_role(interaction, "fortnite")
-
-    @discord.ui.button(label="Roblox", style=discord.ButtonStyle.secondary, emoji="🧱", custom_id="role_roblox")
-    async def roblox(self, interaction, button):
-        await self.toggle_role(interaction, "roblox")
-
-    @discord.ui.button(label="Minecraft", style=discord.ButtonStyle.secondary, emoji="⛏️", custom_id="role_minecraft")
-    async def minecraft(self, interaction, button):
-        await self.toggle_role(interaction, "minecraft")
+        for key, data in GAME_ROLES.items():
+            self.add_item(GameRoleButton(key, data["name"], data["emoji"]))
 
 
 # =========================
@@ -959,6 +1013,17 @@ async def on_member_remove(member):
 
     executor = await get_audit_executor(member.guild, discord.AuditLogAction.kick, member.id)
 
+    roles = [
+        role.mention
+        for role in member.roles
+        if role.name != "@everyone"
+    ]
+
+    if roles:
+        roles_text = "\n".join([f"• {role}" for role in roles])
+    else:
+        roles_text = "ما كان عنده رتب"
+
     if executor:
         title = "👢 عضو انطرد"
         extra = f"**بواسطة:** {executor.mention}"
@@ -975,6 +1040,9 @@ async def on_member_remove(member):
 **العضو:** `{member}`
 **ID:** `{member.id}`
 {extra}
+
+**الرتب اللي كانت معه يوم خرج:**
+{roles_text}
 """,
         color
     )
@@ -1889,9 +1957,11 @@ async def setup_posts(ctx):
         await ctx.send("❌ هذا الأمر يشتغل بس في السيرفر الأساسي.")
         return
 
-    loading = await ctx.send("⚙️ جاري تنزيل رسائل الإعداد في الرومات...")
+    loading = await ctx.send("⚙️ جاري تجهيز الرتب وتنزيل رسائل الإعداد...")
 
     try:
+        game_roles = await create_or_find_game_roles(guild)
+
         lfg_embed = discord.Embed(
             title="🎮 Looking For Game",
             description=(
@@ -1908,8 +1978,9 @@ async def setup_posts(ctx):
             name="✅ الاستخدام",
             value=(
                 "`!لعب Valorant 5 نبي قيم سريع`\n"
-                "`!لعب Roblox 4 نبي نلعب`\n"
-                "`!لعب Fortnite 2 دو`"
+                "`!لعب CounterStrike 5 نبي كومب`\n"
+                "`!لعب Overwatch 5 نبي رانك`\n"
+                "`!لعب ARC-Raiders 3 نبي قيم`"
             ),
             inline=False
         )
@@ -1975,16 +2046,6 @@ async def setup_posts(ctx):
             inline=False
         )
 
-        giveaways_embed.add_field(
-            name="🔐 الصلاحيات المقترحة",
-            value=(
-                "الأعضاء: يشوفون الروم ويتفاعلون مع الأزرار.\n"
-                "الأعضاء: يفضل ما يكتبون فيه.\n"
-                "الإدارة والبوت: يرسلون السحوبات."
-            ),
-            inline=False
-        )
-
         giveaways_embed.set_footer(text="NM System | Giveaways")
 
         await send_to_channel(
@@ -2003,16 +2064,14 @@ async def setup_posts(ctx):
             timestamp=discord.utils.utcnow()
         )
 
+        games_text = ""
+
+        for key, data in GAME_ROLES.items():
+            games_text += f"{data['emoji']} {data['name']}\n"
+
         roles_info_embed.add_field(
-            name="✅ طريقة الاستخدام",
-            value=(
-                "اضغط على زر اللعبة اللي تلعبها:\n"
-                "🚗 GTA\n"
-                "🎯 Valorant\n"
-                "🏗️ Fortnite\n"
-                "🧱 Roblox\n"
-                "⛏️ Minecraft"
-            ),
+            name="🎮 الألعاب المتوفرة",
+            value=games_text[:1000],
             inline=False
         )
 
@@ -2022,16 +2081,6 @@ async def setup_posts(ctx):
                 "• خذ الرتبة اللي تخص الألعاب اللي تلعبها فقط.\n"
                 "• الرتب تساعد الناس يمنشنون لاعبين نفس لعبتك.\n"
                 "• لا تسوي إزعاج أو منشن عشوائي للرتب."
-            ),
-            inline=False
-        )
-
-        roles_info_embed.add_field(
-            name="🔐 الصلاحيات المقترحة",
-            value=(
-                "الأعضاء: يشوفون الروم ويتفاعلون مع الأزرار.\n"
-                "الأعضاء: يفضل ما يكتبون فيه.\n"
-                "البوت: Manage Roles + Send Messages + Embed Links."
             ),
             inline=False
         )
@@ -2089,16 +2138,6 @@ async def setup_posts(ctx):
                 "• الإعلانات للإدارة فقط.\n"
                 "• لا تستخدم الروم للدردشة.\n"
                 "• تابع الروم عشان تعرف أخبار السيرفر."
-            ),
-            inline=False
-        )
-
-        announcements_embed.add_field(
-            name="🔐 الصلاحيات المقترحة",
-            value=(
-                "الأعضاء: يشوفون الروم فقط.\n"
-                "الإدارة والبوت: يرسلون.\n"
-                "يفضل منع الكتابة العادية للأعضاء."
             ),
             inline=False
         )
@@ -2182,23 +2221,27 @@ async def setup_posts(ctx):
 
         await send_log(
             guild,
-            "⚙️ إعداد الرومات",
+            "⚙️ إعداد الرومات والرتب",
             f"""
 **بواسطة:** {ctx.author.mention}
 **الأمر:** `!اعداد`
 
-تم تنزيل:
-• شرح looking-for-game
-• شرح giveaways
-• شرح roles
-• لوحة الرولات
-• شرح announcements
-• لوحة الأوامر
+تم:
+• إنشاء/تحديث رتب الألعاب
+• حفظ IDs الرتب في `{GAME_ROLES_FILE}`
+• تنزيل شرح looking-for-game
+• تنزيل شرح giveaways
+• تنزيل شرح roles
+• تنزيل لوحة الرولات
+• تنزيل شرح announcements
+• تجهيز فتح رومات اللعب داخل كاتقوري `{GAME_VOICE_CATEGORY_ID}`
+
+**عدد رتب الألعاب:** `{len(game_roles)}`
 """,
             COLOR_BLUE
         )
 
-        await loading.edit(content="✅ تم تنزيل إعدادات الرومات ولوحة الرولات بنجاح.")
+        await loading.edit(content="✅ تم تجهيز رتب الألعاب وتنزيل إعدادات الرومات ولوحة الرولات بنجاح.")
 
     except Exception as e:
         await loading.edit(content=f"❌ صار خطأ أثناء الإعداد:\n```{e}```")
