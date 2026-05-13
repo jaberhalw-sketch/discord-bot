@@ -145,7 +145,7 @@ bad_words = [
     "bzne", "bzny", "g7bh", "ghbh", "jtle5",
     "ks", "ks a5tk", "ks-mk", "ks5tk", "kse", "ksmk", "ksy",
     "lanek", "m3r9", "m7nh", "m87bh", "m9", "mfto7", "mfto7h",
-    "mhan", "mhanh", "mm7on", "mm7onh", "mnyok", "mtnak", "mtnakh",
+    "mhan", "zb", "zbe", "mhanh", "mm7on", "mm7onh", "mnyok", "mtnak", "mtnakh",
     "sharmo6h", "shrame6", "shrm6h", "shrmo6h", "shrmoth",
     "sks", "tjl5", "tm9", "tm9en", "y87bh", "ya87bh",
     "yabn", "ybn", "zane", "zaneh", "zany", "zanyh",
