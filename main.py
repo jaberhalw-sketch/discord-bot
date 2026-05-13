@@ -70,6 +70,11 @@ user_message_times = {}
 xp_cooldowns = {}
 game_room_delete_tasks = {}
 
+# Startup watchdog: if Discord login hangs and on_ready never runs,
+# Railway will restart the container instead of leaving the bot offline forever.
+bot_ready_flag = False
+STARTUP_TIMEOUT_SECONDS = 120
+
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
     "member": "nm-member-logs",
@@ -1361,6 +1366,9 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    global bot_ready_flag
+    bot_ready_flag = True
+
     init_db()
 
     bot.add_view(GameRolesView())
@@ -3282,20 +3290,31 @@ async def on_command_error(ctx, error):
     print(f"Command Error: {error}")
 
 
+def startup_watchdog():
+    time.sleep(STARTUP_TIMEOUT_SECONDS)
+
+    if not bot_ready_flag:
+        print(
+            f"Bot did not reach on_ready within {STARTUP_TIMEOUT_SECONDS} seconds. "
+            "Discord login/gateway is stuck. Exiting so Railway can restart..."
+        )
+        os._exit(1)
+
+
 if not TOKEN:
     raise RuntimeError("TOKEN environment variable is missing. Add TOKEN in Railway Variables.")
 
 keep_alive()
+Thread(target=startup_watchdog, daemon=True).start()
 
-while True:
-    try:
-        bot.run(TOKEN)
-    except discord.errors.DiscordServerError as e:
-        print(f"Discord login server error: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
-    except discord.errors.HTTPException as e:
-        print(f"Discord HTTP error: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
-    except Exception as e:
-        print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
+try:
+    bot.run(TOKEN)
+except discord.errors.DiscordServerError as e:
+    print(f"Discord login server error: {e}. Exiting so Railway can restart...")
+    os._exit(1)
+except discord.errors.HTTPException as e:
+    print(f"Discord HTTP error: {e}. Exiting so Railway can restart...")
+    os._exit(1)
+except Exception as e:
+    print(f"Unexpected bot crash: {type(e).__name__}: {e}. Exiting so Railway can restart...")
+    os._exit(1)
