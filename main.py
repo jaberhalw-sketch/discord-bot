@@ -9,8 +9,10 @@ import sqlite3
 import re
 import asyncio
 from pathlib import Path
-from flask import Flask
+from flask import Flask, request, redirect, session, render_template_string
 from threading import Thread
+import urllib.parse
+import urllib.request
 
 # =========================
 # CONFIG
@@ -28,7 +30,7 @@ ROLES_CHANNEL_ID = 1504066503501152377
 ANNOUNCEMENTS_CHANNEL_ID = 1370433079377920130
 LEAVE_INFO_CHANNEL_ID = 1504063808656773170
 
-GAME_VOICE_CATEGORY_ID = 1504071883006677172
+GAME_VOICE_CATEGORY_ID = 1370419496002781335
 GAME_ROOM_DELETE_SECONDS = 300
 
 LOGS_CATEGORY_ID = 1504063695062306948
@@ -85,6 +87,20 @@ GAMBLE_COOLDOWN_SECONDS = 2
 ECONOMY_EMOJI = "🪙"
 LEVEL_EMOJI = "📊"
 BOT_BRAND = "Retards System"
+
+# =========================
+# DASHBOARD / DISCORD OAUTH
+# =========================
+DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
+DISCORD_CLIENT_SECRET = os.getenv("DISCORD_CLIENT_SECRET", "")
+DASHBOARD_SECRET_KEY = os.getenv("DASHBOARD_SECRET_KEY", os.getenv("SECRET_KEY", "change-this-secret"))
+DASHBOARD_BASE_URL = os.getenv("DASHBOARD_BASE_URL", "").rstrip("/")
+DISCORD_API_BASE = "https://discord.com/api/v10"
+DASHBOARD_ADMIN_ROLE_IDS = {
+    int(x.strip())
+    for x in os.getenv("DASHBOARD_ADMIN_ROLE_IDS", "").split(",")
+    if x.strip().isdigit()
+}
 
 
 COLOR_YELLOW = discord.Color.gold()
@@ -2120,10 +2136,336 @@ class GameRolesView(discord.ui.View):
 # =========================
 
 app = Flask(__name__)
+app.secret_key = DASHBOARD_SECRET_KEY
+
+# =========================
+# WEB DASHBOARD HELPERS
+# =========================
+
+def dashboard_redirect_uri():
+    if not DASHBOARD_BASE_URL:
+        return ""
+    return f"{DASHBOARD_BASE_URL}/callback"
+
+
+def dashboard_auth_url():
+    params = {
+        "client_id": DISCORD_CLIENT_ID,
+        "redirect_uri": dashboard_redirect_uri(),
+        "response_type": "code",
+        "scope": "identify",
+        "prompt": "none",
+    }
+    return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(params)
+
+
+def oauth_post_token(code):
+    data = urllib.parse.urlencode({
+        "client_id": DISCORD_CLIENT_ID,
+        "client_secret": DISCORD_CLIENT_SECRET,
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": dashboard_redirect_uri(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{DISCORD_API_BASE}/oauth2/token",
+        data=data,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def oauth_get_user(access_token):
+    req = urllib.request.Request(
+        f"{DISCORD_API_BASE}/users/@me",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET"
+    )
+    with urllib.request.urlopen(req, timeout=12) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+async def dashboard_fetch_member(user_id):
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return None
+    member = guild.get_member(int(user_id))
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(int(user_id))
+    except:
+        return None
+
+
+def dashboard_get_member_sync(user_id):
+    try:
+        future = asyncio.run_coroutine_threadsafe(dashboard_fetch_member(int(user_id)), bot.loop)
+        return future.result(timeout=10)
+    except:
+        return None
+
+
+def dashboard_user_has_access(user_id):
+    try:
+        user_id = int(user_id)
+    except:
+        return False
+    guild = bot.get_guild(GUILD_ID)
+    if guild and user_id == int(guild.owner_id):
+        return True
+    member = dashboard_get_member_sync(user_id)
+    if not member:
+        return False
+    if member.guild_permissions.administrator:
+        return True
+    if DASHBOARD_ADMIN_ROLE_IDS:
+        return any(role.id in DASHBOARD_ADMIN_ROLE_IDS for role in member.roles)
+    return False
+
+
+def dashboard_require_admin():
+    if not session.get("discord_user"):
+        return redirect("/login")
+    if not dashboard_user_has_access(session["discord_user"].get("id")):
+        return render_dashboard_page("Access Denied", '<div class="card danger"><h2>🚫 Access Denied</h2><p>حسابك داخل Discord ما عنده صلاحية دخول للداشبورد.</p><p>الدخول مسموح فقط لصاحب السيرفر أو اللي عنده Administrator أو الرتب المحددة.</p><a class="btn" href="/logout">Logout</a></div>', status=403)
+    return None
+
+
+def dashboard_count_table(table):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        value = cur.fetchone()[0]
+        conn.close()
+        return int(value or 0)
+    except:
+        return 0
+
+
+def dashboard_total_coins():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy")
+        value = cur.fetchone()[0]
+        conn.close()
+        return int(value or 0)
+    except:
+        return 0
+
+
+def dashboard_set_level_data(user_id, xp=None, level=None):
+    old_xp, old_level = get_level_data(user_id)
+    new_xp = old_xp if xp is None else max(0, int(xp))
+    new_level = old_level if level is None else max(1, int(level))
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE levels SET xp = ?, level = ? WHERE user_id = ?", (new_xp, new_level, int(user_id)))
+    conn.commit()
+    conn.close()
+    return new_xp, new_level
+
+
+def dashboard_member_name(user_id):
+    member = dashboard_get_member_sync(user_id)
+    if member:
+        return str(member)
+    return f"User {user_id}"
+
+
+def dashboard_money_rows(limit=10):
+    rows = []
+    for i, (user_id, balance) in enumerate(get_top_money(limit), start=1):
+        rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "balance": int(balance or 0)})
+    return rows
+
+
+def dashboard_level_rows(limit=10):
+    rows = []
+    for i, (user_id, xp, level) in enumerate(get_top_levels(limit), start=1):
+        rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "level": int(level or 1), "xp": int(xp or 0)})
+    return rows
+
+
+def dashboard_memory_summary():
+    status = local_memory_status()
+    rows = []
+    for file_name, info in status.items():
+        badge = "OK" if info.get("valid") else "CHECK"
+        size_kb = round(int(info.get("size", 0)) / 1024, 2)
+        rows.append({"file": file_name, "badge": badge, "size": size_kb})
+    return rows
+
+
+DASHBOARD_BASE_TEMPLATE = '''
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} • {{ brand }}</title>
+  <style>
+    :root{--panel:#121826;--panel2:#171f31;--text:#f4f7fb;--muted:#9aa8bd;--line:#27334a;--blue:#5865f2;--green:#22c55e;--red:#ef4444}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#18223a 0,#0b0f18 42%,#070a10 100%);font-family:Inter,Arial,sans-serif;color:var(--text)}a{color:inherit;text-decoration:none}.wrap{max-width:1180px;margin:0 auto;padding:24px}.nav{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px}.logo{width:44px;height:44px;border-radius:15px;background:linear-gradient(135deg,var(--blue),#9333ea);display:grid;place-items:center;font-size:24px;box-shadow:0 12px 30px #0008}.brand h1{font-size:22px;margin:0}.brand p{margin:4px 0 0;color:var(--muted);font-size:13px}.navlinks{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--panel2);padding:10px 14px;border-radius:12px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:700}.btn.primary{background:var(--blue);border-color:var(--blue)}.btn.green{background:#14532d;border-color:#166534}.btn:hover{filter:brightness(1.12)}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{background:linear-gradient(180deg,var(--panel),#0f1522);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 20px 45px #0005}.card h2,.card h3{margin:0 0 12px}.stat .num{font-size:28px;font-weight:900}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.danger{border-color:#7f1d1d}.table{width:100%;border-collapse:collapse}.table th,.table td{border-bottom:1px solid var(--line);padding:10px;text-align:left}.table th{color:var(--muted);font-size:12px;text-transform:uppercase}.pill{display:inline-flex;padding:5px 9px;border-radius:999px;background:#1e293b;color:#dbeafe;font-size:12px;font-weight:800}.pill.ok{background:#14532d;color:#dcfce7}.pill.bad{background:#7f1d1d;color:#fee2e2}.forms{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:var(--panel2);border:1px solid var(--line);border-radius:18px;padding:14px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px}input,select{width:100%;background:#090d16;color:var(--text);border:1px solid var(--line);border-radius:12px;padding:11px}.msg{padding:12px 14px;border-radius:14px;border:1px solid var(--line);background:#111827;margin-bottom:14px}.muted{color:var(--muted)}.footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}@media(max-width:900px){.grid,.grid2,.forms{grid-template-columns:1fr}.nav{align-items:flex-start;flex-direction:column}}
+  </style>
+</head>
+<body><div class="wrap"><div class="nav"><div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Discord OAuth Admin Dashboard</p></div></div><div class="navlinks">{% if user %}<span class="btn">👤 {{ user.get('username') }}</span><a class="btn" href="/dashboard">Dashboard</a><a class="btn" href="/logout">Logout</a>{% else %}<a class="btn primary" href="/login">Login with Discord</a>{% endif %}</div></div>{{ body|safe }}<div class="footer">{{ brand }} • Protected by Discord OAuth</div></div></body></html>
+'''
+
+
+def render_dashboard_page(title, body, status=200):
+    return render_template_string(DASHBOARD_BASE_TEMPLATE, title=title, brand=BOT_BRAND, user=session.get("discord_user"), body=body), status
+
 
 @app.route("/")
 def home():
-    return "NM System online"
+    body = '<div class="card"><h2>✅ NM System Online</h2><p class="muted">البوت شغال. استخدم الداشبورد للإدارة من المتصفح.</p><a class="btn primary" href="/login">Login with Discord</a></div>'
+    return render_dashboard_page("Online", body)
+
+
+@app.route("/login")
+def dashboard_login():
+    if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET or not DASHBOARD_BASE_URL:
+        body = '<div class="card danger"><h2>⚠️ Dashboard Variables Missing</h2><p>تأكد أنك حاط المتغيرات في Railway:</p><p><code>DISCORD_CLIENT_ID</code>, <code>DISCORD_CLIENT_SECRET</code>, <code>DASHBOARD_SECRET_KEY</code>, <code>DASHBOARD_BASE_URL</code></p></div>'
+        return render_dashboard_page("Setup Required", body, status=500)
+    return redirect(dashboard_auth_url())
+
+
+@app.route("/callback")
+def dashboard_callback():
+    code = request.args.get("code")
+    if not code:
+        return render_dashboard_page("OAuth Error", "<div class='card danger'><h2>OAuth Error</h2><p>Discord ما رجع code.</p></div>", status=400)
+    try:
+        token_data = oauth_post_token(code)
+        user = oauth_get_user(token_data["access_token"])
+        session["discord_user"] = {"id": user.get("id"), "username": user.get("username"), "global_name": user.get("global_name"), "avatar": user.get("avatar")}
+    except Exception as e:
+        return render_dashboard_page("OAuth Error", f"<div class='card danger'><h2>OAuth Failed</h2><p>{clean_text(str(e), 600)}</p></div>", status=500)
+    return redirect("/dashboard")
+
+
+@app.route("/logout")
+def dashboard_logout():
+    session.clear()
+    return redirect("/")
+
+
+@app.route("/dashboard")
+def dashboard_home():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    init_db()
+    level_users = dashboard_count_table("levels")
+    economy_users = dashboard_count_table("economy")
+    total_coins = dashboard_total_coins()
+    total_warnings = safe_len_json(WARNINGS_FILE)
+    log_rooms = safe_len_json(LOG_CHANNELS_FILE)
+    top_money = dashboard_money_rows(10)
+    top_levels = dashboard_level_rows(10)
+    memory = dashboard_memory_summary()
+    msg = request.args.get("msg", "")
+    money_rows = "".join([f"<tr><td>#{r['rank']}</td><td>{r['name']}<br><span class='muted'>{r['user_id']}</span></td><td>🪙 {r['balance']:,}</td></tr>" for r in top_money]) or "<tr><td colspan='3'>No data</td></tr>"
+    level_rows = "".join([f"<tr><td>#{r['rank']}</td><td>{r['name']}<br><span class='muted'>{r['user_id']}</span></td><td>Lv.{r['level']} • XP {r['xp']:,}</td></tr>" for r in top_levels]) or "<tr><td colspan='3'>No data</td></tr>"
+    memory_rows_parts = []
+    for m in memory:
+        css = "ok" if m["badge"] == "OK" else "bad"
+        memory_rows_parts.append(f"<tr><td>{m['file']}</td><td><span class='pill {css}'>{m['badge']}</span></td><td>{m['size']} KB</td></tr>")
+    memory_rows = "".join(memory_rows_parts)
+    msg_html = f'<div class="msg">✅ {clean_text(msg, 200)}</div>' if msg else ''
+    body = f'''
+    {msg_html}
+    <div class="grid">
+      <div class="card stat"><div class="num">{economy_users:,}</div><div class="label">Economy users</div></div>
+      <div class="card stat"><div class="num">{total_coins:,}</div><div class="label">Total {COIN_NAME}</div></div>
+      <div class="card stat"><div class="num">{level_users:,}</div><div class="label">Level users</div></div>
+      <div class="card stat"><div class="num">{total_warnings:,}</div><div class="label">Warning users • Logs {log_rooms}</div></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="grid2"><div class="card"><h3>🪙 Top Money</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Balance</th></tr>{money_rows}</table></div><div class="card"><h3>🏆 Top Levels</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Level</th></tr>{level_rows}</table></div></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>⚡ Quick Actions</h3><div class="forms">
+      <form class="formbox" method="post" action="/dashboard/economy"><h3>Money Control</h3><label>User ID</label><input name="user_id" placeholder="Discord user ID" required><label>Amount</label><input name="amount" placeholder="5000" required><label>Action</label><select name="action"><option value="add">Add Money</option><option value="remove">Remove Money</option><option value="set">Set Balance</option></select><div style="height:10px"></div><button class="btn green" type="submit">Apply</button></form>
+      <form class="formbox" method="post" action="/dashboard/levels"><h3>Level Control</h3><label>User ID</label><input name="user_id" placeholder="Discord user ID" required><label>Amount / Value</label><input name="amount" placeholder="100" required><label>Action</label><select name="action"><option value="add_xp">Add XP</option><option value="set_level">Set Level</option><option value="set_xp">Set XP</option></select><div style="height:10px"></div><button class="btn green" type="submit">Apply</button></form>
+      <form class="formbox" method="post" action="/dashboard/backup"><h3>Memory Backup</h3><p class="muted">يرسل نسخة حفظ في روم الذاكرة.</p><button class="btn primary" type="submit">💾 Create Backup</button></form>
+    </div></div>
+    <div style="height:14px"></div>
+    <div class="grid2"><div class="card"><h3>💾 Memory Status</h3><table class="table"><tr><th>File</th><th>Status</th><th>Size</th></tr>{memory_rows}</table></div><div class="card"><h3>⚙️ Settings View</h3><p><span class="pill">Commands</span> <code>{COMMANDS_CHANNEL_ID}</code></p><p><span class="pill">Gambling</span> <code>{GAMBLING_CHANNEL_ID}</code></p><p><span class="pill">Memory</span> <code>{MEMORY_BACKUP_CHANNEL_ID}</code></p><p><span class="pill">Guide</span> every <code>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS / 3600, 2)}</code> hours</p><p><span class="pill">Gamble cooldown</span> <code>{GAMBLE_COOLDOWN_SECONDS}s</code></p></div></div>
+    '''
+    return render_dashboard_page("Dashboard", body)
+
+
+@app.route("/dashboard/economy", methods=["POST"])
+def dashboard_economy_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        user_id = int(request.form.get("user_id", "0"))
+        amount = int(str(request.form.get("amount", "0")).replace(",", ""))
+        action = request.form.get("action", "add")
+        if action == "add":
+            balance = add_money(user_id, amount)
+            msg = f"Added {amount:,} {COIN_NAME} to {user_id}. New balance: {balance:,}"
+        elif action == "remove":
+            ok, balance = remove_money(user_id, amount)
+            msg = f"Removed {amount:,} {COIN_NAME} from {user_id}. New balance: {balance:,}" if ok else f"User {user_id} does not have enough balance. Current: {balance:,}"
+        elif action == "set":
+            balance = set_balance(user_id, amount)
+            msg = f"Set {user_id} balance to {balance:,} {COIN_NAME}"
+        else:
+            msg = "Unknown action."
+    except Exception as e:
+        msg = f"Economy action failed: {e}"
+    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
+
+
+@app.route("/dashboard/levels", methods=["POST"])
+def dashboard_levels_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        user_id = int(request.form.get("user_id", "0"))
+        amount = int(str(request.form.get("amount", "0")).replace(",", ""))
+        action = request.form.get("action", "add_xp")
+        if action == "add_xp":
+            xp, level, leveled = add_xp(user_id, amount)
+            msg = f"Added {amount:,} XP to {user_id}. Level: {level}, XP: {xp:,}"
+        elif action == "set_level":
+            xp, level = dashboard_set_level_data(user_id, level=amount)
+            msg = f"Set {user_id} level to {level}. XP: {xp:,}"
+        elif action == "set_xp":
+            xp, level = dashboard_set_level_data(user_id, xp=amount)
+            msg = f"Set {user_id} XP to {xp:,}. Level: {level}"
+        else:
+            msg = "Unknown action."
+    except Exception as e:
+        msg = f"Level action failed: {e}"
+    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
+
+
+@app.route("/dashboard/backup", methods=["POST"])
+def dashboard_backup_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            msg = "Guild not ready. Try again after bot is online."
+        else:
+            future = asyncio.run_coroutine_threadsafe(create_memory_backup(guild, reason="Dashboard manual backup", requested_by=None), bot.loop)
+            ok, result = future.result(timeout=30)
+            msg = result
+    except Exception as e:
+        msg = f"Backup failed: {e}"
+    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
 
 
 def run():
@@ -3734,6 +4076,223 @@ async def admin_reset_money(ctx, member: discord.Member = None):
 
 
 
+
+
+# =========================
+# BLACKJACK SYSTEM
+# =========================
+
+CARD_SUITS = ["♠️", "♥️", "♦️", "♣️"]
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+
+def draw_blackjack_card():
+    return random.choice(CARD_RANKS), random.choice(CARD_SUITS)
+
+
+def card_text(card):
+    rank, suit = card
+    return f"`{rank}{suit}`"
+
+
+def hand_text(cards, hide_second=False):
+    if hide_second and len(cards) >= 2:
+        return f"{card_text(cards[0])} `??`"
+    return " ".join(card_text(card) for card in cards)
+
+
+def hand_value(cards):
+    total = 0
+    aces = 0
+
+    for rank, _suit in cards:
+        if rank == "A":
+            aces += 1
+            total += 11
+        elif rank in ["J", "Q", "K"]:
+            total += 10
+        else:
+            total += int(rank)
+
+    while total > 21 and aces > 0:
+        total -= 10
+        aces -= 1
+
+    return total
+
+
+def is_natural_blackjack(cards):
+    return len(cards) == 2 and hand_value(cards) == 21
+
+
+def build_blackjack_embed(member, bet, player_cards, dealer_cards, status, color, finished=False, change=None, balance=None, hide_dealer=True):
+    player_total = hand_value(player_cards)
+    dealer_total = hand_value(dealer_cards)
+
+    dealer_display = hand_text(dealer_cards, hide_second=(hide_dealer and not finished))
+    dealer_value = "?" if hide_dealer and not finished else str(dealer_total)
+
+    embed = discord.Embed(
+        title="🎴 Blackjack Table",
+        description=status,
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_author(name=f"{member.display_name} • NM Casino", icon_url=member.display_avatar.url)
+    embed.add_field(name="🎯 Bet", value=coin_line(bet), inline=True)
+
+    if change is not None:
+        embed.add_field(name="📈 Change", value=money_delta(change), inline=True)
+
+    if balance is not None:
+        embed.add_field(name="💼 Balance", value=coin_line(balance), inline=False)
+
+    embed.add_field(
+        name=f"🧍 Your Hand — {player_total}",
+        value=hand_text(player_cards),
+        inline=False
+    )
+    embed.add_field(
+        name=f"🤵 Dealer Hand — {dealer_value}",
+        value=dealer_display,
+        inline=False
+    )
+    embed.set_footer(text=f"{BOT_BRAND} • Blackjack • Hit / Stand")
+    return embed
+
+
+class BlackjackView(discord.ui.View):
+    def __init__(self, player_id, bet, player_cards, dealer_cards):
+        super().__init__(timeout=90)
+        self.player_id = player_id
+        self.bet = bet
+        self.player_cards = player_cards
+        self.dealer_cards = dealer_cards
+        self.finished = False
+
+    async def interaction_check(self, interaction: discord.Interaction):
+        if interaction.user.id != self.player_id:
+            await interaction.response.send_message("❌ هذي طاولة بلاك جاك مو لك.", ephemeral=True)
+            return False
+        return True
+
+    def disable_buttons(self):
+        for item in self.children:
+            item.disabled = True
+
+    async def finish_game(self, interaction, status, color, change, balance):
+        self.finished = True
+        self.disable_buttons()
+        embed = build_blackjack_embed(
+            interaction.user,
+            self.bet,
+            self.player_cards,
+            self.dealer_cards,
+            status,
+            color,
+            finished=True,
+            change=change,
+            balance=balance,
+            hide_dealer=False
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    @discord.ui.button(label="Hit", style=discord.ButtonStyle.green, emoji="🃏")
+    async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.send_message("اللعبة منتهية.", ephemeral=True)
+            return
+
+        self.player_cards.append(draw_blackjack_card())
+        player_total = hand_value(self.player_cards)
+
+        if player_total > 21:
+            balance = get_balance(self.player_id)
+            await self.finish_game(
+                interaction,
+                "❌ **BUST** — تعديت 21 وخسرت الرهان.",
+                COLOR_RED,
+                -self.bet,
+                balance
+            )
+            return
+
+        embed = build_blackjack_embed(
+            interaction.user,
+            self.bet,
+            self.player_cards,
+            self.dealer_cards,
+            "🃏 سحبت كرت. تقدر تسحب زيادة أو توقف.",
+            COLOR_BLUE,
+            finished=False,
+            hide_dealer=True
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary, emoji="✋")
+    async def stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.finished:
+            await interaction.response.send_message("اللعبة منتهية.", ephemeral=True)
+            return
+
+        while hand_value(self.dealer_cards) < 17:
+            self.dealer_cards.append(draw_blackjack_card())
+
+        player_total = hand_value(self.player_cards)
+        dealer_total = hand_value(self.dealer_cards)
+
+        if dealer_total > 21:
+            payout = self.bet * 2
+            balance = add_money(self.player_id, payout)
+            await self.finish_game(
+                interaction,
+                "✅ **DEALER BUST** — الديلر تعدى 21، فزت.",
+                COLOR_GREEN,
+                self.bet,
+                balance
+            )
+            return
+
+        if player_total > dealer_total:
+            payout = self.bet * 2
+            balance = add_money(self.player_id, payout)
+            await self.finish_game(
+                interaction,
+                "✅ **WIN** — مجموعك أعلى من الديلر.",
+                COLOR_GREEN,
+                self.bet,
+                balance
+            )
+            return
+
+        if player_total < dealer_total:
+            balance = get_balance(self.player_id)
+            await self.finish_game(
+                interaction,
+                "❌ **LOSE** — الديلر أعلى منك.",
+                COLOR_RED,
+                -self.bet,
+                balance
+            )
+            return
+
+        balance = add_money(self.player_id, self.bet)
+        await self.finish_game(
+            interaction,
+            "🟨 **PUSH** — تعادل، رجع لك الرهان.",
+            COLOR_YELLOW,
+            0,
+            balance
+        )
+
+    async def on_timeout(self):
+        if self.finished:
+            return
+        self.finished = True
+        self.disable_buttons()
+        # الرهان تم سحبه عند بداية اللعبة، والوقت انتهى بدون Stand/Hit.
+
 @bot.command(name="شرح_القمار", aliases=["قمار", "gambling", "gamblehelp"])
 async def gambling_help(ctx):
     if not await require_gambling_channel(ctx):
@@ -3767,6 +4326,11 @@ async def gambling_help(ctx):
     embed.add_field(
         name="🪙 Coin Flip",
         value="`!وجه 500 ملك` أو `!وجه 500 كتابة`",
+        inline=False
+    )
+    embed.add_field(
+        name="🎴 Blackjack",
+        value="`!بلاكجاك 500` أو `!blackjack 500` — العب ضد الديلر، Hit أو Stand. Blackjack يدفع x1.5",
         inline=False
     )
     embed.add_field(
@@ -3970,6 +4534,90 @@ async def gamble_flip(ctx, amount=None, choice=None):
         )
 
     await ctx.send(embed=embed)
+
+
+
+
+@bot.command(name="بلاكجاك", aliases=["blackjack", "bj"])
+async def gamble_blackjack(ctx, amount=None):
+    bet = await validate_gamble(ctx, amount)
+    if bet is None:
+        return
+
+    # نسحب الرهان من البداية. إذا فزت يرجع لك الرهان + الربح.
+    remove_money(ctx.author.id, bet)
+
+    player_cards = [draw_blackjack_card(), draw_blackjack_card()]
+    dealer_cards = [draw_blackjack_card(), draw_blackjack_card()]
+
+    player_blackjack = is_natural_blackjack(player_cards)
+    dealer_blackjack = is_natural_blackjack(dealer_cards)
+
+    if player_blackjack or dealer_blackjack:
+        if player_blackjack and dealer_blackjack:
+            balance = add_money(ctx.author.id, bet)
+            embed = build_blackjack_embed(
+                ctx.author,
+                bet,
+                player_cards,
+                dealer_cards,
+                "🟨 **DOUBLE BLACKJACK** — تعادل، رجع لك الرهان.",
+                COLOR_YELLOW,
+                finished=True,
+                change=0,
+                balance=balance,
+                hide_dealer=False
+            )
+            await ctx.send(embed=embed)
+            return
+
+        if player_blackjack:
+            profit = int(bet * 1.5)
+            payout = bet + profit
+            balance = add_money(ctx.author.id, payout)
+            embed = build_blackjack_embed(
+                ctx.author,
+                bet,
+                player_cards,
+                dealer_cards,
+                "🔥 **BLACKJACK!** — فزت من أول كرتين. الدفع x1.5",
+                COLOR_GREEN,
+                finished=True,
+                change=profit,
+                balance=balance,
+                hide_dealer=False
+            )
+            await ctx.send(embed=embed)
+            return
+
+        balance = get_balance(ctx.author.id)
+        embed = build_blackjack_embed(
+            ctx.author,
+            bet,
+            player_cards,
+            dealer_cards,
+            "❌ **DEALER BLACKJACK** — الديلر جاب بلاك جاك.",
+            COLOR_RED,
+            finished=True,
+            change=-bet,
+            balance=balance,
+            hide_dealer=False
+        )
+        await ctx.send(embed=embed)
+        return
+
+    view = BlackjackView(ctx.author.id, bet, player_cards, dealer_cards)
+    embed = build_blackjack_embed(
+        ctx.author,
+        bet,
+        player_cards,
+        dealer_cards,
+        "🎴 اختر: **Hit** عشان تسحب كرت، أو **Stand** عشان توقف.",
+        COLOR_PURPLE,
+        finished=False,
+        hide_dealer=True
+    )
+    await ctx.send(embed=embed, view=view)
 
 
 @bot.command(name="حماية", aliases=["protection"])
