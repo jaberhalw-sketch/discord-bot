@@ -91,6 +91,31 @@ LEVEL_EMOJI = "📊"
 BOT_BRAND = "Retards System"
 
 # =========================
+# CUSTOMIZABLE MODULE SETTINGS
+# These values can be changed from the dashboard and are saved in dashboard_settings.json.
+# =========================
+SHOP_CHANNEL_ID = COMMANDS_CHANNEL_ID
+EVENTS_CHANNEL_ID = GIVEAWAYS_CHANNEL_ID
+BOT_ANNOUNCEMENTS_CHANNEL_ID = GIVEAWAYS_CHANNEL_ID
+VIP_ROLE_ID = 0
+EVENT_WINNER_ROLE_ID = 0
+VIP_ROLE_NAME = "💎 VIP"
+EVENT_WINNER_ROLE_NAME = "🏆 Event Winner"
+VIP_ROLE_COLOR = 0x7C3AED
+EVENT_WINNER_ROLE_COLOR = 0xF59E0B
+SHOP_ENABLED = True
+EVENTS_ENABLED = True
+SHOP_VIP_PRICE = 50000
+SHOP_VIP_DAYS = 7
+LOOTBOX_PRICE = 10000
+LOOTBOX_COOLDOWN_SECONDS = 10
+DEFAULT_EVENT_PRIZE = 100000
+DEFAULT_EVENT_DURATION_MINUTES = 60
+PUBLIC_LEADERBOARD_ENABLED = True
+lootbox_cooldowns = {}
+timed_roles_task = None
+
+# =========================
 # DASHBOARD / DISCORD OAUTH
 # =========================
 DISCORD_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "")
@@ -110,7 +135,7 @@ DASHBOARD_ADMIN_ROLE_IDS = {
 DEFAULT_SYSTEM_TOGGLES = {
     "utility": True, "admin": True, "economy": True, "levels": True,
     "gambling": True, "protection": True, "lfg": True, "giveaway": True,
-    "community": True, "roles": True, "memory": True,
+    "community": True, "roles": True, "memory": True, "shop": True, "events": True,
 }
 COMMAND_SYSTEM_MAP = {
     "مساعدة": "utility", "بنق": "utility", "هلا": "utility", "معلومات": "utility", "طقطق": "utility", "تقييم": "utility",
@@ -119,6 +144,8 @@ COMMAND_SYSTEM_MAP = {
     "لفلي": "levels", "لفل": "levels", "ترتيب": "levels",
     "رصيدي": "economy", "رصيد": "economy", "راتب": "economy", "بوست": "economy", "تحويل": "economy", "اغنى": "economy",
     "اعطاءفلوس": "economy", "سحبفلوس": "economy", "تصفيرفلوس": "economy",
+    "متجر": "shop", "شراء": "shop", "صندوق": "shop",
+    "فعاليات": "events", "فعالية": "events",
     "شرح_القمار": "gambling", "حظ": "gambling", "دبل": "gambling", "سلوت": "gambling", "وجه": "gambling", "بلاكجاك": "gambling",
     "حماية": "protection", "اعدادات": "protection", "تحذير": "protection", "تحذيرات": "protection", "تصفير": "protection",
     "حفظ_الذاكرة": "memory", "استرجاع_الذاكرة": "memory", "حالة_الذاكرة": "memory",
@@ -368,6 +395,51 @@ def init_db():
             action TEXT,
             details TEXT,
             created_at INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS shop_purchases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            item_key TEXT,
+            price INTEGER,
+            created_at INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS lootbox_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            price INTEGER,
+            reward_type TEXT,
+            reward_value TEXT,
+            created_at INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS timed_roles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            role_id INTEGER,
+            expires_at INTEGER,
+            reason TEXT,
+            active INTEGER DEFAULT 1
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS active_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_key TEXT,
+            title TEXT,
+            prize INTEGER,
+            starts_at INTEGER,
+            ends_at INTEGER,
+            created_by INTEGER,
+            status TEXT DEFAULT 'active'
         )
     """)
 
@@ -2417,7 +2489,11 @@ def fmt_coin(value):
 
 def parse_int_field(value, default=0, minimum=None):
     try:
-        n = int(str(value).replace(",", "").strip())
+        raw = str(value).replace(",", "").strip()
+        if raw.lower().startswith("0x"):
+            n = int(raw, 16)
+        else:
+            n = int(raw)
     except:
         n = default
     if minimum is not None and n < minimum:
@@ -2515,6 +2591,190 @@ def dashboard_load_settings_file():
 def dashboard_save_settings_file(data):
     with open(DASHBOARD_SETTINGS_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def dashboard_merge_settings(updates):
+    data = dashboard_load_settings_file()
+    if not isinstance(data, dict):
+        data = {}
+    data.update(updates)
+    dashboard_save_settings_file(data)
+    return data
+
+
+def get_dashboard_setting(key, default=None):
+    data = dashboard_load_settings_file()
+    if isinstance(data, dict) and key in data:
+        return data.get(key)
+    return default
+
+
+def parse_bool_field(value, default=False):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled", "enable"}
+
+
+async def create_or_get_named_role(guild, role_id, role_name, color_int, hoist=True):
+    """Find a role by saved ID/name or create it. Returns the role or None."""
+    role = None
+    try:
+        if int(role_id or 0) > 0:
+            role = guild.get_role(int(role_id))
+    except:
+        role = None
+
+    if not role:
+        role = discord.utils.get(guild.roles, name=role_name)
+
+    if role:
+        try:
+            await role.edit(
+                name=role_name,
+                color=discord.Color(int(color_int)),
+                hoist=bool(hoist),
+                mentionable=False,
+                reason=f"{BOT_BRAND} auto role style refresh"
+            )
+        except Exception as e:
+            print(f"Role edit failed for {role_name}: {e}")
+        return role
+
+    try:
+        return await guild.create_role(
+            name=role_name,
+            color=discord.Color(int(color_int)),
+            hoist=bool(hoist),
+            mentionable=False,
+            reason=f"{BOT_BRAND} auto created customizable role"
+        )
+    except Exception as e:
+        print(f"Role create failed for {role_name}: {e}")
+        return None
+
+
+async def ensure_custom_roles(guild):
+    """Create/refresh VIP and Event Winner roles and save their IDs."""
+    global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID
+
+    vip = await create_or_get_named_role(guild, VIP_ROLE_ID, VIP_ROLE_NAME, VIP_ROLE_COLOR, hoist=True)
+    winner = await create_or_get_named_role(guild, EVENT_WINNER_ROLE_ID, EVENT_WINNER_ROLE_NAME, EVENT_WINNER_ROLE_COLOR, hoist=True)
+
+    updates = {}
+    if vip:
+        VIP_ROLE_ID = int(vip.id)
+        updates["VIP_ROLE_ID"] = VIP_ROLE_ID
+    if winner:
+        EVENT_WINNER_ROLE_ID = int(winner.id)
+        updates["EVENT_WINNER_ROLE_ID"] = EVENT_WINNER_ROLE_ID
+    if updates:
+        dashboard_merge_settings(updates)
+    return vip, winner
+
+
+def record_shop_purchase(user_id, item_key, price):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO shop_purchases (user_id, item_key, price, created_at) VALUES (?, ?, ?, ?)",
+            (int(user_id), str(item_key), int(price), int(time.time()))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"record_shop_purchase error: {e}")
+
+
+def record_lootbox(user_id, price, reward_type, reward_value):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO lootbox_history (user_id, price, reward_type, reward_value, created_at) VALUES (?, ?, ?, ?, ?)",
+            (int(user_id), int(price), str(reward_type), str(reward_value), int(time.time()))
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"record_lootbox error: {e}")
+
+
+def add_timed_role_record(user_id, role_id, expires_at, reason=""):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO timed_roles (user_id, role_id, expires_at, reason, active) VALUES (?, ?, ?, ?, 1)",
+            (int(user_id), int(role_id), int(expires_at), str(reason)[:200])
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"add_timed_role_record error: {e}")
+
+
+def create_event_record(event_key, title, prize, starts_at, ends_at, created_by):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO active_events (event_key, title, prize, starts_at, ends_at, created_by, status) VALUES (?, ?, ?, ?, ?, ?, 'active')",
+            (str(event_key), str(title), int(prize), int(starts_at), int(ends_at), int(created_by))
+        )
+        event_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return event_id
+    except Exception as e:
+        print(f"create_event_record error: {e}")
+        return None
+
+
+def get_active_events(limit=10):
+    rows = []
+    try:
+        now = int(time.time())
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE active_events SET status='ended' WHERE status='active' AND ends_at <= ?", (now,))
+        cur.execute("SELECT id, event_key, title, prize, starts_at, ends_at, created_by, status FROM active_events WHERE status='active' ORDER BY ends_at ASC LIMIT ?", (int(limit),))
+        rows = cur.fetchall()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"get_active_events error: {e}")
+    return rows
+
+
+async def timed_roles_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(20)
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(GUILD_ID)
+            if guild:
+                now = int(time.time())
+                conn = db_connect()
+                cur = conn.cursor()
+                cur.execute("SELECT id, user_id, role_id FROM timed_roles WHERE active=1 AND expires_at <= ?", (now,))
+                rows = cur.fetchall()
+                for row_id, user_id, role_id in rows:
+                    member = guild.get_member(int(user_id))
+                    role = guild.get_role(int(role_id))
+                    if member and role and role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason=f"{BOT_BRAND} timed role expired")
+                        except Exception as e:
+                            print(f"Timed role remove failed: {e}")
+                    cur.execute("UPDATE timed_roles SET active=0 WHERE id=?", (int(row_id),))
+                conn.commit()
+                conn.close()
+        except Exception as e:
+            print(f"Timed roles loop error: {e}")
+        await asyncio.sleep(60)
 
 
 def dashboard_control_settings():
@@ -2627,17 +2887,48 @@ async def send_dashboard_action_log(admin_name, admin_id, action, details):
 def dashboard_apply_saved_settings():
     global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
     global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    global SHOP_CHANNEL_ID, EVENTS_CHANNEL_ID, BOT_ANNOUNCEMENTS_CHANNEL_ID, GIVEAWAYS_CHANNEL_ID
+    global GAME_VOICE_CATEGORY_ID, LOGS_CATEGORY_ID, ECONOMY_EXPLAIN_CHANNEL_ID
+    global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID, VIP_ROLE_NAME, EVENT_WINNER_ROLE_NAME, VIP_ROLE_COLOR, EVENT_WINNER_ROLE_COLOR
+    global SHOP_ENABLED, EVENTS_ENABLED, SHOP_VIP_PRICE, SHOP_VIP_DAYS, LOOTBOX_PRICE, LOOTBOX_COOLDOWN_SECONDS
+    global DEFAULT_EVENT_PRIZE, DEFAULT_EVENT_DURATION_MINUTES, PUBLIC_LEADERBOARD_ENABLED, DAILY_REWARD_BASE, LEVEL_UP_COIN_BONUS
     data = dashboard_load_settings_file()
     if not data:
         return
     COMMANDS_CHANNEL_ID = parse_int_field(data.get("COMMANDS_CHANNEL_ID", COMMANDS_CHANNEL_ID), COMMANDS_CHANNEL_ID, 1)
     GAMBLING_CHANNEL_ID = parse_int_field(data.get("GAMBLING_CHANNEL_ID", GAMBLING_CHANNEL_ID), GAMBLING_CHANNEL_ID, 1)
     MEMORY_BACKUP_CHANNEL_ID = parse_int_field(data.get("MEMORY_BACKUP_CHANNEL_ID", MEMORY_BACKUP_CHANNEL_ID), MEMORY_BACKUP_CHANNEL_ID, 1)
+    GIVEAWAYS_CHANNEL_ID = parse_int_field(data.get("GIVEAWAYS_CHANNEL_ID", GIVEAWAYS_CHANNEL_ID), GIVEAWAYS_CHANNEL_ID, 1)
+    SHOP_CHANNEL_ID = parse_int_field(data.get("SHOP_CHANNEL_ID", SHOP_CHANNEL_ID), SHOP_CHANNEL_ID, 1)
+    EVENTS_CHANNEL_ID = parse_int_field(data.get("EVENTS_CHANNEL_ID", EVENTS_CHANNEL_ID), EVENTS_CHANNEL_ID, 1)
+    BOT_ANNOUNCEMENTS_CHANNEL_ID = parse_int_field(data.get("BOT_ANNOUNCEMENTS_CHANNEL_ID", BOT_ANNOUNCEMENTS_CHANNEL_ID), BOT_ANNOUNCEMENTS_CHANNEL_ID, 1)
+    ECONOMY_EXPLAIN_CHANNEL_ID = parse_int_field(data.get("ECONOMY_EXPLAIN_CHANNEL_ID", ECONOMY_EXPLAIN_CHANNEL_ID), ECONOMY_EXPLAIN_CHANNEL_ID, 1)
+    GAME_VOICE_CATEGORY_ID = parse_int_field(data.get("GAME_VOICE_CATEGORY_ID", GAME_VOICE_CATEGORY_ID), GAME_VOICE_CATEGORY_ID, 1)
+    LOGS_CATEGORY_ID = parse_int_field(data.get("LOGS_CATEGORY_ID", LOGS_CATEGORY_ID), LOGS_CATEGORY_ID, 1)
+    VIP_ROLE_ID = parse_int_field(data.get("VIP_ROLE_ID", VIP_ROLE_ID), VIP_ROLE_ID, 0)
+    EVENT_WINNER_ROLE_ID = parse_int_field(data.get("EVENT_WINNER_ROLE_ID", EVENT_WINNER_ROLE_ID), EVENT_WINNER_ROLE_ID, 0)
     GAMBLE_COOLDOWN_SECONDS = parse_int_field(data.get("GAMBLE_COOLDOWN_SECONDS", GAMBLE_COOLDOWN_SECONDS), GAMBLE_COOLDOWN_SECONDS, 0)
     ECONOMY_EXPLAIN_INTERVAL_SECONDS = parse_int_field(data.get("ECONOMY_EXPLAIN_INTERVAL_SECONDS", ECONOMY_EXPLAIN_INTERVAL_SECONDS), ECONOMY_EXPLAIN_INTERVAL_SECONDS, 60)
     BOOSTER_WEEKLY_REWARD = parse_int_field(data.get("BOOSTER_WEEKLY_REWARD", BOOSTER_WEEKLY_REWARD), BOOSTER_WEEKLY_REWARD, 0)
+    DAILY_REWARD_BASE = parse_int_field(data.get("DAILY_REWARD_BASE", DAILY_REWARD_BASE), DAILY_REWARD_BASE, 0)
+    LEVEL_UP_COIN_BONUS = parse_int_field(data.get("LEVEL_UP_COIN_BONUS", LEVEL_UP_COIN_BONUS), LEVEL_UP_COIN_BONUS, 0)
+    SHOP_ENABLED = parse_bool_field(data.get("SHOP_ENABLED", SHOP_ENABLED), SHOP_ENABLED)
+    EVENTS_ENABLED = parse_bool_field(data.get("EVENTS_ENABLED", EVENTS_ENABLED), EVENTS_ENABLED)
+    SHOP_VIP_PRICE = parse_int_field(data.get("SHOP_VIP_PRICE", SHOP_VIP_PRICE), SHOP_VIP_PRICE, 0)
+    SHOP_VIP_DAYS = parse_int_field(data.get("SHOP_VIP_DAYS", SHOP_VIP_DAYS), SHOP_VIP_DAYS, 1)
+    LOOTBOX_PRICE = parse_int_field(data.get("LOOTBOX_PRICE", LOOTBOX_PRICE), LOOTBOX_PRICE, 0)
+    LOOTBOX_COOLDOWN_SECONDS = parse_int_field(data.get("LOOTBOX_COOLDOWN_SECONDS", LOOTBOX_COOLDOWN_SECONDS), LOOTBOX_COOLDOWN_SECONDS, 0)
+    DEFAULT_EVENT_PRIZE = parse_int_field(data.get("DEFAULT_EVENT_PRIZE", DEFAULT_EVENT_PRIZE), DEFAULT_EVENT_PRIZE, 0)
+    DEFAULT_EVENT_DURATION_MINUTES = parse_int_field(data.get("DEFAULT_EVENT_DURATION_MINUTES", DEFAULT_EVENT_DURATION_MINUTES), DEFAULT_EVENT_DURATION_MINUTES, 1)
+    PUBLIC_LEADERBOARD_ENABLED = parse_bool_field(data.get("PUBLIC_LEADERBOARD_ENABLED", PUBLIC_LEADERBOARD_ENABLED), PUBLIC_LEADERBOARD_ENABLED)
     if str(data.get("COIN_NAME", "")).strip():
         COIN_NAME = str(data.get("COIN_NAME")).strip()[:40]
+    if str(data.get("VIP_ROLE_NAME", "")).strip():
+        VIP_ROLE_NAME = str(data.get("VIP_ROLE_NAME")).strip()[:80]
+    if str(data.get("EVENT_WINNER_ROLE_NAME", "")).strip():
+        EVENT_WINNER_ROLE_NAME = str(data.get("EVENT_WINNER_ROLE_NAME")).strip()[:80]
+    VIP_ROLE_COLOR = parse_int_field(str(data.get("VIP_ROLE_COLOR", VIP_ROLE_COLOR)).replace("#", "0x"), VIP_ROLE_COLOR, 0)
+    EVENT_WINNER_ROLE_COLOR = parse_int_field(str(data.get("EVENT_WINNER_ROLE_COLOR", EVENT_WINNER_ROLE_COLOR)).replace("#", "0x"), EVENT_WINNER_ROLE_COLOR, 0)
 
 
 dashboard_apply_saved_settings()
@@ -2682,6 +2973,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/economy">🪙 Economy</a>
       <a class="navitem" href="/dashboard/levels">📊 Levels</a>
       <a class="navitem" href="/dashboard/casino">🎰 Casino</a>
+      <a class="navitem" href="/dashboard/shop">🛒 Shop</a>
+      <a class="navitem" href="/dashboard/events">🎉 Events</a>
       <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
       <a class="navitem" href="/dashboard/memory">💾 Memory</a>
       <a class="navitem" href="/dashboard/control">🛡️ Control Center</a>
@@ -2715,6 +3008,25 @@ def home():
     </div>
     '''
     return render_dashboard_page("Online", body)
+
+
+@app.route("/top")
+def public_top_page():
+    if not PUBLIC_LEADERBOARD_ENABLED:
+        return "Public leaderboard is disabled.", 403
+    money_rows = get_top_money(10)
+    level_rows = get_top_levels(10)
+    money_html = "".join([f"<tr><td>#{i}</td><td>{dashboard_member_name(uid)}</td><td>{fmt_coin(balance)}</td></tr>" for i,(uid,balance) in enumerate(money_rows, start=1)]) or "<tr><td colspan='3'>No data</td></tr>"
+    level_html = "".join([f"<tr><td>#{i}</td><td>{dashboard_member_name(uid)}</td><td>Lv.{level} • XP {xp}</td></tr>" for i,(uid,xp,level) in enumerate(level_rows, start=1)]) or "<tr><td colspan='3'>No data</td></tr>"
+    events = get_active_events(5)
+    event_html = "".join([f"<tr><td>{clean_text(title,100)}</td><td>{fmt_coin(prize)}</td><td>{ends}</td></tr>" for eid,key,title,prize,start,ends,created,status in events]) or "<tr><td colspan='3'>No active events</td></tr>"
+    body = f"""
+    <div class="hero"><div class="card"><div class="big">🏆 {BOT_BRAND} Leaderboard</div><p class="muted">Public server rankings and active events.</p><div style="height:12px"></div><a class="btn primary" href="/login">Admin Login</a></div><div class="card"><h3>🪙 Currency</h3><p class="muted">{COIN_NAME}</p><span class="pill ok">Public View</span></div></div>
+    <div style="height:16px"></div>
+    <div class="grid2"><div class="card"><h3>🪙 Top Richest</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Balance</th></tr>{money_html}</table></div><div class="card"><h3>📊 Top Levels</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Level</th></tr>{level_html}</table></div></div>
+    <div style="height:16px"></div><div class="card"><h3>🎉 Active Events</h3><table class="table"><tr><th>Event</th><th>Prize</th><th>Ends Unix</th></tr>{event_html}</table></div>
+    """
+    return render_dashboard_page("Public Leaderboard", body)
 
 
 @app.route("/login")
@@ -2860,6 +3172,87 @@ def dashboard_casino_page():
     return render_dashboard_page("Casino", body)
 
 
+@app.route("/dashboard/shop")
+def dashboard_shop_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    purchases = []
+    try:
+        conn = db_connect(); cur = conn.cursor()
+        cur.execute("SELECT user_id, item_key, price, created_at FROM shop_purchases ORDER BY id DESC LIMIT 20")
+        purchases = cur.fetchall(); conn.close()
+    except:
+        pass
+    rows = "".join([f"<tr><td>{dashboard_member_name(u)}</td><td><code>{clean_text(item,40)}</code></td><td>{fmt_coin(price)}</td><td>{created}</td></tr>" for u,item,price,created in purchases]) or "<tr><td colspan='4'>No purchases yet</td></tr>"
+    status = "ON" if SHOP_ENABLED else "OFF"
+    body = f"""
+    <div class="grid">
+      <div class="card stat"><div class="icon">🛒</div><div class="num">{status}</div><div class="label">Shop Status</div></div>
+      <div class="card stat"><div class="icon">💎</div><div class="num">{short_money(SHOP_VIP_PRICE)}</div><div class="label">VIP Price</div></div>
+      <div class="card stat"><div class="icon">🎁</div><div class="num">{short_money(LOOTBOX_PRICE)}</div><div class="label">Lootbox Price</div></div>
+      <div class="card stat"><div class="icon">📍</div><div class="num">Room</div><div class="label"><code>{SHOP_CHANNEL_ID}</code></div></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🛍️ Commands</h3><table class="table"><tr><th>Command</th><th>Use</th></tr><tr><td><code>!متجر</code></td><td>Shows the shop</td></tr><tr><td><code>!شراء vip</code></td><td>Buy VIP role for {SHOP_VIP_DAYS} days</td></tr><tr><td><code>!شراء صندوق</code> / <code>!صندوق</code></td><td>Open lootbox</td></tr></table></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🧾 Latest Purchases</h3><table class="table"><tr><th>User</th><th>Item</th><th>Price</th><th>Unix Time</th></tr>{rows}</table></div>
+    """
+    return render_dashboard_page("Shop", body)
+
+
+@app.route("/dashboard/events")
+def dashboard_events_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    events = get_active_events(20)
+    rows = "".join([f"<tr><td>#{eid}</td><td>{clean_text(title,120)}</td><td>{fmt_coin(prize)}</td><td>{end}</td><td>{dashboard_member_name(created)}</td></tr>" for eid,key,title,prize,start,end,created,status in events]) or "<tr><td colspan='5'>No active events</td></tr>"
+    status = "ON" if EVENTS_ENABLED else "OFF"
+    body = f"""
+    {dashboard_toast_html()}
+    <div class="grid">
+      <div class="card stat"><div class="icon">🎉</div><div class="num">{status}</div><div class="label">Events Status</div></div>
+      <div class="card stat"><div class="icon">🏆</div><div class="num">{short_money(DEFAULT_EVENT_PRIZE)}</div><div class="label">Default Prize</div></div>
+      <div class="card stat"><div class="icon">⏱️</div><div class="num">{DEFAULT_EVENT_DURATION_MINUTES}m</div><div class="label">Default Duration</div></div>
+      <div class="card stat"><div class="icon">📍</div><div class="num">Room</div><div class="label"><code>{EVENTS_CHANNEL_ID}</code></div></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>⚡ Start Event</h3><form method="post" action="/dashboard/events/start" class="formgrid"><div><label>Title</label><input name="title" value="Casino Night"></div><div><label>Prize</label><input name="prize" value="{DEFAULT_EVENT_PRIZE}"></div><div><label>Duration Minutes</label><input name="minutes" value="{DEFAULT_EVENT_DURATION_MINUTES}"></div><div style="display:flex;align-items:end"><button class="btn primary">Start Event</button></div></form></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>📅 Active Events</h3><table class="table"><tr><th>ID</th><th>Title</th><th>Prize</th><th>Ends Unix</th><th>Created By</th></tr>{rows}</table></div>
+    """
+    return render_dashboard_page("Events", body)
+
+
+@app.route("/dashboard/events/start", methods=["POST"])
+def dashboard_events_start_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        title = str(request.form.get("title", "Server Event")).strip()[:80] or "Server Event"
+        prize = parse_int_field(request.form.get("prize"), DEFAULT_EVENT_PRIZE, 0)
+        minutes = parse_int_field(request.form.get("minutes"), DEFAULT_EVENT_DURATION_MINUTES, 1)
+        guild = bot.get_guild(GUILD_ID)
+        user = session.get("discord_user") or {}
+        created_by = int(user.get("id", 0) or 0)
+        now = int(time.time()); ends = now + minutes * 60
+        event_id = create_event_record("dashboard", title, prize, now, ends, created_by)
+        if guild and bot.loop.is_running():
+            async def send_event():
+                ch = await get_channel_by_id(guild, EVENTS_CHANNEL_ID)
+                if ch:
+                    embed = discord.Embed(title=f"🎉 {title}", description=f"فعالية جديدة بدأت!\n\n**الجائزة:** {coin_line(prize)}\n**تنتهي:** <t:{ends}:R>", color=COLOR_PURPLE, timestamp=discord.utils.utcnow())
+                    embed.set_footer(text=f"{BOT_BRAND} | Event #{event_id}")
+                    await ch.send(embed=embed)
+            asyncio.run_coroutine_threadsafe(send_event(), bot.loop)
+        dashboard_log_action("Started event", f"{title} | prize={prize} | minutes={minutes}", session.get("discord_user"))
+        return redirect("/dashboard/events?msg=" + urllib.parse.quote("Event started and announced."))
+    except Exception as e:
+        return redirect("/dashboard/events?err=" + urllib.parse.quote(str(e)))
+
+
 @app.route("/dashboard/user", methods=["GET"])
 def dashboard_user_page():
     denied = dashboard_require_admin()
@@ -2998,11 +3391,75 @@ def dashboard_settings_page():
     denied = dashboard_require_admin()
     if denied:
         return denied
-    body = f'''
+
+    def checked(v):
+        return "checked" if bool(v) else ""
+
+    body = f"""
     {dashboard_toast_html()}
-    <div class="card"><h3>⚙️ Runtime Settings</h3><p class="muted">التغييرات هنا تنحفظ في <code>{DASHBOARD_SETTINGS_FILE}</code> وتشتغل بعد الريستارت إذا الملف موجود.</p><form method="post" action="/dashboard/settings" class="formgrid"><div><label>Coin Name</label><input name="COIN_NAME" value="{clean_text(COIN_NAME, 40)}"></div><div><label>Commands Channel ID</label><input name="COMMANDS_CHANNEL_ID" value="{COMMANDS_CHANNEL_ID}"></div><div><label>Gambling Channel ID</label><input name="GAMBLING_CHANNEL_ID" value="{GAMBLING_CHANNEL_ID}"></div><div><label>Memory Backup Channel ID</label><input name="MEMORY_BACKUP_CHANNEL_ID" value="{MEMORY_BACKUP_CHANNEL_ID}"></div><div><label>Gamble Cooldown Seconds</label><input name="GAMBLE_COOLDOWN_SECONDS" value="{GAMBLE_COOLDOWN_SECONDS}"></div><div><label>Economy Guide Interval Hours</label><input name="ECONOMY_GUIDE_HOURS" value="{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}"></div><div><label>Booster Weekly Reward</label><input name="BOOSTER_WEEKLY_REWARD" value="{BOOSTER_WEEKLY_REWARD}"></div><div style="display:flex;align-items:end"><button class="btn primary" type="submit">Save Settings</button></div></form></div>
-    '''
-    return render_dashboard_page("Settings", body)
+    <div class="card">
+      <h3>⚙️ Customization Center</h3>
+      <p class="muted">كل شيء هنا قابل للتعديل من الداشبورد. الرومات، الرتب، الاقتصاد، القمار، المتجر، الفعاليات، والباك أب.</p>
+      <form method="post" action="/dashboard/settings">
+        <div class="grid">
+          <div class="card"><h3>🏷️ Brand</h3>
+            <label>Bot Brand</label><input name="BOT_BRAND" value="{clean_text(BOT_BRAND, 40)}">
+            <label>Coin Name</label><input name="COIN_NAME" value="{clean_text(COIN_NAME, 40)}">
+          </div>
+          <div class="card"><h3>📺 Channels</h3>
+            <label>Commands Channel ID</label><input name="COMMANDS_CHANNEL_ID" value="{COMMANDS_CHANNEL_ID}">
+            <label>Gambling Channel ID</label><input name="GAMBLING_CHANNEL_ID" value="{GAMBLING_CHANNEL_ID}">
+            <label>Shop Channel ID</label><input name="SHOP_CHANNEL_ID" value="{SHOP_CHANNEL_ID}">
+            <label>Events Channel ID</label><input name="EVENTS_CHANNEL_ID" value="{EVENTS_CHANNEL_ID}">
+            <label>Announcements Channel ID</label><input name="BOT_ANNOUNCEMENTS_CHANNEL_ID" value="{BOT_ANNOUNCEMENTS_CHANNEL_ID}">
+            <label>Giveaways Channel ID</label><input name="GIVEAWAYS_CHANNEL_ID" value="{GIVEAWAYS_CHANNEL_ID}">
+            <label>Memory Backup Channel ID</label><input name="MEMORY_BACKUP_CHANNEL_ID" value="{MEMORY_BACKUP_CHANNEL_ID}">
+            <label>Economy Guide Channel ID</label><input name="ECONOMY_EXPLAIN_CHANNEL_ID" value="{ECONOMY_EXPLAIN_CHANNEL_ID}">
+          </div>
+          <div class="card"><h3>🎭 Roles</h3>
+            <label>VIP Role ID</label><input name="VIP_ROLE_ID" value="{VIP_ROLE_ID}">
+            <label>VIP Role Name</label><input name="VIP_ROLE_NAME" value="{clean_text(VIP_ROLE_NAME, 80)}">
+            <label>VIP Role Color Hex</label><input name="VIP_ROLE_COLOR" value="#{int(VIP_ROLE_COLOR):06X}">
+            <label>Event Winner Role ID</label><input name="EVENT_WINNER_ROLE_ID" value="{EVENT_WINNER_ROLE_ID}">
+            <label>Event Winner Role Name</label><input name="EVENT_WINNER_ROLE_NAME" value="{clean_text(EVENT_WINNER_ROLE_NAME, 80)}">
+            <label>Event Winner Role Color Hex</label><input name="EVENT_WINNER_ROLE_COLOR" value="#{int(EVENT_WINNER_ROLE_COLOR):06X}">
+            <p class="muted">إذا خليت Role ID = 0، البوت ينشئ الرتبة تلقائيًا.</p>
+          </div>
+          <div class="card"><h3>💰 Economy</h3>
+            <label>Salary Base</label><input name="DAILY_REWARD_BASE" value="{DAILY_REWARD_BASE}">
+            <label>Level Up Coin Bonus</label><input name="LEVEL_UP_COIN_BONUS" value="{LEVEL_UP_COIN_BONUS}">
+            <label>Booster Weekly Reward</label><input name="BOOSTER_WEEKLY_REWARD" value="{BOOSTER_WEEKLY_REWARD}">
+            <label>Economy Guide Interval Hours</label><input name="ECONOMY_GUIDE_HOURS" value="{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}">
+          </div>
+          <div class="card"><h3>🎰 Casino</h3>
+            <label>Gamble Cooldown Seconds</label><input name="GAMBLE_COOLDOWN_SECONDS" value="{GAMBLE_COOLDOWN_SECONDS}">
+            <p class="muted">نسب الألعاب الأساسية تبقى ثابتة الآن، ونقدر نضيف sliders لاحقًا.</p>
+          </div>
+          <div class="card"><h3>🛒 Shop</h3>
+            <label><input type="checkbox" name="SHOP_ENABLED" {checked(SHOP_ENABLED)}> Shop Enabled</label>
+            <label>VIP Price</label><input name="SHOP_VIP_PRICE" value="{SHOP_VIP_PRICE}">
+            <label>VIP Duration Days</label><input name="SHOP_VIP_DAYS" value="{SHOP_VIP_DAYS}">
+            <label>Lootbox Price</label><input name="LOOTBOX_PRICE" value="{LOOTBOX_PRICE}">
+            <label>Lootbox Cooldown Seconds</label><input name="LOOTBOX_COOLDOWN_SECONDS" value="{LOOTBOX_COOLDOWN_SECONDS}">
+          </div>
+          <div class="card"><h3>🎉 Events</h3>
+            <label><input type="checkbox" name="EVENTS_ENABLED" {checked(EVENTS_ENABLED)}> Events Enabled</label>
+            <label>Default Event Prize</label><input name="DEFAULT_EVENT_PRIZE" value="{DEFAULT_EVENT_PRIZE}">
+            <label>Default Event Duration Minutes</label><input name="DEFAULT_EVENT_DURATION_MINUTES" value="{DEFAULT_EVENT_DURATION_MINUTES}">
+            <label><input type="checkbox" name="PUBLIC_LEADERBOARD_ENABLED" {checked(PUBLIC_LEADERBOARD_ENABLED)}> Public Leaderboard Enabled</label>
+          </div>
+          <div class="card"><h3>🧩 Categories</h3>
+            <label>LFG Voice Category ID</label><input name="GAME_VOICE_CATEGORY_ID" value="{GAME_VOICE_CATEGORY_ID}">
+            <label>Logs Category ID</label><input name="LOGS_CATEGORY_ID" value="{LOGS_CATEGORY_ID}">
+          </div>
+        </div>
+        <div style="height:16px"></div>
+        <button class="btn primary" type="submit">💾 Save Full Customization</button>
+        <a class="btn" href="/dashboard/create-roles">✨ Create / Refresh VIP Roles</a>
+      </form>
+    </div>
+    """
+    return render_dashboard_page("Customization", body)
 
 
 @app.route("/dashboard/settings", methods=["POST"])
@@ -3010,34 +3467,90 @@ def dashboard_settings_action():
     denied = dashboard_require_admin()
     if denied:
         return denied
-    global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
+    global BOT_BRAND, COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID, GIVEAWAYS_CHANNEL_ID
+    global SHOP_CHANNEL_ID, EVENTS_CHANNEL_ID, BOT_ANNOUNCEMENTS_CHANNEL_ID, ECONOMY_EXPLAIN_CHANNEL_ID, GAME_VOICE_CATEGORY_ID, LOGS_CATEGORY_ID
     global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID, VIP_ROLE_NAME, EVENT_WINNER_ROLE_NAME, VIP_ROLE_COLOR, EVENT_WINNER_ROLE_COLOR
+    global SHOP_ENABLED, EVENTS_ENABLED, SHOP_VIP_PRICE, SHOP_VIP_DAYS, LOOTBOX_PRICE, LOOTBOX_COOLDOWN_SECONDS
+    global DEFAULT_EVENT_PRIZE, DEFAULT_EVENT_DURATION_MINUTES, PUBLIC_LEADERBOARD_ENABLED, DAILY_REWARD_BASE, LEVEL_UP_COIN_BONUS
     try:
+        BOT_BRAND = str(request.form.get("BOT_BRAND", BOT_BRAND)).strip()[:40] or BOT_BRAND
         COIN_NAME = str(request.form.get("COIN_NAME", COIN_NAME)).strip()[:40] or COIN_NAME
         COMMANDS_CHANNEL_ID = parse_int_field(request.form.get("COMMANDS_CHANNEL_ID"), COMMANDS_CHANNEL_ID, 1)
         GAMBLING_CHANNEL_ID = parse_int_field(request.form.get("GAMBLING_CHANNEL_ID"), GAMBLING_CHANNEL_ID, 1)
+        SHOP_CHANNEL_ID = parse_int_field(request.form.get("SHOP_CHANNEL_ID"), SHOP_CHANNEL_ID, 1)
+        EVENTS_CHANNEL_ID = parse_int_field(request.form.get("EVENTS_CHANNEL_ID"), EVENTS_CHANNEL_ID, 1)
+        BOT_ANNOUNCEMENTS_CHANNEL_ID = parse_int_field(request.form.get("BOT_ANNOUNCEMENTS_CHANNEL_ID"), BOT_ANNOUNCEMENTS_CHANNEL_ID, 1)
+        GIVEAWAYS_CHANNEL_ID = parse_int_field(request.form.get("GIVEAWAYS_CHANNEL_ID"), GIVEAWAYS_CHANNEL_ID, 1)
         MEMORY_BACKUP_CHANNEL_ID = parse_int_field(request.form.get("MEMORY_BACKUP_CHANNEL_ID"), MEMORY_BACKUP_CHANNEL_ID, 1)
+        ECONOMY_EXPLAIN_CHANNEL_ID = parse_int_field(request.form.get("ECONOMY_EXPLAIN_CHANNEL_ID"), ECONOMY_EXPLAIN_CHANNEL_ID, 1)
+        GAME_VOICE_CATEGORY_ID = parse_int_field(request.form.get("GAME_VOICE_CATEGORY_ID"), GAME_VOICE_CATEGORY_ID, 1)
+        LOGS_CATEGORY_ID = parse_int_field(request.form.get("LOGS_CATEGORY_ID"), LOGS_CATEGORY_ID, 1)
+        VIP_ROLE_ID = parse_int_field(request.form.get("VIP_ROLE_ID"), VIP_ROLE_ID, 0)
+        EVENT_WINNER_ROLE_ID = parse_int_field(request.form.get("EVENT_WINNER_ROLE_ID"), EVENT_WINNER_ROLE_ID, 0)
+        VIP_ROLE_NAME = str(request.form.get("VIP_ROLE_NAME", VIP_ROLE_NAME)).strip()[:80] or VIP_ROLE_NAME
+        EVENT_WINNER_ROLE_NAME = str(request.form.get("EVENT_WINNER_ROLE_NAME", EVENT_WINNER_ROLE_NAME)).strip()[:80] or EVENT_WINNER_ROLE_NAME
+        VIP_ROLE_COLOR = parse_int_field(str(request.form.get("VIP_ROLE_COLOR", VIP_ROLE_COLOR)).replace("#", "0x"), VIP_ROLE_COLOR, 0)
+        EVENT_WINNER_ROLE_COLOR = parse_int_field(str(request.form.get("EVENT_WINNER_ROLE_COLOR", EVENT_WINNER_ROLE_COLOR)).replace("#", "0x"), EVENT_WINNER_ROLE_COLOR, 0)
         GAMBLE_COOLDOWN_SECONDS = parse_int_field(request.form.get("GAMBLE_COOLDOWN_SECONDS"), GAMBLE_COOLDOWN_SECONDS, 0)
-        hours_raw = str(request.form.get("ECONOMY_GUIDE_HOURS", "7")).strip()
+        DAILY_REWARD_BASE = parse_int_field(request.form.get("DAILY_REWARD_BASE"), DAILY_REWARD_BASE, 0)
+        LEVEL_UP_COIN_BONUS = parse_int_field(request.form.get("LEVEL_UP_COIN_BONUS"), LEVEL_UP_COIN_BONUS, 0)
+        BOOSTER_WEEKLY_REWARD = parse_int_field(request.form.get("BOOSTER_WEEKLY_REWARD"), BOOSTER_WEEKLY_REWARD, 0)
         try:
-            ECONOMY_EXPLAIN_INTERVAL_SECONDS = max(60, int(float(hours_raw) * 3600))
+            ECONOMY_EXPLAIN_INTERVAL_SECONDS = max(60, int(float(str(request.form.get("ECONOMY_GUIDE_HOURS", "7")).strip()) * 3600))
         except:
             pass
-        BOOSTER_WEEKLY_REWARD = parse_int_field(request.form.get("BOOSTER_WEEKLY_REWARD"), BOOSTER_WEEKLY_REWARD, 0)
-        dashboard_save_settings_file({
-            "COIN_NAME": COIN_NAME,
-            "COMMANDS_CHANNEL_ID": COMMANDS_CHANNEL_ID,
-            "GAMBLING_CHANNEL_ID": GAMBLING_CHANNEL_ID,
-            "MEMORY_BACKUP_CHANNEL_ID": MEMORY_BACKUP_CHANNEL_ID,
+        SHOP_ENABLED = "SHOP_ENABLED" in request.form
+        EVENTS_ENABLED = "EVENTS_ENABLED" in request.form
+        PUBLIC_LEADERBOARD_ENABLED = "PUBLIC_LEADERBOARD_ENABLED" in request.form
+        SHOP_VIP_PRICE = parse_int_field(request.form.get("SHOP_VIP_PRICE"), SHOP_VIP_PRICE, 0)
+        SHOP_VIP_DAYS = parse_int_field(request.form.get("SHOP_VIP_DAYS"), SHOP_VIP_DAYS, 1)
+        LOOTBOX_PRICE = parse_int_field(request.form.get("LOOTBOX_PRICE"), LOOTBOX_PRICE, 0)
+        LOOTBOX_COOLDOWN_SECONDS = parse_int_field(request.form.get("LOOTBOX_COOLDOWN_SECONDS"), LOOTBOX_COOLDOWN_SECONDS, 0)
+        DEFAULT_EVENT_PRIZE = parse_int_field(request.form.get("DEFAULT_EVENT_PRIZE"), DEFAULT_EVENT_PRIZE, 0)
+        DEFAULT_EVENT_DURATION_MINUTES = parse_int_field(request.form.get("DEFAULT_EVENT_DURATION_MINUTES"), DEFAULT_EVENT_DURATION_MINUTES, 1)
+        dashboard_merge_settings({
+            "BOT_BRAND": BOT_BRAND, "COIN_NAME": COIN_NAME,
+            "COMMANDS_CHANNEL_ID": COMMANDS_CHANNEL_ID, "GAMBLING_CHANNEL_ID": GAMBLING_CHANNEL_ID,
+            "SHOP_CHANNEL_ID": SHOP_CHANNEL_ID, "EVENTS_CHANNEL_ID": EVENTS_CHANNEL_ID,
+            "BOT_ANNOUNCEMENTS_CHANNEL_ID": BOT_ANNOUNCEMENTS_CHANNEL_ID, "GIVEAWAYS_CHANNEL_ID": GIVEAWAYS_CHANNEL_ID,
+            "MEMORY_BACKUP_CHANNEL_ID": MEMORY_BACKUP_CHANNEL_ID, "ECONOMY_EXPLAIN_CHANNEL_ID": ECONOMY_EXPLAIN_CHANNEL_ID,
+            "GAME_VOICE_CATEGORY_ID": GAME_VOICE_CATEGORY_ID, "LOGS_CATEGORY_ID": LOGS_CATEGORY_ID,
+            "VIP_ROLE_ID": VIP_ROLE_ID, "EVENT_WINNER_ROLE_ID": EVENT_WINNER_ROLE_ID,
+            "VIP_ROLE_NAME": VIP_ROLE_NAME, "EVENT_WINNER_ROLE_NAME": EVENT_WINNER_ROLE_NAME,
+            "VIP_ROLE_COLOR": VIP_ROLE_COLOR, "EVENT_WINNER_ROLE_COLOR": EVENT_WINNER_ROLE_COLOR,
             "GAMBLE_COOLDOWN_SECONDS": GAMBLE_COOLDOWN_SECONDS,
             "ECONOMY_EXPLAIN_INTERVAL_SECONDS": ECONOMY_EXPLAIN_INTERVAL_SECONDS,
+            "DAILY_REWARD_BASE": DAILY_REWARD_BASE, "LEVEL_UP_COIN_BONUS": LEVEL_UP_COIN_BONUS,
             "BOOSTER_WEEKLY_REWARD": BOOSTER_WEEKLY_REWARD,
+            "SHOP_ENABLED": SHOP_ENABLED, "EVENTS_ENABLED": EVENTS_ENABLED,
+            "SHOP_VIP_PRICE": SHOP_VIP_PRICE, "SHOP_VIP_DAYS": SHOP_VIP_DAYS,
+            "LOOTBOX_PRICE": LOOTBOX_PRICE, "LOOTBOX_COOLDOWN_SECONDS": LOOTBOX_COOLDOWN_SECONDS,
+            "DEFAULT_EVENT_PRIZE": DEFAULT_EVENT_PRIZE, "DEFAULT_EVENT_DURATION_MINUTES": DEFAULT_EVENT_DURATION_MINUTES,
+            "PUBLIC_LEADERBOARD_ENABLED": PUBLIC_LEADERBOARD_ENABLED,
         })
-        msg = "Settings saved. Some loop intervals may fully apply after restart."
-        dashboard_log_action("Settings updated", "Runtime settings were changed from dashboard", session.get("discord_user"))
+        dashboard_log_action("Customization updated", "Full runtime customization settings were changed", session.get("discord_user"))
+        msg = "Customization saved. Most settings apply instantly; role/category changes may need a quick refresh."
     except Exception as e:
         return redirect("/dashboard/settings?err=" + urllib.parse.quote(str(e)))
     return redirect("/dashboard/settings?msg=" + urllib.parse.quote(msg))
+
+
+@app.route("/dashboard/create-roles")
+def dashboard_create_roles_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            return redirect("/dashboard/settings?err=" + urllib.parse.quote("Guild not loaded yet."))
+        fut = asyncio.run_coroutine_threadsafe(ensure_custom_roles(guild), bot.loop)
+        fut.result(timeout=15)
+        dashboard_log_action("Created/refreshed custom roles", f"VIP={VIP_ROLE_ID}, Winner={EVENT_WINNER_ROLE_ID}", session.get("discord_user"))
+        return redirect("/dashboard/settings?msg=" + urllib.parse.quote("VIP/Event Winner roles created or refreshed."))
+    except Exception as e:
+        return redirect("/dashboard/settings?err=" + urllib.parse.quote(str(e)))
 
 
 @app.route("/dashboard/economy", methods=["POST"])
@@ -3207,7 +3720,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
-    global memory_backup_task, economy_explain_task, booster_weekly_task
+    global memory_backup_task, economy_explain_task, booster_weekly_task, timed_roles_task
 
     guild = bot.get_guild(GUILD_ID)
 
@@ -3217,6 +3730,9 @@ async def on_ready():
             print(f"Memory restored on startup: {restore_message}")
 
     init_db()
+
+    if guild:
+        await ensure_custom_roles(guild)
 
     bot.add_view(GameRolesView())
 
@@ -3228,6 +3744,9 @@ async def on_ready():
 
     if booster_weekly_task is None or booster_weekly_task.done():
         booster_weekly_task = asyncio.create_task(booster_weekly_loop())
+
+    if timed_roles_task is None or timed_roles_task.done():
+        timed_roles_task = asyncio.create_task(timed_roles_loop())
 
     await bot.change_presence(
         status=discord.Status.online,
@@ -5783,6 +6302,250 @@ async def memory_status_command(ctx):
     embed.set_footer(text=f"{BOT_BRAND} | Memory")
 
     await ctx.send(embed=embed)
+
+
+# =========================
+# SHOP / LOOTBOX / EVENTS COMMANDS
+# =========================
+
+async def require_shop_channel(ctx):
+    if ctx.channel.id == SHOP_CHANNEL_ID:
+        return True
+    embed = discord.Embed(
+        title="🛒 الروم الغلط",
+        description=f"أوامر المتجر تشتغل هنا: <#{SHOP_CHANNEL_ID}>",
+        color=COLOR_ORANGE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Shop")
+    await ctx.send(embed=embed, delete_after=8)
+    return False
+
+
+async def require_events_channel(ctx):
+    if ctx.channel.id == EVENTS_CHANNEL_ID:
+        return True
+    embed = discord.Embed(
+        title="🎉 الروم الغلط",
+        description=f"أوامر الفعاليات تشتغل هنا: <#{EVENTS_CHANNEL_ID}>",
+        color=COLOR_ORANGE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} | Events")
+    await ctx.send(embed=embed, delete_after=8)
+    return False
+
+
+def build_shop_embed(member=None):
+    embed = discord.Embed(
+        title="🛒 متجر السيرفر",
+        description="اشترِ مزايا باستخدام عملة السيرفر. كل شيء قابل للتغيير من الداشبورد.",
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(
+        name="💎 VIP",
+        value=(
+            f"السعر: {coin_line(SHOP_VIP_PRICE)}\n"
+            f"المدة: **{SHOP_VIP_DAYS} أيام**\n"
+            f"الأمر: `!شراء vip`\n"
+            f"الرول: <@&{VIP_ROLE_ID}>"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🎁 صندوق الحظ",
+        value=(
+            f"السعر: {coin_line(LOOTBOX_PRICE)}\n"
+            "جوائز عشوائية: Coins / VIP مؤقت / Winner Role مؤقت\n"
+            "الأمر: `!صندوق` أو `!شراء صندوق`"
+        ),
+        inline=False
+    )
+    if member:
+        embed.set_author(name=f"{member.display_name} • Wallet", icon_url=member.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(member.id)), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Customizable Shop")
+    return embed
+
+
+@bot.command(name="متجر", aliases=["shop"])
+async def shop_command(ctx):
+    if not SHOP_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 المتجر مقفل", description="الإدارة قفلت المتجر مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_shop_channel(ctx):
+        return
+    await ctx.send(embed=build_shop_embed(ctx.author))
+
+
+@bot.command(name="شراء", aliases=["buy"])
+async def buy_command(ctx, item: str = None):
+    if not SHOP_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 المتجر مقفل", description="الإدارة قفلت المتجر مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_shop_channel(ctx):
+        return
+    if not item:
+        await ctx.send(embed=build_shop_embed(ctx.author))
+        return
+
+    item_key = str(item).strip().lower()
+    if item_key in ["vip", "في اي بي", "فيب", "viprole"]:
+        guild = ctx.guild
+        vip_role, _ = await ensure_custom_roles(guild)
+        if not vip_role:
+            await ctx.send(embed=discord.Embed(title="❌ مشكلة رتبة VIP", description="ما قدرت ألقى أو أنشئ رتبة VIP. تأكد من صلاحية Manage Roles وترتيب رتبة البوت.", color=COLOR_RED))
+            return
+        ok, new_balance = remove_money(ctx.author.id, SHOP_VIP_PRICE)
+        if not ok:
+            await ctx.send(embed=discord.Embed(title="❌ رصيدك ما يكفي", description=f"تحتاج {coin_line(SHOP_VIP_PRICE)} لشراء VIP.\nرصيدك: {coin_line(get_balance(ctx.author.id))}", color=COLOR_RED))
+            return
+        try:
+            await ctx.author.add_roles(vip_role, reason=f"{BOT_BRAND} shop VIP purchase")
+            expires_at = int(time.time()) + int(SHOP_VIP_DAYS) * 86400
+            add_timed_role_record(ctx.author.id, vip_role.id, expires_at, "Shop VIP purchase")
+            record_shop_purchase(ctx.author.id, "vip", SHOP_VIP_PRICE)
+            embed = discord.Embed(title="✅ تم شراء VIP", description=f"استمتعت بـ {vip_role.mention} لمدة **{SHOP_VIP_DAYS} أيام**.", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+            embed.add_field(name="💰 السعر", value=coin_line(SHOP_VIP_PRICE), inline=True)
+            embed.add_field(name="💼 رصيدك الجديد", value=coin_line(new_balance), inline=True)
+            embed.add_field(name="⏳ ينتهي", value=f"<t:{expires_at}:R>", inline=False)
+            embed.set_footer(text=f"{BOT_BRAND} | Shop")
+            await ctx.send(embed=embed)
+        except Exception as e:
+            add_money(ctx.author.id, SHOP_VIP_PRICE)
+            await ctx.send(embed=discord.Embed(title="❌ فشل إعطاء الرتبة", description=f"رجعت لك المبلغ. السبب: `{clean_text(str(e), 300)}`", color=COLOR_RED))
+        return
+
+    if item_key in ["صندوق", "lootbox", "box"]:
+        await lootbox_command(ctx)
+        return
+
+    await ctx.send(embed=discord.Embed(title="❌ منتج غير معروف", description="استخدم `!متجر` عشان تشوف المنتجات.", color=COLOR_RED), delete_after=8)
+
+
+@bot.command(name="صندوق", aliases=["lootbox", "box"])
+async def lootbox_command(ctx):
+    if not SHOP_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 الصناديق مقفلة", description="الإدارة قفلت المتجر مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_shop_channel(ctx):
+        return
+
+    now = time.time()
+    last = lootbox_cooldowns.get(ctx.author.id, 0)
+    if now - last < LOOTBOX_COOLDOWN_SECONDS:
+        await ctx.send(embed=discord.Embed(title="⏳ انتظر شوي", description=f"باقي **{LOOTBOX_COOLDOWN_SECONDS - (now-last):.1f} ثانية** قبل تفتح صندوق ثاني.", color=COLOR_ORANGE), delete_after=5)
+        return
+    lootbox_cooldowns[ctx.author.id] = now
+
+    ok, new_balance = remove_money(ctx.author.id, LOOTBOX_PRICE)
+    if not ok:
+        await ctx.send(embed=discord.Embed(title="❌ رصيدك ما يكفي", description=f"سعر الصندوق: {coin_line(LOOTBOX_PRICE)}\nرصيدك: {coin_line(get_balance(ctx.author.id))}", color=COLOR_RED))
+        return
+
+    # Weighted rewards: safe but exciting.
+    rewards = [
+        ("coins", int(LOOTBOX_PRICE * 0.25), 28, "Common"),
+        ("coins", int(LOOTBOX_PRICE * 0.75), 24, "Uncommon"),
+        ("coins", int(LOOTBOX_PRICE * 1.5), 20, "Rare"),
+        ("coins", int(LOOTBOX_PRICE * 3), 12, "Epic"),
+        ("vip_hours", 12, 8, "Epic VIP"),
+        ("winner_hours", 6, 5, "Legendary Role"),
+        ("coins", int(LOOTBOX_PRICE * 7), 3, "Mythic Jackpot"),
+    ]
+    pool = []
+    for reward_type, value, weight, rarity in rewards:
+        pool.extend([(reward_type, value, rarity)] * int(weight))
+    reward_type, value, rarity = random.choice(pool)
+
+    desc = ""
+    color = COLOR_BLUE
+    if reward_type == "coins":
+        final_balance = add_money(ctx.author.id, int(value))
+        profit = int(value) - int(LOOTBOX_PRICE)
+        desc = f"ربحت {coin_line(value)} من الصندوق.\nصافي النتيجة: {money_delta(profit)}"
+        color = COLOR_GREEN if profit >= 0 else COLOR_YELLOW
+        record_lootbox(ctx.author.id, LOOTBOX_PRICE, "coins", value)
+    elif reward_type == "vip_hours":
+        vip_role, _ = await ensure_custom_roles(ctx.guild)
+        if vip_role:
+            await ctx.author.add_roles(vip_role, reason=f"{BOT_BRAND} lootbox VIP reward")
+            expires_at = int(time.time()) + int(value) * 3600
+            add_timed_role_record(ctx.author.id, vip_role.id, expires_at, "Lootbox VIP reward")
+            desc = f"ربحت {vip_role.mention} لمدة **{value} ساعة**.\nينتهي: <t:{expires_at}:R>"
+        else:
+            refund = int(LOOTBOX_PRICE * 2)
+            final_balance = add_money(ctx.author.id, refund)
+            desc = f"كان مفروض تفوز VIP، لكن الرتبة غير جاهزة. عوضتك {coin_line(refund)}."
+        color = COLOR_PURPLE
+        record_lootbox(ctx.author.id, LOOTBOX_PRICE, "vip_hours", value)
+    else:
+        _, winner_role = await ensure_custom_roles(ctx.guild)
+        if winner_role:
+            await ctx.author.add_roles(winner_role, reason=f"{BOT_BRAND} lootbox winner role reward")
+            expires_at = int(time.time()) + int(value) * 3600
+            add_timed_role_record(ctx.author.id, winner_role.id, expires_at, "Lootbox Event Winner reward")
+            desc = f"ربحت {winner_role.mention} لمدة **{value} ساعات**.\nينتهي: <t:{expires_at}:R>"
+        else:
+            refund = int(LOOTBOX_PRICE * 3)
+            final_balance = add_money(ctx.author.id, refund)
+            desc = f"كان مفروض تفوز Winner Role، لكن الرتبة غير جاهزة. عوضتك {coin_line(refund)}."
+        color = COLOR_ORANGE
+        record_lootbox(ctx.author.id, LOOTBOX_PRICE, "winner_hours", value)
+
+    record_shop_purchase(ctx.author.id, "lootbox", LOOTBOX_PRICE)
+    embed = discord.Embed(title=f"🎁 صندوق الحظ • {rarity}", description=desc, color=color, timestamp=discord.utils.utcnow())
+    embed.set_author(name=f"{ctx.author.display_name} فتح صندوق", icon_url=ctx.author.display_avatar.url)
+    embed.add_field(name="💰 سعر الصندوق", value=coin_line(LOOTBOX_PRICE), inline=True)
+    embed.add_field(name="💼 رصيدك الآن", value=coin_line(get_balance(ctx.author.id)), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Lootbox")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="فعاليات", aliases=["events"])
+async def events_list_command(ctx):
+    if not EVENTS_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 الفعاليات مقفلة", description="الإدارة قفلت نظام الفعاليات مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_events_channel(ctx):
+        return
+    events = get_active_events(10)
+    embed = discord.Embed(title="🎉 الفعاليات الحالية", color=COLOR_PURPLE, timestamp=discord.utils.utcnow())
+    if not events:
+        embed.description = "ما فيه فعاليات شغالة حاليًا."
+    else:
+        for event_id, event_key, title, prize, starts_at, ends_at, created_by, status in events:
+            embed.add_field(name=f"#{event_id} • {title}", value=f"الجائزة: {coin_line(prize)}\nتنتهي: <t:{int(ends_at)}:R>", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Events")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="فعالية", aliases=["event"])
+@commands.has_permissions(manage_guild=True)
+async def event_start_command(ctx, minutes: int = None, prize: str = None, *, title="Casino Night"):
+    if not EVENTS_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 الفعاليات مقفلة", description="الإدارة قفلت نظام الفعاليات مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_events_channel(ctx):
+        return
+    minutes = minutes or DEFAULT_EVENT_DURATION_MINUTES
+    prize_amount = parse_bet_amount(prize) if prize else DEFAULT_EVENT_PRIZE
+    if not prize_amount or prize_amount < 0:
+        prize_amount = DEFAULT_EVENT_PRIZE
+    now = int(time.time())
+    ends = now + int(minutes) * 60
+    event_id = create_event_record("manual", title, prize_amount, now, ends, ctx.author.id)
+    embed = discord.Embed(title=f"🎉 {title}", description="فعالية جديدة بدأت!", color=COLOR_PURPLE, timestamp=discord.utils.utcnow())
+    embed.add_field(name="🏆 الجائزة", value=coin_line(prize_amount), inline=True)
+    embed.add_field(name="⏳ المدة", value=f"{minutes} دقيقة", inline=True)
+    embed.add_field(name="📅 تنتهي", value=f"<t:{ends}:R>", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Event #{event_id}")
+    await ctx.send(embed=embed)
+    announcement_channel = await get_channel_by_id(ctx.guild, BOT_ANNOUNCEMENTS_CHANNEL_ID)
+    if announcement_channel and announcement_channel.id != ctx.channel.id:
+        await announcement_channel.send(embed=embed)
+
 
 @bot.event
 async def on_command_error(ctx, error):
