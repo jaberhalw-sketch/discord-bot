@@ -13,6 +13,7 @@ from flask import Flask, request, redirect, session, render_template_string
 from threading import Thread
 import urllib.parse
 import urllib.request
+import urllib.error
 
 # =========================
 # CONFIG
@@ -2153,8 +2154,8 @@ def dashboard_auth_url():
         "client_id": DISCORD_CLIENT_ID,
         "redirect_uri": dashboard_redirect_uri(),
         "response_type": "code",
-        "scope": "identify",
-        "prompt": "none",
+        "scope": "identify guilds",
+        "prompt": "consent",
     }
     return "https://discord.com/oauth2/authorize?" + urllib.parse.urlencode(params)
 
@@ -2170,21 +2171,47 @@ def oauth_post_token(code):
     req = urllib.request.Request(
         f"{DISCORD_API_BASE}/oauth2/token",
         data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "User-Agent": "NM-System-Dashboard/1.0",
+        },
         method="POST"
     )
-    with urllib.request.urlopen(req, timeout=12) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = "No response body"
+        raise Exception(
+            f"Discord token exchange failed: HTTP {e.code}. "
+            f"Response: {body}. "
+            f"Redirect URI used: {dashboard_redirect_uri()}"
+        )
 
 
 def oauth_get_user(access_token):
     req = urllib.request.Request(
         f"{DISCORD_API_BASE}/users/@me",
-        headers={"Authorization": f"Bearer {access_token}"},
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "User-Agent": "NM-System-Dashboard/1.0",
+        },
         method="GET"
     )
-    with urllib.request.urlopen(req, timeout=12) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = "No response body"
+        raise Exception(f"Discord user fetch failed: HTTP {e.code}. Response: {body}")
 
 
 async def dashboard_fetch_member(user_id):
@@ -2353,6 +2380,24 @@ def dashboard_callback():
 def dashboard_logout():
     session.clear()
     return redirect("/")
+
+
+
+@app.route("/oauth_debug")
+def dashboard_oauth_debug():
+    body = f"""
+    <div class='card'>
+      <h2>OAuth Debug</h2>
+      <p><b>Client ID:</b> <code>{clean_text(DISCORD_CLIENT_ID or 'MISSING', 200)}</code></p>
+      <p><b>Client Secret:</b> <code>{'SET' if DISCORD_CLIENT_SECRET else 'MISSING'}</code></p>
+      <p><b>Base URL:</b> <code>{clean_text(DASHBOARD_BASE_URL or 'MISSING', 300)}</code></p>
+      <p><b>Redirect URI used by code:</b> <code>{clean_text(dashboard_redirect_uri() or 'MISSING', 300)}</code></p>
+      <p><b>Required Redirect in Discord:</b> <code>{clean_text(dashboard_redirect_uri() or 'MISSING', 300)}</code></p>
+      <p><b>Scope:</b> <code>identify guilds</code></p>
+      <a class='btn' href='/login'>Test Login</a>
+    </div>
+    """
+    return render_dashboard_page("OAuth Debug", body)
 
 
 @app.route("/dashboard")
