@@ -703,6 +703,62 @@ def set_balance(user_id, amount):
     return amount
 
 
+async def get_all_human_members(guild):
+    """Return non-bot members. Tries to chunk the guild first so bulk economy actions hit everyone."""
+    if not guild:
+        return []
+
+    try:
+        await guild.chunk(cache=True)
+    except Exception:
+        pass
+
+    return [member for member in guild.members if not member.bot]
+
+
+async def bulk_add_money_to_all(guild, amount):
+    amount = int(amount)
+    if amount <= 0:
+        return {"count": 0, "total_added": 0, "members": []}
+
+    members = await get_all_human_members(guild)
+    touched = []
+
+    for member in members:
+        balance = add_money(member.id, amount)
+        touched.append((member.id, balance))
+
+    return {
+        "count": len(touched),
+        "total_added": len(touched) * amount,
+        "members": touched,
+    }
+
+
+async def bulk_remove_money_from_all(guild, amount):
+    amount = int(amount)
+    if amount <= 0:
+        return {"count": 0, "total_removed": 0, "members": []}
+
+    members = await get_all_human_members(guild)
+    touched = []
+    total_removed = 0
+
+    for member in members:
+        current_balance = get_balance(member.id)
+        removed = min(current_balance, amount)
+        new_balance = max(0, current_balance - amount)
+        set_balance(member.id, new_balance)
+        total_removed += removed
+        touched.append((member.id, removed, new_balance))
+
+    return {
+        "count": len(touched),
+        "total_removed": total_removed,
+        "members": touched,
+    }
+
+
 def claim_daily(user_id, level):
     balance, last_daily = get_money_data(user_id)
     now = int(time.time())
@@ -4286,6 +4342,25 @@ def dashboard_economy_page():
       <form class="card" method="post" action="/dashboard/economy"><h3>🎯 Set Balance</h3><label>User ID</label><input name="user_id" required><label>New Balance</label><input name="amount" placeholder="100000" required><input type="hidden" name="action" value="set"><div style="height:10px"></div><button class="btn primary">Set</button></form>
     </div>
     <div style="height:14px"></div>
+    <div class="grid2">
+      <form class="card danger" method="post" action="/dashboard/economy">
+        <h3>🌍 Give Money To Everyone</h3>
+        <p class="muted small">يعطي كل أعضاء السيرفر غير البوتات نفس المبلغ. العملية قوية، استخدمها بحذر.</p>
+        <label>Amount per member</label><input name="amount" placeholder="1000" required>
+        <label>Confirmation</label><input name="confirm" placeholder="اكتب CONFIRM" required>
+        <input type="hidden" name="action" value="bulk_add">
+        <div style="height:10px"></div><button class="btn green">Give Everyone</button>
+      </form>
+      <form class="card danger" method="post" action="/dashboard/economy">
+        <h3>🌍 Take Money From Everyone</h3>
+        <p class="muted small">يسحب من كل أعضاء السيرفر غير البوتات. إذا رصيد العضو أقل من المبلغ، يصير رصيده 0.</p>
+        <label>Amount per member</label><input name="amount" placeholder="1000" required>
+        <label>Confirmation</label><input name="confirm" placeholder="اكتب CONFIRM" required>
+        <input type="hidden" name="action" value="bulk_remove">
+        <div style="height:10px"></div><button class="btn red">Take From Everyone</button>
+      </form>
+    </div>
+    <div style="height:14px"></div>
     <div class="card"><h3>🪙 Economy Leaderboard</h3><table class="table"><tr><th>User</th><th>Balance</th><th>Last Salary</th></tr>{table}</table></div>
     '''
     return render_dashboard_page("Economy", body)
@@ -4799,23 +4874,45 @@ def dashboard_economy_action():
     if denied:
         return denied
     try:
-        user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
-        amount = parse_int_field(request.form.get("amount", "0"), 0, 0)
         action = request.form.get("action", "add")
-        if action == "add":
-            balance = add_money(user_id, amount)
-            msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
-            dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
-        elif action == "remove":
-            ok, balance = remove_money(user_id, amount)
-            msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
-            dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {COIN_NAME} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
-        elif action == "set":
-            balance = set_balance(user_id, amount)
-            msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
-            dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}", session.get("discord_user"))
+        amount = parse_int_field(request.form.get("amount", "0"), 0, 0)
+
+        if action in {"bulk_add", "bulk_remove"}:
+            confirm = (request.form.get("confirm") or "").strip().lower()
+            if confirm not in {"confirm", "تأكيد", "تاكيد"}:
+                msg = "Bulk action cancelled. اكتب CONFIRM في خانة التأكيد."
+            elif amount <= 0:
+                msg = "Amount must be greater than 0."
+            else:
+                guild = bot.get_guild(GUILD_ID)
+                if not guild:
+                    msg = "Guild is not loaded yet. Try again after the bot is fully online."
+                elif action == "bulk_add":
+                    fut = asyncio.run_coroutine_threadsafe(bulk_add_money_to_all(guild, amount), bot.loop)
+                    result = fut.result(timeout=90)
+                    msg = f"Added {fmt_num(amount)} {COIN_NAME} to {fmt_num(result['count'])} members. Total added: {fmt_num(result['total_added'])}."
+                    dashboard_log_action("Economy: bulk add all", msg, session.get("discord_user"))
+                else:
+                    fut = asyncio.run_coroutine_threadsafe(bulk_remove_money_from_all(guild, amount), bot.loop)
+                    result = fut.result(timeout=90)
+                    msg = f"Took up to {fmt_num(amount)} {COIN_NAME} from {fmt_num(result['count'])} members. Total removed: {fmt_num(result['total_removed'])}."
+                    dashboard_log_action("Economy: bulk remove all", msg, session.get("discord_user"))
         else:
-            msg = "Unknown action."
+            user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
+            if action == "add":
+                balance = add_money(user_id, amount)
+                msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
+                dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
+            elif action == "remove":
+                ok, balance = remove_money(user_id, amount)
+                msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
+                dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {COIN_NAME} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
+            elif action == "set":
+                balance = set_balance(user_id, amount)
+                msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
+                dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}", session.get("discord_user"))
+            else:
+                msg = "Unknown action."
     except Exception as e:
         msg = f"Economy action failed: {e}"
     back = request.referrer or "/dashboard/economy"
@@ -6473,6 +6570,76 @@ async def admin_reset_money(ctx, member: discord.Member = None):
     )
     embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
     await ctx.send(embed=embed)
+
+
+@bot.command(name="اعطاء_الكل", aliases=["giveall", "addallmoney"])
+@commands.has_permissions(administrator=True)
+async def admin_add_money_all(ctx, amount: int = None, confirm: str = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if amount is None or amount <= 0:
+        await ctx.send("استخدم: `!اعطاء_الكل 1000 CONFIRM`")
+        return
+
+    if str(confirm or "").lower() not in {"confirm", "تأكيد", "تاكيد"}:
+        embed = discord.Embed(
+            title="⚠️ تأكيد مطلوب",
+            description="هذا الأمر بيعطي كل أعضاء السيرفر فلوس. للتأكيد اكتب:\n`!اعطاء_الكل المبلغ CONFIRM`",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
+        await ctx.send(embed=embed)
+        return
+
+    result = await bulk_add_money_to_all(ctx.guild, amount)
+    embed = discord.Embed(
+        title="🌍 تم إعطاء الكل فلوس",
+        description=f"تم إعطاء **{amount:,} {COIN_NAME}** لكل عضو غير بوت.",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="👥 عدد الأعضاء", value=f"`{result['count']:,}`", inline=True)
+    embed.add_field(name="💰 إجمالي المبلغ المضاف", value=coin_line(result['total_added']), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
+    await ctx.send(embed=embed)
+    await send_log(ctx.guild, "🌍 Bulk Economy Add", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {COIN_NAME}\n**Members:** `{result['count']:,}`\n**Total added:** `{result['total_added']:,}`", COLOR_GREEN, log_type="server")
+
+
+@bot.command(name="سحب_من_الكل", aliases=["takeall", "removeallmoney"])
+@commands.has_permissions(administrator=True)
+async def admin_remove_money_all(ctx, amount: int = None, confirm: str = None):
+    if not await require_commands_channel(ctx):
+        return
+
+    if amount is None or amount <= 0:
+        await ctx.send("استخدم: `!سحب_من_الكل 1000 CONFIRM`")
+        return
+
+    if str(confirm or "").lower() not in {"confirm", "تأكيد", "تاكيد"}:
+        embed = discord.Embed(
+            title="⚠️ تأكيد مطلوب",
+            description="هذا الأمر بيسحب فلوس من كل أعضاء السيرفر. إذا رصيد العضو أقل من المبلغ، يصير رصيده 0. للتأكيد اكتب:\n`!سحب_من_الكل المبلغ CONFIRM`",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
+        await ctx.send(embed=embed)
+        return
+
+    result = await bulk_remove_money_from_all(ctx.guild, amount)
+    embed = discord.Embed(
+        title="🌍 تم السحب من الكل",
+        description=f"تم سحب حتى **{amount:,} {COIN_NAME}** من كل عضو غير بوت.",
+        color=COLOR_RED,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="👥 عدد الأعضاء", value=f"`{result['count']:,}`", inline=True)
+    embed.add_field(name="💸 إجمالي المبلغ المسحوب", value=coin_line(result['total_removed']), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
+    await ctx.send(embed=embed)
+    await send_log(ctx.guild, "🌍 Bulk Economy Remove", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {COIN_NAME}\n**Members:** `{result['count']:,}`\n**Total removed:** `{result['total_removed']:,}`", COLOR_RED, log_type="server")
 
 
 
