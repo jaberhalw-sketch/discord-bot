@@ -104,6 +104,28 @@ DASHBOARD_ADMIN_ROLE_IDS = {
     if x.strip().isdigit()
 }
 
+# =========================
+# ADMIN CONTROL CENTER
+# =========================
+DEFAULT_SYSTEM_TOGGLES = {
+    "utility": True, "admin": True, "economy": True, "levels": True,
+    "gambling": True, "protection": True, "lfg": True, "giveaway": True,
+    "community": True, "roles": True, "memory": True,
+}
+COMMAND_SYSTEM_MAP = {
+    "مساعدة": "utility", "بنق": "utility", "هلا": "utility", "معلومات": "utility", "طقطق": "utility", "تقييم": "utility",
+    "انشاء": "admin", "اعداد": "admin", "لوحة": "admin", "اعلان": "admin", "مسح": "admin", "قفل": "admin", "فتح": "admin",
+    "اقتراح": "community", "لعب": "lfg", "سحب": "giveaway", "رولات": "roles",
+    "لفلي": "levels", "لفل": "levels", "ترتيب": "levels",
+    "رصيدي": "economy", "رصيد": "economy", "يومي": "economy", "بوست": "economy", "تحويل": "economy", "اغنى": "economy",
+    "اعطاءفلوس": "economy", "سحبفلوس": "economy", "تصفيرفلوس": "economy",
+    "شرح_القمار": "gambling", "حظ": "gambling", "دبل": "gambling", "سلوت": "gambling", "وجه": "gambling", "بلاكجاك": "gambling",
+    "حماية": "protection", "اعدادات": "protection", "تحذير": "protection", "تحذيرات": "protection", "تصفير": "protection",
+    "حفظ_الذاكرة": "memory", "استرجاع_الذاكرة": "memory", "حالة_الذاكرة": "memory",
+}
+EMERGENCY_ALLOWED_SYSTEMS = {"utility", "admin", "memory", "protection"}
+DASHBOARD_AUDIT_LOG_LIMIT = 100
+
 
 COLOR_YELLOW = discord.Color.gold()
 COLOR_GREEN = discord.Color.green()
@@ -335,6 +357,17 @@ def init_db():
             winners INTEGER,
             created_by INTEGER,
             created_at TEXT
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS dashboard_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            admin_id INTEGER,
+            admin_name TEXT,
+            action TEXT,
+            details TEXT,
+            created_at INTEGER
         )
     """)
 
@@ -2444,6 +2477,113 @@ def dashboard_save_settings_file(data):
         json.dump(data, f, indent=4, ensure_ascii=False)
 
 
+def dashboard_control_settings():
+    data = dashboard_load_settings_file()
+    systems = dict(DEFAULT_SYSTEM_TOGGLES)
+    saved_systems = data.get("system_toggles", {})
+    if isinstance(saved_systems, dict):
+        for key, value in saved_systems.items():
+            if key in systems:
+                systems[key] = bool(value)
+
+    commands = {}
+    saved_commands = data.get("command_toggles", {})
+    if isinstance(saved_commands, dict):
+        for key, value in saved_commands.items():
+            commands[str(key)] = bool(value)
+
+    def safe_int(value, default):
+        try:
+            return int(value)
+        except:
+            return default
+
+    return {
+        "emergency_lockdown": bool(data.get("emergency_lockdown", False)),
+        "system_toggles": systems,
+        "command_toggles": commands,
+        "policies": {
+            "large_transfer_alert": safe_int(data.get("large_transfer_alert", 100000), 100000),
+            "large_admin_money_alert": safe_int(data.get("large_admin_money_alert", 250000), 250000),
+            "large_gamble_alert": safe_int(data.get("large_gamble_alert", 250000), 250000),
+        },
+        "dashboard_audit_channel_id": safe_int(data.get("dashboard_audit_channel_id", 0), 0),
+    }
+
+
+def is_system_enabled(system_name):
+    control = dashboard_control_settings()
+    if control.get("emergency_lockdown") and system_name not in EMERGENCY_ALLOWED_SYSTEMS:
+        return False
+    return bool(control["system_toggles"].get(system_name, True))
+
+
+def is_command_enabled(command_name):
+    control = dashboard_control_settings()
+    return bool(control["command_toggles"].get(str(command_name), True))
+
+
+def command_system(command_name):
+    return COMMAND_SYSTEM_MAP.get(str(command_name), "utility")
+
+
+def dashboard_audit_rows(limit=50):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT admin_id, admin_name, action, details, created_at FROM dashboard_audit ORDER BY id DESC LIMIT ?", (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def dashboard_log_action(action, details="", admin=None, send_discord=True):
+    admin_id = 0
+    admin_name = "System"
+    if admin:
+        try:
+            admin_id = int(admin.get("id", 0))
+            admin_name = str(admin.get("username", "Dashboard Admin"))
+        except:
+            pass
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO dashboard_audit (admin_id, admin_name, action, details, created_at) VALUES (?, ?, ?, ?, ?)", (admin_id, admin_name, str(action)[:120], str(details)[:1200], int(time.time())))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Dashboard audit db error: {e}")
+    if send_discord and bot and getattr(bot, "loop", None) and bot.loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(send_dashboard_action_log(admin_name, admin_id, action, details), bot.loop)
+        except Exception as e:
+            print(f"Dashboard audit discord schedule error: {e}")
+
+
+async def send_dashboard_action_log(admin_name, admin_id, action, details):
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            return
+        control = dashboard_control_settings()
+        channel_id = control.get("dashboard_audit_channel_id") or LOG_CHANNEL_IDS.get("server") or LOG_CHANNEL_IDS.get("moderation")
+        channel = await get_channel_by_id(guild, channel_id) if channel_id else await get_log_channel_by_type(guild, "server")
+        if not channel:
+            return
+        embed = discord.Embed(title="🛡️ Dashboard Action", color=COLOR_PURPLE, timestamp=discord.utils.utcnow())
+        embed.add_field(name="Admin", value=f"{clean_text(admin_name, 80)} (`{admin_id}`)", inline=False)
+        embed.add_field(name="Action", value=clean_text(action, 250), inline=False)
+        if details:
+            embed.add_field(name="Details", value=clean_text(details, 900), inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} | Admin Control Center")
+        await channel.send(embed=embed)
+    except Exception as e:
+        print(f"Dashboard action log error: {e}")
+
+
 def dashboard_apply_saved_settings():
     global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
     global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
@@ -2490,7 +2630,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
     .table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px}.table td{padding:12px 10px;background:rgba(15,23,42,.55);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.2)}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}
     .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:20px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:800}input,select{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:12px;outline:none}input:focus,select:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}
     @media(max-width:1000px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.navfoot{position:static;margin-top:16px}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:24px}}
-  </style>
+  .switchgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.switchcard{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(255,255,255,.04)}.toggleline{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{width:52px;height:28px;border-radius:999px;background:#3b4252;position:relative;display:inline-block}.switch input{display:none}.slider{position:absolute;cursor:pointer;inset:0;border-radius:999px}.slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#22c55e}.switch input:checked+.slider:before{transform:translateX(24px)}.dangerzone{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
+</style>
 </head>
 <body>
 <div class="layout">
@@ -2503,6 +2644,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/casino">🎰 Casino</a>
       <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
       <a class="navitem" href="/dashboard/memory">💾 Memory</a>
+      <a class="navitem" href="/dashboard/control">🛡️ Control Center</a>
+      <a class="navitem" href="/dashboard/audit">🕵️ Audit Center</a>
       <a class="navitem" href="/dashboard/settings">⚙️ Settings</a>
       <a class="navitem" href="/oauth_debug">🧪 OAuth Debug</a>
     </nav>
@@ -2610,6 +2753,7 @@ def dashboard_home():
     <div class="grid3">
       <div class="card"><h3>🎰 Casino</h3><p class="muted">Gambling channel:</p><p><code>{GAMBLING_CHANNEL_ID}</code></p><p><span class="pill">Cooldown {GAMBLE_COOLDOWN_SECONDS}s</span></p><a class="btn" href="/dashboard/casino">Open Casino Page</a></div>
       <div class="card"><h3>💾 Memory</h3><p class="muted">Backup channel:</p><p><code>{MEMORY_BACKUP_CHANNEL_ID}</code></p><form method="post" action="/dashboard/backup"><button class="btn primary" type="submit">Create Backup</button></form></div>
+      <div class="card"><h3>🛡️ Control Center</h3><p class="muted">اقفل/افتح الأوامر والأنظمة، وشغل وضع الطوارئ.</p><a class="btn red" href="/dashboard/control">Open Control Center</a> <a class="btn" href="/dashboard/audit">Audit Logs</a></div>
       <div class="card"><h3>👤 User Lookup</h3><form method="get" action="/dashboard/user"><label>User ID</label><input name="user_id" placeholder="Discord user ID"><div style="height:10px"></div><button class="btn green">Search</button></form></div>
     </div>
     '''
@@ -2717,6 +2861,98 @@ def dashboard_memory_page():
     return render_dashboard_page("Memory", body)
 
 
+
+@app.route("/dashboard/control", methods=["GET"])
+def dashboard_control_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    control = dashboard_control_settings()
+    systems = control["system_toggles"]
+    commands = control["command_toggles"]
+    system_labels = {
+        "utility": "Utility Commands", "admin": "Admin Commands", "economy": "Economy System", "levels": "Level System",
+        "gambling": "Casino / Gambling", "protection": "Protection System", "lfg": "Looking For Game",
+        "giveaway": "Giveaways", "community": "Community", "roles": "Role Buttons", "memory": "Memory Backup"
+    }
+    system_cards = "".join([
+        f"""<div class="switchcard"><div class="toggleline"><div><b>{label}</b><p class="muted small">System key: <code>{key}</code></p></div><label class="switch"><input type="checkbox" name="system::{key}" {'checked' if systems.get(key, True) else ''}><span class="slider"></span></label></div></div>"""
+        for key, label in system_labels.items()
+    ])
+    command_cards = "".join([
+        f"""<div class="switchcard"><div class="toggleline"><div><b>!{cmd}</b><p class="muted small">{COMMAND_SYSTEM_MAP.get(cmd, 'utility')}</p></div><label class="switch"><input type="checkbox" name="command::{cmd}" {'checked' if commands.get(cmd, True) else ''}><span class="slider"></span></label></div></div>"""
+        for cmd in sorted(COMMAND_SYSTEM_MAP.keys())
+    ])
+    emergency_class = "dangerzone" if control.get("emergency_lockdown") else ""
+    emergency_enabled_value = "0" if control.get("emergency_lockdown") else "1"
+    emergency_button_class = "green" if control.get("emergency_lockdown") else "red"
+    emergency_button_text = "Disable Emergency" if control.get("emergency_lockdown") else "Enable Emergency Lockdown"
+    body = f"""
+    {dashboard_toast_html()}
+    <div class="hero"><div class="card"><div class="big">🛡️ Admin Control Center</div><p class="muted">اقفل وافتح أي أمر أو نظام كامل بدون تعديل الكود. التغييرات فورية وتحفظ بعد الريستارت.</p></div><div class="card {emergency_class}"><h3>🚨 Emergency Mode</h3><p class="muted">يقفل الاقتصاد والقمار واللفل والتحويلات وأغلب أوامر الأعضاء، ويترك الأدوات الإدارية الأساسية.</p><form method="post" action="/dashboard/control/emergency"><input type="hidden" name="enabled" value="{emergency_enabled_value}"><button class="btn {emergency_button_class}">{emergency_button_text}</button></form></div></div>
+    <form method="post" action="/dashboard/control/save">
+      <div class="card"><h3>🧩 System Toggles</h3><div class="switchgrid">{system_cards}</div></div>
+      <div class="card"><h3>⌨️ Command Toggles</h3><p class="muted">إذا قفلت أمر هنا، البوت بيرفضه مباشرة ويقول إنه مقفل من الإدارة.</p><div class="switchgrid">{command_cards}</div></div>
+      <div class="card"><h3>🚨 Policy Engine v1</h3><p class="muted">تنبيهات إدارية للأرقام الكبيرة والتصرفات الحساسة.</p><div class="formgrid"><div><label>Large Transfer Alert</label><input name="policy_large_transfer_alert" value="{control['policies']['large_transfer_alert']}"></div><div><label>Large Admin Money Alert</label><input name="policy_large_admin_money_alert" value="{control['policies']['large_admin_money_alert']}"></div><div><label>Large Gamble Alert</label><input name="policy_large_gamble_alert" value="{control['policies']['large_gamble_alert']}"></div><div><label>Dashboard Audit Channel ID</label><input name="dashboard_audit_channel_id" value="{control.get('dashboard_audit_channel_id', 0)}"></div></div></div>
+      <div style="height:14px"></div><button class="btn primary" type="submit">Save Control Settings</button>
+    </form>
+    """
+    return render_dashboard_page("Control Center", body)
+
+
+@app.route("/dashboard/control/save", methods=["POST"])
+def dashboard_control_save():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    try:
+        systems = {key: (request.form.get(f"system::{key}") == "on") for key in DEFAULT_SYSTEM_TOGGLES}
+        commands = {key: (request.form.get(f"command::{key}") == "on") for key in COMMAND_SYSTEM_MAP}
+        data = dashboard_load_settings_file()
+        data["system_toggles"] = systems
+        data["command_toggles"] = commands
+        data["large_transfer_alert"] = parse_int_field(request.form.get("policy_large_transfer_alert", "100000"), 100000, 0)
+        data["large_admin_money_alert"] = parse_int_field(request.form.get("policy_large_admin_money_alert", "250000"), 250000, 0)
+        data["large_gamble_alert"] = parse_int_field(request.form.get("policy_large_gamble_alert", "250000"), 250000, 0)
+        data["dashboard_audit_channel_id"] = parse_int_field(request.form.get("dashboard_audit_channel_id", "0"), 0, 0)
+        dashboard_save_settings_file(data)
+        dashboard_log_action("Updated control settings", "Changed command/system toggles and policy thresholds", session.get("discord_user"))
+        msg = "Control settings saved."
+    except Exception as e:
+        return redirect("/dashboard/control?err=" + urllib.parse.quote(str(e)))
+    return redirect("/dashboard/control?msg=" + urllib.parse.quote(msg))
+
+
+@app.route("/dashboard/control/emergency", methods=["POST"])
+def dashboard_control_emergency():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    enabled = request.form.get("enabled") == "1"
+    data = dashboard_load_settings_file()
+    data["emergency_lockdown"] = enabled
+    dashboard_save_settings_file(data)
+    dashboard_log_action("Emergency Lockdown " + ("ENABLED" if enabled else "DISABLED"), "Emergency Mode changed from dashboard", session.get("discord_user"))
+    return redirect("/dashboard/control?msg=" + urllib.parse.quote("Emergency mode updated."))
+
+
+@app.route("/dashboard/audit", methods=["GET"])
+def dashboard_audit_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    rows = dashboard_audit_rows(DASHBOARD_AUDIT_LOG_LIMIT)
+    table = "".join([
+        f"<tr><td><code>{created}</code></td><td>{clean_text(name, 80)}<br><span class='muted small'>{admin_id}</span></td><td>{clean_text(action, 140)}</td><td>{clean_text(details, 400)}</td></tr>"
+        for admin_id, name, action, details, created in rows
+    ]) or "<tr><td colspan='4'>No dashboard actions yet.</td></tr>"
+    body = f"""
+    {dashboard_toast_html()}
+    <div class="card"><h3>🕵️ Audit Center</h3><p class="muted">كل تعديل من الداشبورد ينحفظ هنا وينرسل في روم اللوقات إذا مضبوط.</p><table class="table"><tr><th>Unix Time</th><th>Admin</th><th>Action</th><th>Details</th></tr>{table}</table></div>
+    """
+    return render_dashboard_page("Audit Center", body)
+
+
 @app.route("/dashboard/settings", methods=["GET"])
 def dashboard_settings_page():
     denied = dashboard_require_admin()
@@ -2758,6 +2994,7 @@ def dashboard_settings_action():
             "BOOSTER_WEEKLY_REWARD": BOOSTER_WEEKLY_REWARD,
         })
         msg = "Settings saved. Some loop intervals may fully apply after restart."
+        dashboard_log_action("Settings updated", "Runtime settings were changed from dashboard", session.get("discord_user"))
     except Exception as e:
         return redirect("/dashboard/settings?err=" + urllib.parse.quote(str(e)))
     return redirect("/dashboard/settings?msg=" + urllib.parse.quote(msg))
@@ -2775,12 +3012,15 @@ def dashboard_economy_action():
         if action == "add":
             balance = add_money(user_id, amount)
             msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
+            dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
         elif action == "remove":
             ok, balance = remove_money(user_id, amount)
             msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
+            dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {COIN_NAME} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
         elif action == "set":
             balance = set_balance(user_id, amount)
             msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
+            dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}", session.get("discord_user"))
         else:
             msg = "Unknown action."
     except Exception as e:
@@ -2802,12 +3042,15 @@ def dashboard_levels_action():
         if action == "add_xp":
             xp, level, leveled = add_xp(user_id, amount)
             msg = f"Added {fmt_num(amount)} XP to {user_id}. Level: {level}, XP: {fmt_num(xp)}"
+            dashboard_log_action("Levels: add XP", f"Added {fmt_num(amount)} XP to {user_id}. Level {level}, XP {fmt_num(xp)}", session.get("discord_user"))
         elif action == "set_level":
             xp, level = dashboard_set_level_data(user_id, level=amount)
             msg = f"Set {user_id} level to {level}. XP: {fmt_num(xp)}"
+            dashboard_log_action("Levels: set level", f"Set {user_id} level to {level}. XP {fmt_num(xp)}", session.get("discord_user"))
         elif action == "set_xp":
             xp, level = dashboard_set_level_data(user_id, xp=amount)
             msg = f"Set {user_id} XP to {fmt_num(xp)}. Level: {level}"
+            dashboard_log_action("Levels: set XP", f"Set {user_id} XP to {fmt_num(xp)}. Level {level}", session.get("discord_user"))
         else:
             msg = "Unknown action."
     except Exception as e:
@@ -2830,6 +3073,7 @@ def dashboard_backup_action():
             future = asyncio.run_coroutine_threadsafe(create_memory_backup(guild, reason="Dashboard manual backup", requested_by=None), bot.loop)
             ok, result = future.result(timeout=30)
             msg = result
+            dashboard_log_action("Memory: manual backup", clean_text(str(result), 500), session.get("discord_user"))
     except Exception as e:
         msg = f"Backup failed: {e}"
     back = request.referrer or "/dashboard/memory"
@@ -2889,6 +3133,30 @@ async def booster_weekly_loop():
 @bot.check
 async def only_one_guild(ctx):
     return ctx.guild and ctx.guild.id == GUILD_ID
+
+
+@bot.check
+async def admin_control_command_guard(ctx):
+    if not ctx.command:
+        return True
+    name = ctx.command.name
+    system_name = command_system(name)
+    if not is_command_enabled(name):
+        embed = discord.Embed(title="🔒 الأمر مقفل", description="هذا الأمر مقفل مؤقتًا من الإدارة عبر الداشبورد.", color=COLOR_RED)
+        embed.add_field(name="Command", value=f"`!{name}`", inline=True)
+        embed.add_field(name="System", value=f"`{system_name}`", inline=True)
+        await ctx.send(embed=embed, delete_after=8)
+        return False
+    if not is_system_enabled(system_name):
+        control = dashboard_control_settings()
+        title = "🚨 Emergency Lockdown" if control.get("emergency_lockdown") else "🔒 النظام مقفل"
+        desc = "السيرفر حاليًا في وضع الطوارئ، الأوامر غير الضرورية مقفلة مؤقتًا." if control.get("emergency_lockdown") else "النظام هذا مقفل مؤقتًا من الإدارة."
+        embed = discord.Embed(title=title, description=desc, color=COLOR_RED)
+        embed.add_field(name="Command", value=f"`!{name}`", inline=True)
+        embed.add_field(name="System", value=f"`{system_name}`", inline=True)
+        await ctx.send(embed=embed, delete_after=8)
+        return False
+    return True
 
 
 @bot.event
@@ -2952,13 +3220,13 @@ async def on_message(message):
     now = time.time()
     last_xp = xp_cooldowns.get(message.author.id, 0)
 
-    if now - last_xp >= LEVEL_COOLDOWN and not message.content.startswith(PREFIX):
+    if is_system_enabled("levels") and now - last_xp >= LEVEL_COOLDOWN and not message.content.startswith(PREFIX):
         xp_cooldowns[message.author.id] = now
         gained = random.randint(8, 16)
         xp, level, leveled_up = add_xp(message.author.id, gained)
 
         last_coin = coin_cooldowns.get(message.author.id, 0)
-        if now - last_coin >= MESSAGE_COIN_COOLDOWN:
+        if is_system_enabled("economy") and now - last_coin >= MESSAGE_COIN_COOLDOWN:
             coin_cooldowns[message.author.id] = now
             add_money(message.author.id, random.randint(3, 8))
 
@@ -2971,7 +3239,7 @@ async def on_message(message):
                 delete_after=10
             )
 
-    if protection_enabled and not is_bypass(message.author):
+    if protection_enabled and is_system_enabled("protection") and not is_bypass(message.author):
 
         if contains_bad_word(content):
             await handle_violation(message, "كلمة ممنوعة / سب")
