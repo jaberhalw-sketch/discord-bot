@@ -4569,7 +4569,7 @@ async def salary(ctx):
     await ctx.send(embed=embed)
 
 
-@bot.command(name="تحويل", aliases=["pay", "transfer"])
+@bot.command(name="تحويل", aliases=["transfer"])
 async def transfer_money(ctx, member: discord.Member = None, amount: int = None):
     if not await require_commands_channel(ctx):
         return
