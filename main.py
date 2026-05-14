@@ -459,6 +459,24 @@ def init_db():
         )
     """)
 
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS warning_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            reason TEXT,
+            message TEXT,
+            moderator TEXT,
+            source TEXT,
+            status TEXT DEFAULT 'active',
+            created_at INTEGER,
+            cleared_at INTEGER DEFAULT 0,
+            cleared_by TEXT DEFAULT '',
+            clear_reason TEXT DEFAULT '',
+            legacy_key TEXT UNIQUE
+        )
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS shop_purchases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -531,6 +549,8 @@ def init_db():
             created_at INTEGER
         )
     """)
+
+    migrate_warnings_json_to_history(cur)
 
     conn.commit()
     conn.close()
@@ -1834,21 +1854,170 @@ async def get_audit_executor(guild, action, target_id=None):
         return None
 
 
+def warning_time_to_unix(time_text=None):
+    if not time_text:
+        return int(time.time())
+    try:
+        return int(time.mktime(time.strptime(str(time_text).replace(" UTC", ""), "%Y-%m-%d %H:%M:%S")))
+    except:
+        return int(time.time())
+
+
+def make_warning_legacy_key(user_id, reason, message_text, created_at):
+    raw = f"{int(user_id)}|{created_at}|{str(reason)[:120]}|{str(message_text)[:180]}"
+    return raw[:500]
+
+
+def migrate_warnings_json_to_history(cur=None):
+    close_conn = False
+    conn = None
+    if cur is None:
+        conn = db_connect()
+        cur = conn.cursor()
+        close_conn = True
+    try:
+        if not isinstance(warnings, dict):
+            return
+        for user_id, items in warnings.items():
+            if not isinstance(items, list):
+                continue
+            for warn_data in items:
+                if not isinstance(warn_data, dict):
+                    continue
+                reason = str(warn_data.get("reason", "غير معروف"))
+                message_text = str(warn_data.get("message", "غير معروف"))
+                moderator = str(warn_data.get("moderator", "غير معروف"))
+                created_at = warning_time_to_unix(warn_data.get("time"))
+                legacy_key = make_warning_legacy_key(user_id, reason, message_text, created_at)
+                cur.execute("""
+                    INSERT OR IGNORE INTO warning_history
+                    (user_id, reason, message, moderator, source, status, created_at, legacy_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (int(user_id), reason, message_text, moderator, "legacy_json", "active", int(created_at), legacy_key))
+        if close_conn and conn:
+            conn.commit()
+    except Exception as e:
+        print(f"Warning migration error: {e}")
+    finally:
+        if close_conn and conn:
+            conn.close()
+
+
+def record_warning_history(user_id, reason, message_text, moderator, source="bot"):
+    created_at = int(time.time())
+    legacy_key = make_warning_legacy_key(user_id, reason, message_text, created_at)
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO warning_history
+            (user_id, reason, message, moderator, source, status, created_at, legacy_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (int(user_id), str(reason), str(message_text), str(moderator), str(source), "active", created_at, legacy_key))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Warning history insert error: {e}")
+
+
+def get_warning_history(user_id=None, status="all", limit=100):
+    rows = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        query = "SELECT id, user_id, reason, message, moderator, source, status, created_at, cleared_at, cleared_by, clear_reason FROM warning_history"
+        clauses = []
+        params = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(int(user_id))
+        if status in ("active", "cleared"):
+            clauses.append("status = ?")
+            params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        cur.execute(query, tuple(params))
+        for row in cur.fetchall():
+            rows.append({
+                "id": row[0], "user_id": row[1], "reason": row[2], "message": row[3],
+                "moderator": row[4], "source": row[5], "status": row[6], "created_at": row[7],
+                "cleared_at": row[8], "cleared_by": row[9], "clear_reason": row[10]
+            })
+        conn.close()
+    except Exception as e:
+        print(f"Get warning history error: {e}")
+    return rows
+
+
+def get_active_warning_count(user_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM warning_history WHERE user_id = ? AND status = 'active'", (int(user_id),))
+        count = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return count
+    except:
+        return len(warnings.get(str(user_id), []))
+
+
+def get_warning_summary_counts():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM warning_history WHERE status = 'active'")
+        active = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM warning_history WHERE status = 'cleared'")
+        cleared = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM warning_history WHERE status = 'active'")
+        active_users = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(DISTINCT user_id) FROM warning_history")
+        total_users = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return active, cleared, active_users, total_users
+    except:
+        return 0, 0, 0, 0
+
+
+def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manual clear"):
+    user_id = int(user_id)
+    active_before = get_active_warning_count(user_id)
+    warnings[str(user_id)] = []
+    save_warnings()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE warning_history
+            SET status = 'cleared', cleared_at = ?, cleared_by = ?, clear_reason = ?
+            WHERE user_id = ? AND status = 'active'
+        """, (int(time.time()), str(cleared_by), str(clear_reason), user_id))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Clear warning history error: {e}")
+    return active_before
+
+
 def add_warning(member, reason, message_text, moderator):
     user_id = str(member.id)
 
     if user_id not in warnings:
         warnings[user_id] = []
 
-    warnings[user_id].append({
+    warn_record = {
         "reason": reason,
         "message": message_text,
         "moderator": moderator,
         "time": discord.utils.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    })
+    }
 
+    warnings[user_id].append(warn_record)
     save_warnings()
-    return len(warnings[user_id])
+    record_warning_history(member.id, reason, message_text, moderator, source="bot")
+    return get_active_warning_count(member.id)
 
 
 async def apply_punishment(member, channel, count):
@@ -3551,7 +3720,8 @@ def dashboard_latest_level_rows(limit=25):
 def dashboard_user_profile(user_id):
     balance = get_balance(int(user_id))
     xp, level = get_level_data(int(user_id))
-    user_warnings = warnings.get(str(user_id), [])
+    active_warnings = get_warning_history(user_id=int(user_id), status="active", limit=50)
+    warning_history = get_warning_history(user_id=int(user_id), status="all", limit=100)
     member = dashboard_get_member_sync(user_id)
     return {
         "user_id": int(user_id),
@@ -3560,7 +3730,8 @@ def dashboard_user_profile(user_id):
         "balance": balance,
         "xp": xp,
         "level": level,
-        "warnings": user_warnings,
+        "warnings": active_warnings,
+        "warning_history": warning_history,
         "roles": [r.name for r in member.roles if r.name != "@everyone"] if member else [],
         "joined_at": int(member.joined_at.timestamp()) if member and member.joined_at else None,
     }
@@ -3963,6 +4134,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/shop">🛒 Shop</a>
       <a class="navitem" href="/dashboard/events">🎉 Events</a>
       <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
+      <a class="navitem" href="/dashboard/warnings">⚠️ Warnings</a>
       <a class="navitem" href="/dashboard/memory">💾 Memory</a>
       <a class="navitem" href="/dashboard/control">🛡️ Control Center</a>
       <a class="navitem" href="/dashboard/audit">🕵️ Audit Center</a>
@@ -4251,11 +4423,20 @@ def dashboard_user_page():
         try:
             profile = dashboard_user_profile(int(user_id))
             warns = profile['warnings']
-            warn_rows = "".join([f"<tr><td>{clean_text(w.get('time',''),80)}</td><td>{clean_text(w.get('reason',''),120)}</td><td>{clean_text(w.get('message',''),160)}</td></tr>" for w in warns[-10:]]) or "<tr><td colspan='3'>No warnings</td></tr>"
+            history = profile.get('warning_history', [])
+            warn_rows = "".join([
+                f"<tr><td><span class='pill {'ok' if w.get('status')=='cleared' else 'bad'}'>{clean_text(w.get('status',''),40)}</span></td>"
+                f"<td><t:{int(w.get('created_at') or 0)}:R></td>"
+                f"<td>{clean_text(w.get('reason',''),140)}</td>"
+                f"<td>{clean_text(w.get('message',''),180)}</td>"
+                f"<td>{clean_text(w.get('moderator',''),120)}</td>"
+                f"<td>{clean_text(w.get('cleared_by',''),100)}</td></tr>"
+                for w in history[:20]
+            ]) or "<tr><td colspan='6'>No warning history</td></tr>"
             roles = ", ".join(profile['roles'][:18]) if profile['roles'] else "No roles / not cached"
             profile_html = f'''
-            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Warnings:</b> {len(warns)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form></div></div>
-            <div style="height:14px"></div><div class="card"><h3>⚠️ Last Warnings</h3><table class="table"><tr><th>Time</th><th>Reason</th><th>Message</th></tr>{warn_rows}</table></div>
+            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Active Warnings:</b> {len(warns)} • <b>Total History:</b> {len(history)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form><hr><form method="post" action="/dashboard/warnings/clear"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Clear Reason</label><input name="reason" value="Cleared from user profile"><div style="height:10px"></div><button class="btn red">Clear Active Warnings</button></form></div></div>
+            <div style="height:14px"></div><div class="card"><h3>⚠️ Warning History</h3><table class="table"><tr><th>Status</th><th>Time</th><th>Reason</th><th>Message</th><th>By</th><th>Cleared By</th></tr>{warn_rows}</table><p class="muted small">يعرض آخر 20 إنذار، وحتى الإنذارات المتصفرة مستقبلاً.</p></div>
             '''
         except Exception as e:
             profile_html = f"<div class='toast bad'>User lookup failed: {clean_text(str(e), 250)}</div>"
@@ -4265,6 +4446,78 @@ def dashboard_user_page():
     {profile_html}
     '''
     return render_dashboard_page("User Lookup", body)
+
+
+def dashboard_warning_table_rows(rows):
+    if not rows:
+        return "<tr><td colspan='8'>No warnings found</td></tr>"
+    html = ""
+    for w in rows:
+        status = clean_text(w.get("status", ""), 40)
+        pill = "ok" if status == "cleared" else "bad"
+        created = int(w.get("created_at") or 0)
+        cleared_at = int(w.get("cleared_at") or 0)
+        cleared_text = f"<t:{cleared_at}:R>" if cleared_at else "-"
+        html += (
+            f"<tr>"
+            f"<td><span class='pill {pill}'>{status}</span></td>"
+            f"<td>{dashboard_member_name(w.get('user_id'))}<br><span class='muted small'>{int(w.get('user_id') or 0)}</span></td>"
+            f"<td><t:{created}:R></td>"
+            f"<td>{clean_text(w.get('reason',''),180)}</td>"
+            f"<td>{clean_text(w.get('message',''),220)}</td>"
+            f"<td>{clean_text(w.get('moderator',''),140)}</td>"
+            f"<td>{cleared_text}<br><span class='muted small'>{clean_text(w.get('cleared_by',''),120)}</span></td>"
+            f"<td>{clean_text(w.get('clear_reason',''),160)}</td>"
+            f"</tr>"
+        )
+    return html
+
+
+@app.route("/dashboard/warnings", methods=["GET"])
+def dashboard_warnings_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    status = request.args.get("status", "active").strip().lower()
+    if status not in ("active", "cleared", "all"):
+        status = "active"
+    user_id_raw = request.args.get("user_id", "").strip()
+    uid = int(user_id_raw) if user_id_raw.isdigit() else None
+    active, cleared, active_users, total_users = get_warning_summary_counts()
+    rows = get_warning_history(user_id=uid, status=status, limit=250)
+    table = dashboard_warning_table_rows(rows)
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="grid4">
+      <div class="card stat"><div class="icon">⚠️</div><div class="num">{fmt_num(active)}</div><div class="label">Active Warnings</div></div>
+      <div class="card stat"><div class="icon">✅</div><div class="num">{fmt_num(cleared)}</div><div class="label">Cleared Warnings</div></div>
+      <div class="card stat"><div class="icon">👥</div><div class="num">{fmt_num(active_users)}</div><div class="label">Users with Active</div></div>
+      <div class="card stat"><div class="icon">📚</div><div class="num">{fmt_num(total_users)}</div><div class="label">Users in History</div></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🔎 Warning Filters</h3><form method="get" action="/dashboard/warnings" class="grid3"><div><label>Status</label><select name="status"><option value="active" {'selected' if status=='active' else ''}>Active only</option><option value="cleared" {'selected' if status=='cleared' else ''}>Cleared only</option><option value="all" {'selected' if status=='all' else ''}>All history</option></select></div><div><label>User ID</label><input name="user_id" value="{clean_text(user_id_raw,80)}" placeholder="Optional"></div><div><label>&nbsp;</label><button class="btn primary">Apply Filter</button></div></form></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🧹 Clear User Warnings</h3><form method="post" action="/dashboard/warnings/clear" class="grid3"><div><label>User ID</label><input name="user_id" required placeholder="Discord user ID"></div><div><label>Reason</label><input name="reason" value="Dashboard clear"></div><div><label>&nbsp;</label><button class="btn red">Clear Active Warnings</button></div></form></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>⚠️ Warning History</h3><table class="table"><tr><th>Status</th><th>User</th><th>Time</th><th>Reason</th><th>Message</th><th>By</th><th>Cleared</th><th>Clear Reason</th></tr>{table}</table><p class="muted small">من الآن أي تصفير ما ينحذف؛ يتحول إلى Cleared ويبقى هنا.</p></div>
+    '''
+    return render_dashboard_page("Warnings", body)
+
+
+@app.route("/dashboard/warnings/clear", methods=["POST"])
+def dashboard_clear_warnings():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    user_id = request.form.get("user_id", "").strip()
+    reason = request.form.get("reason", "Dashboard clear").strip() or "Dashboard clear"
+    if not user_id.isdigit():
+        return redirect("/dashboard/warnings?err=" + urllib.parse.quote("Invalid user ID"))
+    admin = session.get("discord_user") or {}
+    admin_name = admin.get("username", "Dashboard Admin")
+    cleared = clear_warnings_for_user(int(user_id), cleared_by=f"{admin_name} ({admin.get('id','0')})", clear_reason=reason)
+    dashboard_log_action("Cleared warnings", f"user_id={user_id} | count={cleared} | reason={reason}", admin)
+    return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(user_id) + "&msg=" + urllib.parse.quote(f"Cleared {cleared} active warnings."))
 
 
 @app.route("/dashboard/memory", methods=["GET"])
@@ -6878,13 +7131,16 @@ async def warnings_count(ctx, member: discord.Member):
 @bot.command(name="تصفير", aliases=["resetwarnings"])
 @commands.has_permissions(administrator=True)
 async def reset_warnings(ctx, member: discord.Member):
-    warnings[str(member.id)] = []
-    save_warnings()
+    cleared_count = clear_warnings_for_user(
+        member.id,
+        cleared_by=f"{ctx.author} ({ctx.author.id})",
+        clear_reason="Discord command resetwarnings"
+    )
 
     await ctx.send(
         embed=discord.Embed(
             title="✅ تم التصفير",
-            description=f"تم تصفير تحذيرات {member.mention}.",
+            description=f"تم تصفير تحذيرات {member.mention} وحفظها في سجل الداشبورد.\n**العدد:** `{cleared_count}`",
             color=COLOR_GREEN
         )
     )
@@ -6892,7 +7148,7 @@ async def reset_warnings(ctx, member: discord.Member):
     await send_log(
         ctx.guild,
         "✅ تصفير تحذيرات",
-        f"**بواسطة:** {ctx.author.mention}\n**العضو:** {member.mention}",
+        f"**بواسطة:** {ctx.author.mention}\n**العضو:** {member.mention}\n**عدد الإنذارات:** `{cleared_count}`\n**ملاحظة:** تم حفظها في Warning History.",
         COLOR_GREEN,
         log_type="moderation"
     )
