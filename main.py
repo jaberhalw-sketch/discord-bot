@@ -56,6 +56,7 @@ DM_COMMANDS_ENABLED = False
 DB_FILE = "nm_system.db"
 WARNINGS_FILE = "warnings.json"
 LOG_CHANNELS_FILE = "log_channels.json"
+DASHBOARD_SETTINGS_FILE = "dashboard_settings.json"
 
 PREFIX = "!"
 
@@ -73,7 +74,7 @@ HOURLY_REWARD_COOLDOWN_SECONDS = 60 * 60
 MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V2"
 MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
 MEMORY_BACKUP_HISTORY_LIMIT = 100
-MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE]
+MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE, DASHBOARD_SETTINGS_FILE]
 
 COIN_NAME = "Retard coin"
 MESSAGE_COIN_COOLDOWN = 60
@@ -2328,7 +2329,141 @@ def dashboard_memory_summary():
     return rows
 
 
-DASHBOARD_BASE_TEMPLATE = '''
+
+
+def fmt_num(value):
+    try:
+        return f"{int(value):,}"
+    except:
+        return str(value)
+
+
+def fmt_coin(value):
+    return f"🪙 {fmt_num(value)} {COIN_NAME}"
+
+
+def parse_int_field(value, default=0, minimum=None):
+    try:
+        n = int(str(value).replace(",", "").strip())
+    except:
+        n = default
+    if minimum is not None and n < minimum:
+        n = minimum
+    return n
+
+
+def dashboard_toast_html():
+    msg = request.args.get("msg", "")
+    err = request.args.get("err", "")
+    if msg:
+        return f'<div class="toast ok">✅ {clean_text(msg, 260)}</div>'
+    if err:
+        return f'<div class="toast bad">❌ {clean_text(err, 260)}</div>'
+    return ""
+
+
+def dashboard_table_exists(table_name):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table_name,))
+        exists = cur.fetchone() is not None
+        conn.close()
+        return exists
+    except:
+        return False
+
+
+def dashboard_latest_economy_rows(limit=25):
+    rows = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, balance, last_daily FROM economy ORDER BY balance DESC LIMIT ?", (int(limit),))
+        for user_id, balance, last_daily in cur.fetchall():
+            rows.append({
+                "user_id": int(user_id),
+                "name": dashboard_member_name(user_id),
+                "balance": int(balance or 0),
+                "last_daily": int(last_daily or 0),
+            })
+        conn.close()
+    except:
+        pass
+    return rows
+
+
+def dashboard_latest_level_rows(limit=25):
+    rows = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, xp, level FROM levels ORDER BY level DESC, xp DESC LIMIT ?", (int(limit),))
+        for user_id, xp, level in cur.fetchall():
+            rows.append({
+                "user_id": int(user_id),
+                "name": dashboard_member_name(user_id),
+                "xp": int(xp or 0),
+                "level": int(level or 1),
+            })
+        conn.close()
+    except:
+        pass
+    return rows
+
+
+def dashboard_user_profile(user_id):
+    balance = get_balance(int(user_id))
+    xp, level = get_level_data(int(user_id))
+    user_warnings = warnings.get(str(user_id), [])
+    member = dashboard_get_member_sync(user_id)
+    return {
+        "user_id": int(user_id),
+        "name": str(member) if member else f"User {user_id}",
+        "avatar": member.display_avatar.url if member else "",
+        "balance": balance,
+        "xp": xp,
+        "level": level,
+        "warnings": user_warnings,
+        "roles": [r.name for r in member.roles if r.name != "@everyone"] if member else [],
+        "joined_at": int(member.joined_at.timestamp()) if member and member.joined_at else None,
+    }
+
+
+def dashboard_load_settings_file():
+    try:
+        with open(DASHBOARD_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except:
+        return {}
+
+
+def dashboard_save_settings_file(data):
+    with open(DASHBOARD_SETTINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+
+
+def dashboard_apply_saved_settings():
+    global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
+    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    data = dashboard_load_settings_file()
+    if not data:
+        return
+    COMMANDS_CHANNEL_ID = parse_int_field(data.get("COMMANDS_CHANNEL_ID", COMMANDS_CHANNEL_ID), COMMANDS_CHANNEL_ID, 1)
+    GAMBLING_CHANNEL_ID = parse_int_field(data.get("GAMBLING_CHANNEL_ID", GAMBLING_CHANNEL_ID), GAMBLING_CHANNEL_ID, 1)
+    MEMORY_BACKUP_CHANNEL_ID = parse_int_field(data.get("MEMORY_BACKUP_CHANNEL_ID", MEMORY_BACKUP_CHANNEL_ID), MEMORY_BACKUP_CHANNEL_ID, 1)
+    GAMBLE_COOLDOWN_SECONDS = parse_int_field(data.get("GAMBLE_COOLDOWN_SECONDS", GAMBLE_COOLDOWN_SECONDS), GAMBLE_COOLDOWN_SECONDS, 0)
+    ECONOMY_EXPLAIN_INTERVAL_SECONDS = parse_int_field(data.get("ECONOMY_EXPLAIN_INTERVAL_SECONDS", ECONOMY_EXPLAIN_INTERVAL_SECONDS), ECONOMY_EXPLAIN_INTERVAL_SECONDS, 60)
+    BOOSTER_WEEKLY_REWARD = parse_int_field(data.get("BOOSTER_WEEKLY_REWARD", BOOSTER_WEEKLY_REWARD), BOOSTER_WEEKLY_REWARD, 0)
+    if str(data.get("COIN_NAME", "")).strip():
+        COIN_NAME = str(data.get("COIN_NAME")).strip()[:40]
+
+
+dashboard_apply_saved_settings()
+
+
+DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
 <html lang="en">
 <head>
@@ -2336,11 +2471,51 @@ DASHBOARD_BASE_TEMPLATE = '''
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} • {{ brand }}</title>
   <style>
-    :root{--panel:#121826;--panel2:#171f31;--text:#f4f7fb;--muted:#9aa8bd;--line:#27334a;--blue:#5865f2;--green:#22c55e;--red:#ef4444}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top,#18223a 0,#0b0f18 42%,#070a10 100%);font-family:Inter,Arial,sans-serif;color:var(--text)}a{color:inherit;text-decoration:none}.wrap{max-width:1180px;margin:0 auto;padding:24px}.nav{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px}.logo{width:44px;height:44px;border-radius:15px;background:linear-gradient(135deg,var(--blue),#9333ea);display:grid;place-items:center;font-size:24px;box-shadow:0 12px 30px #0008}.brand h1{font-size:22px;margin:0}.brand p{margin:4px 0 0;color:var(--muted);font-size:13px}.navlinks{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:var(--panel2);padding:10px 14px;border-radius:12px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:700}.btn.primary{background:var(--blue);border-color:var(--blue)}.btn.green{background:#14532d;border-color:#166534}.btn:hover{filter:brightness(1.12)}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.card{background:linear-gradient(180deg,var(--panel),#0f1522);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 20px 45px #0005}.card h2,.card h3{margin:0 0 12px}.stat .num{font-size:28px;font-weight:900}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.danger{border-color:#7f1d1d}.table{width:100%;border-collapse:collapse}.table th,.table td{border-bottom:1px solid var(--line);padding:10px;text-align:left}.table th{color:var(--muted);font-size:12px;text-transform:uppercase}.pill{display:inline-flex;padding:5px 9px;border-radius:999px;background:#1e293b;color:#dbeafe;font-size:12px;font-weight:800}.pill.ok{background:#14532d;color:#dcfce7}.pill.bad{background:#7f1d1d;color:#fee2e2}.forms{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:var(--panel2);border:1px solid var(--line);border-radius:18px;padding:14px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px}input,select{width:100%;background:#090d16;color:var(--text);border:1px solid var(--line);border-radius:12px;padding:11px}.msg{padding:12px 14px;border-radius:14px;border:1px solid var(--line);background:#111827;margin-bottom:14px}.muted{color:var(--muted)}.footer{color:var(--muted);font-size:12px;margin-top:24px;text-align:center}@media(max-width:900px){.grid,.grid2,.forms{grid-template-columns:1fr}.nav{align-items:flex-start;flex-direction:column}}
+    :root{
+      --bg:#070a12;--bg2:#0b1020;--panel:rgba(18,24,38,.78);--panel2:rgba(23,31,49,.82);
+      --text:#f7fbff;--muted:#92a0b8;--line:rgba(148,163,184,.18);--blue:#5865f2;--purple:#8b5cf6;
+      --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4;--shadow:0 24px 80px rgba(0,0,0,.42)
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;min-height:100vh;background:
+      radial-gradient(circle at 15% -10%,rgba(88,101,242,.35),transparent 35%),
+      radial-gradient(circle at 85% 0%,rgba(139,92,246,.22),transparent 30%),
+      linear-gradient(180deg,#090e1b 0%,#070a12 100%);font-family:Inter,ui-sans-serif,system-ui,Arial,sans-serif;color:var(--text)}
+    a{color:inherit;text-decoration:none} code{background:rgba(15,23,42,.9);border:1px solid var(--line);padding:3px 7px;border-radius:9px;color:#dbeafe}
+    .layout{display:grid;grid-template-columns:278px 1fr;min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px;border-right:1px solid var(--line);background:rgba(7,10,18,.68);backdrop-filter:blur(18px)}
+    .brand{display:flex;align-items:center;gap:12px;margin-bottom:24px}.logo{width:48px;height:48px;border-radius:18px;background:linear-gradient(135deg,var(--blue),var(--purple));display:grid;place-items:center;font-size:25px;box-shadow:0 18px 45px rgba(88,101,242,.25)}
+    .brand h1{font-size:20px;margin:0;letter-spacing:.2px}.brand p{margin:4px 0 0;color:var(--muted);font-size:12px}.navlist{display:grid;gap:8px}.navitem{display:flex;align-items:center;gap:10px;padding:12px 13px;border:1px solid transparent;border-radius:15px;color:#c8d2e4;font-weight:800}.navitem:hover,.navitem.active{background:rgba(88,101,242,.14);border-color:rgba(88,101,242,.26);color:#fff}.navfoot{position:absolute;bottom:20px;left:20px;right:20px;color:var(--muted);font-size:12px}
+    .main{padding:24px;max-width:1380px;width:100%;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:14px}.headline h2{font-size:30px;margin:0}.headline p{color:var(--muted);margin:6px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(23,31,49,.92);padding:10px 14px;border-radius:14px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:900;box-shadow:0 10px 30px rgba(0,0,0,.14)}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel),rgba(13,19,33,.9));border:1px solid var(--line);border-radius:24px;padding:18px;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.card h3{margin:0 0 13px;font-size:17px}.stat{position:relative;overflow:hidden}.stat:after{content:"";position:absolute;right:-18px;top:-18px;width:90px;height:90px;border-radius:999px;background:rgba(88,101,242,.16)}.stat .icon{font-size:23px}.stat .num{font-size:32px;font-weight:1000;margin-top:10px}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.muted{color:var(--muted)}.small{font-size:12px}.toast{padding:13px 15px;border-radius:16px;border:1px solid var(--line);margin-bottom:14px;font-weight:850}.toast.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.3)}.toast.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+    .table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px}.table td{padding:12px 10px;background:rgba(15,23,42,.55);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.2)}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}
+    .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:20px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:800}input,select{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:12px;outline:none}input:focus,select:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}
+    @media(max-width:1000px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.navfoot{position:static;margin-top:16px}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:24px}}
   </style>
 </head>
-<body><div class="wrap"><div class="nav"><div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Discord OAuth Admin Dashboard</p></div></div><div class="navlinks">{% if user %}<span class="btn">👤 {{ user.get('username') }}</span><a class="btn" href="/dashboard">Dashboard</a><a class="btn" href="/logout">Logout</a>{% else %}<a class="btn primary" href="/login">Login with Discord</a>{% endif %}</div></div>{{ body|safe }}<div class="footer">{{ brand }} • Protected by Discord OAuth</div></div></body></html>
+<body>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Discord OAuth Admin Dashboard</p></div></div>
+    <nav class="navlist">
+      <a class="navitem" href="/dashboard">🏠 Overview</a>
+      <a class="navitem" href="/dashboard/economy">🪙 Economy</a>
+      <a class="navitem" href="/dashboard/levels">📊 Levels</a>
+      <a class="navitem" href="/dashboard/casino">🎰 Casino</a>
+      <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
+      <a class="navitem" href="/dashboard/memory">💾 Memory</a>
+      <a class="navitem" href="/dashboard/settings">⚙️ Settings</a>
+      <a class="navitem" href="/oauth_debug">🧪 OAuth Debug</a>
+    </nav>
+    <div class="navfoot">{% if user %}<div class="pill">👤 {{ user.get('username') }}</div><div style="height:8px"></div><a class="btn" href="/logout">Logout</a>{% else %}<a class="btn primary" href="/login">Login with Discord</a>{% endif %}</div>
+  </aside>
+  <main class="main">
+    <div class="topbar"><div class="headline"><h2>{{ title }}</h2><p>Fast control panel for economy, levels, memory and casino.</p></div><div class="actions"><a class="btn" href="/">Status</a>{% if user %}<a class="btn primary" href="/dashboard">Dashboard</a>{% else %}<a class="btn primary" href="/login">Login</a>{% endif %}</div></div>
+    {{ body|safe }}
+    <div class="footer">{{ brand }} • Protected by Discord OAuth</div>
+  </main>
+</div>
+</body>
+</html>
 '''
 
 
@@ -2350,14 +2525,19 @@ def render_dashboard_page(title, body, status=200):
 
 @app.route("/")
 def home():
-    body = '<div class="card"><h2>✅ NM System Online</h2><p class="muted">البوت شغال. استخدم الداشبورد للإدارة من المتصفح.</p><a class="btn primary" href="/login">Login with Discord</a></div>'
+    body = '''
+    <div class="hero">
+      <div class="card"><div class="big">✅ System Online</div><p class="muted">البوت شغال والداشبورد جاهز للإدارة. سجل دخولك بـ Discord OAuth.</p><div style="height:12px"></div><a class="btn primary" href="/login">Login with Discord</a></div>
+      <div class="card"><h3>🔐 Security</h3><p class="muted">Access is limited to server owner, Administrator permission, or configured admin roles.</p><span class="pill ok">OAuth Protected</span></div>
+    </div>
+    '''
     return render_dashboard_page("Online", body)
 
 
 @app.route("/login")
 def dashboard_login():
     if not DISCORD_CLIENT_ID or not DISCORD_CLIENT_SECRET or not DASHBOARD_BASE_URL:
-        body = '<div class="card danger"><h2>⚠️ Dashboard Variables Missing</h2><p>تأكد أنك حاط المتغيرات في Railway:</p><p><code>DISCORD_CLIENT_ID</code>, <code>DISCORD_CLIENT_SECRET</code>, <code>DASHBOARD_SECRET_KEY</code>, <code>DASHBOARD_BASE_URL</code></p></div>'
+        body = '<div class="card danger"><h3>⚠️ Dashboard Variables Missing</h3><p>تأكد أنك حاط المتغيرات في Railway:</p><p><code>DISCORD_CLIENT_ID</code>, <code>DISCORD_CLIENT_SECRET</code>, <code>DASHBOARD_SECRET_KEY</code>, <code>DASHBOARD_BASE_URL</code></p></div>'
         return render_dashboard_page("Setup Required", body, status=500)
     return redirect(dashboard_auth_url())
 
@@ -2366,13 +2546,13 @@ def dashboard_login():
 def dashboard_callback():
     code = request.args.get("code")
     if not code:
-        return render_dashboard_page("OAuth Error", "<div class='card danger'><h2>OAuth Error</h2><p>Discord ما رجع code.</p></div>", status=400)
+        return render_dashboard_page("OAuth Error", "<div class='card danger'><h3>OAuth Error</h3><p>Discord ما رجع code.</p></div>", status=400)
     try:
         token_data = oauth_post_token(code)
         user = oauth_get_user(token_data["access_token"])
         session["discord_user"] = {"id": user.get("id"), "username": user.get("username"), "global_name": user.get("global_name"), "avatar": user.get("avatar")}
     except Exception as e:
-        return render_dashboard_page("OAuth Error", f"<div class='card danger'><h2>OAuth Failed</h2><p>{clean_text(str(e), 600)}</p></div>", status=500)
+        return render_dashboard_page("OAuth Error", f"<div class='card danger'><h3>OAuth Failed</h3><p>{clean_text(str(e), 600)}</p></div>", status=500)
     return redirect("/dashboard")
 
 
@@ -2382,21 +2562,19 @@ def dashboard_logout():
     return redirect("/")
 
 
-
 @app.route("/oauth_debug")
 def dashboard_oauth_debug():
-    body = f"""
+    body = f'''
     <div class='card'>
-      <h2>OAuth Debug</h2>
+      <h3>OAuth Debug</h3>
       <p><b>Client ID:</b> <code>{clean_text(DISCORD_CLIENT_ID or 'MISSING', 200)}</code></p>
-      <p><b>Client Secret:</b> <code>{'SET' if DISCORD_CLIENT_SECRET else 'MISSING'}</code></p>
+      <p><b>Client Secret:</b> <span class='pill {'ok' if DISCORD_CLIENT_SECRET else 'bad'}'>{'SET' if DISCORD_CLIENT_SECRET else 'MISSING'}</span></p>
       <p><b>Base URL:</b> <code>{clean_text(DASHBOARD_BASE_URL or 'MISSING', 300)}</code></p>
       <p><b>Redirect URI used by code:</b> <code>{clean_text(dashboard_redirect_uri() or 'MISSING', 300)}</code></p>
-      <p><b>Required Redirect in Discord:</b> <code>{clean_text(dashboard_redirect_uri() or 'MISSING', 300)}</code></p>
       <p><b>Scope:</b> <code>identify guilds</code></p>
-      <a class='btn' href='/login'>Test Login</a>
+      <a class='btn primary' href='/login'>Test Login</a>
     </div>
-    """
+    '''
     return render_dashboard_page("OAuth Debug", body)
 
 
@@ -2411,38 +2589,178 @@ def dashboard_home():
     total_coins = dashboard_total_coins()
     total_warnings = safe_len_json(WARNINGS_FILE)
     log_rooms = safe_len_json(LOG_CHANNELS_FILE)
-    top_money = dashboard_money_rows(10)
-    top_levels = dashboard_level_rows(10)
+    top_money = dashboard_money_rows(8)
+    top_levels = dashboard_level_rows(8)
     memory = dashboard_memory_summary()
-    msg = request.args.get("msg", "")
-    money_rows = "".join([f"<tr><td>#{r['rank']}</td><td>{r['name']}<br><span class='muted'>{r['user_id']}</span></td><td>🪙 {r['balance']:,}</td></tr>" for r in top_money]) or "<tr><td colspan='3'>No data</td></tr>"
-    level_rows = "".join([f"<tr><td>#{r['rank']}</td><td>{r['name']}<br><span class='muted'>{r['user_id']}</span></td><td>Lv.{r['level']} • XP {r['xp']:,}</td></tr>" for r in top_levels]) or "<tr><td colspan='3'>No data</td></tr>"
-    memory_rows_parts = []
-    for m in memory:
-        css = "ok" if m["badge"] == "OK" else "bad"
-        memory_rows_parts.append(f"<tr><td>{m['file']}</td><td><span class='pill {css}'>{m['badge']}</span></td><td>{m['size']} KB</td></tr>")
-    memory_rows = "".join(memory_rows_parts)
-    msg_html = f'<div class="msg">✅ {clean_text(msg, 200)}</div>' if msg else ''
+    money_rows = "".join([f"<tr><td><span class='pill gold'>#{r['rank']}</span></td><td>{r['name']}<br><span class='muted small'>{r['user_id']}</span></td><td>{fmt_coin(r['balance'])}</td></tr>" for r in top_money]) or "<tr><td colspan='3'>No data</td></tr>"
+    level_rows = "".join([f"<tr><td><span class='pill gold'>#{r['rank']}</span></td><td>{r['name']}<br><span class='muted small'>{r['user_id']}</span></td><td>Lv.{r['level']} • XP {fmt_num(r['xp'])}</td></tr>" for r in top_levels]) or "<tr><td colspan='3'>No data</td></tr>"
+    memory_ok = sum(1 for m in memory if m['badge'] == 'OK')
     body = f'''
-    {msg_html}
+    {dashboard_toast_html()}
+    <div class="hero"><div class="card"><div class="big">Retards System</div><p class="muted">Control economy, levels, memory backups, casino and server utilities from one protected dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
     <div class="grid">
-      <div class="card stat"><div class="num">{economy_users:,}</div><div class="label">Economy users</div></div>
-      <div class="card stat"><div class="num">{total_coins:,}</div><div class="label">Total {COIN_NAME}</div></div>
-      <div class="card stat"><div class="num">{level_users:,}</div><div class="label">Level users</div></div>
-      <div class="card stat"><div class="num">{total_warnings:,}</div><div class="label">Warning users • Logs {log_rooms}</div></div>
+      <div class="card stat"><div class="icon">🪙</div><div class="num">{fmt_num(economy_users)}</div><div class="label">Economy users</div></div>
+      <div class="card stat"><div class="icon">💰</div><div class="num">{fmt_num(total_coins)}</div><div class="label">Total {COIN_NAME}</div></div>
+      <div class="card stat"><div class="icon">📊</div><div class="num">{fmt_num(level_users)}</div><div class="label">Level users</div></div>
+      <div class="card stat"><div class="icon">⚠️</div><div class="num">{fmt_num(total_warnings)}</div><div class="label">Warning users • Logs {fmt_num(log_rooms)}</div></div>
     </div>
     <div style="height:14px"></div>
-    <div class="grid2"><div class="card"><h3>🪙 Top Money</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Balance</th></tr>{money_rows}</table></div><div class="card"><h3>🏆 Top Levels</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Level</th></tr>{level_rows}</table></div></div>
+    <div class="grid2"><div class="card"><h3>🪙 Richest Members</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Balance</th></tr>{money_rows}</table></div><div class="card"><h3>🏆 Highest Levels</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Level</th></tr>{level_rows}</table></div></div>
     <div style="height:14px"></div>
-    <div class="card"><h3>⚡ Quick Actions</h3><div class="forms">
-      <form class="formbox" method="post" action="/dashboard/economy"><h3>Money Control</h3><label>User ID</label><input name="user_id" placeholder="Discord user ID" required><label>Amount</label><input name="amount" placeholder="5000" required><label>Action</label><select name="action"><option value="add">Add Money</option><option value="remove">Remove Money</option><option value="set">Set Balance</option></select><div style="height:10px"></div><button class="btn green" type="submit">Apply</button></form>
-      <form class="formbox" method="post" action="/dashboard/levels"><h3>Level Control</h3><label>User ID</label><input name="user_id" placeholder="Discord user ID" required><label>Amount / Value</label><input name="amount" placeholder="100" required><label>Action</label><select name="action"><option value="add_xp">Add XP</option><option value="set_level">Set Level</option><option value="set_xp">Set XP</option></select><div style="height:10px"></div><button class="btn green" type="submit">Apply</button></form>
-      <form class="formbox" method="post" action="/dashboard/backup"><h3>Memory Backup</h3><p class="muted">يرسل نسخة حفظ في روم الذاكرة.</p><button class="btn primary" type="submit">💾 Create Backup</button></form>
-    </div></div>
-    <div style="height:14px"></div>
-    <div class="grid2"><div class="card"><h3>💾 Memory Status</h3><table class="table"><tr><th>File</th><th>Status</th><th>Size</th></tr>{memory_rows}</table></div><div class="card"><h3>⚙️ Settings View</h3><p><span class="pill">Commands</span> <code>{COMMANDS_CHANNEL_ID}</code></p><p><span class="pill">Gambling</span> <code>{GAMBLING_CHANNEL_ID}</code></p><p><span class="pill">Memory</span> <code>{MEMORY_BACKUP_CHANNEL_ID}</code></p><p><span class="pill">Guide</span> every <code>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS / 3600, 2)}</code> hours</p><p><span class="pill">Gamble cooldown</span> <code>{GAMBLE_COOLDOWN_SECONDS}s</code></p></div></div>
+    <div class="grid3">
+      <div class="card"><h3>🎰 Casino</h3><p class="muted">Gambling channel:</p><p><code>{GAMBLING_CHANNEL_ID}</code></p><p><span class="pill">Cooldown {GAMBLE_COOLDOWN_SECONDS}s</span></p><a class="btn" href="/dashboard/casino">Open Casino Page</a></div>
+      <div class="card"><h3>💾 Memory</h3><p class="muted">Backup channel:</p><p><code>{MEMORY_BACKUP_CHANNEL_ID}</code></p><form method="post" action="/dashboard/backup"><button class="btn primary" type="submit">Create Backup</button></form></div>
+      <div class="card"><h3>👤 User Lookup</h3><form method="get" action="/dashboard/user"><label>User ID</label><input name="user_id" placeholder="Discord user ID"><div style="height:10px"></div><button class="btn green">Search</button></form></div>
+    </div>
     '''
-    return render_dashboard_page("Dashboard", body)
+    return render_dashboard_page("Overview", body)
+
+
+@app.route("/dashboard/economy", methods=["GET"])
+def dashboard_economy_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    rows = dashboard_latest_economy_rows(25)
+    table = "".join([f"<tr><td>{r['name']}<br><span class='muted small'>{r['user_id']}</span></td><td>{fmt_coin(r['balance'])}</td><td>{('<t:'+str(r['last_daily'])+':R>') if r['last_daily'] else 'Never'}</td></tr>" for r in rows]) or "<tr><td colspan='3'>No data</td></tr>"
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="grid3">
+      <form class="card" method="post" action="/dashboard/economy"><h3>➕ Add Money</h3><label>User ID</label><input name="user_id" required><label>Amount</label><input name="amount" placeholder="5000" required><input type="hidden" name="action" value="add"><div style="height:10px"></div><button class="btn green">Add</button></form>
+      <form class="card" method="post" action="/dashboard/economy"><h3>➖ Remove Money</h3><label>User ID</label><input name="user_id" required><label>Amount</label><input name="amount" placeholder="5000" required><input type="hidden" name="action" value="remove"><div style="height:10px"></div><button class="btn red">Remove</button></form>
+      <form class="card" method="post" action="/dashboard/economy"><h3>🎯 Set Balance</h3><label>User ID</label><input name="user_id" required><label>New Balance</label><input name="amount" placeholder="100000" required><input type="hidden" name="action" value="set"><div style="height:10px"></div><button class="btn primary">Set</button></form>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🪙 Economy Leaderboard</h3><table class="table"><tr><th>User</th><th>Balance</th><th>Last Hourly</th></tr>{table}</table></div>
+    '''
+    return render_dashboard_page("Economy", body)
+
+
+@app.route("/dashboard/levels", methods=["GET"])
+def dashboard_levels_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    rows = dashboard_latest_level_rows(25)
+    table = "".join([f"<tr><td>{r['name']}<br><span class='muted small'>{r['user_id']}</span></td><td>Level {r['level']}</td><td>{fmt_num(r['xp'])} XP</td></tr>" for r in rows]) or "<tr><td colspan='3'>No data</td></tr>"
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="grid3">
+      <form class="card" method="post" action="/dashboard/levels"><h3>✨ Add XP</h3><label>User ID</label><input name="user_id" required><label>XP Amount</label><input name="amount" placeholder="100" required><input type="hidden" name="action" value="add_xp"><div style="height:10px"></div><button class="btn green">Add XP</button></form>
+      <form class="card" method="post" action="/dashboard/levels"><h3>🏆 Set Level</h3><label>User ID</label><input name="user_id" required><label>Level</label><input name="amount" placeholder="10" required><input type="hidden" name="action" value="set_level"><div style="height:10px"></div><button class="btn primary">Set Level</button></form>
+      <form class="card" method="post" action="/dashboard/levels"><h3>📊 Set XP</h3><label>User ID</label><input name="user_id" required><label>XP</label><input name="amount" placeholder="250" required><input type="hidden" name="action" value="set_xp"><div style="height:10px"></div><button class="btn primary">Set XP</button></form>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>📊 Level Leaderboard</h3><table class="table"><tr><th>User</th><th>Level</th><th>XP</th></tr>{table}</table></div>
+    '''
+    return render_dashboard_page("Levels", body)
+
+
+@app.route("/dashboard/casino", methods=["GET"])
+def dashboard_casino_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    body = f'''
+    <div class="grid">
+      <div class="card stat"><div class="icon">🎰</div><div class="num">∞</div><div class="label">No max bet</div></div>
+      <div class="card stat"><div class="icon">⏱️</div><div class="num">{GAMBLE_COOLDOWN_SECONDS}s</div><div class="label">Cooldown</div></div>
+      <div class="card stat"><div class="icon">📍</div><div class="num">Room</div><div class="label"><code>{GAMBLING_CHANNEL_ID}</code></div></div>
+      <div class="card stat"><div class="icon">🎴</div><div class="num">BJ</div><div class="label">Blackjack enabled</div></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🎲 Casino Games</h3><table class="table"><tr><th>Command</th><th>Game</th><th>Rules</th></tr><tr><td><code>!حظ amount</code></td><td>Lucky Roll</td><td>50/50 double or lose</td></tr><tr><td><code>!دبل amount</code></td><td>Double Risk</td><td>45% win, 55% lose</td></tr><tr><td><code>!سلوت amount</code></td><td>Slot Machine</td><td>2 match = x2, 3 match = x5</td></tr><tr><td><code>!وجه amount ملك/كتابة</code></td><td>Coin Flip</td><td>Guess the side</td></tr><tr><td><code>!بلاكجاك amount</code></td><td>Blackjack</td><td>Hit / Stand buttons</td></tr></table></div>
+    <div style="height:14px"></div>
+    <div class="card"><h3>🚧 Next Upgrade</h3><p class="muted">نقدر نضيف Casino History Table يخزن كل قمار: اللاعب، اللعبة، الرهان، الربح/الخسارة، الوقت. بعدها الصفحة هذي تعرض أكبر فوز وأكبر خسارة وأقوى مقامرين.</p></div>
+    '''
+    return render_dashboard_page("Casino", body)
+
+
+@app.route("/dashboard/user", methods=["GET"])
+def dashboard_user_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    user_id = request.args.get("user_id", "").strip()
+    profile_html = ""
+    if user_id:
+        try:
+            profile = dashboard_user_profile(int(user_id))
+            warns = profile['warnings']
+            warn_rows = "".join([f"<tr><td>{clean_text(w.get('time',''),80)}</td><td>{clean_text(w.get('reason',''),120)}</td><td>{clean_text(w.get('message',''),160)}</td></tr>" for w in warns[-10:]]) or "<tr><td colspan='3'>No warnings</td></tr>"
+            roles = ", ".join(profile['roles'][:18]) if profile['roles'] else "No roles / not cached"
+            profile_html = f'''
+            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Warnings:</b> {len(warns)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form></div></div>
+            <div style="height:14px"></div><div class="card"><h3>⚠️ Last Warnings</h3><table class="table"><tr><th>Time</th><th>Reason</th><th>Message</th></tr>{warn_rows}</table></div>
+            '''
+        except Exception as e:
+            profile_html = f"<div class='toast bad'>User lookup failed: {clean_text(str(e), 250)}</div>"
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="card"><h3>👤 User Lookup</h3><form method="get" action="/dashboard/user"><label>Discord User ID</label><input name="user_id" value="{clean_text(user_id, 80)}" placeholder="1125198908231004191"><div style="height:10px"></div><button class="btn primary">Search User</button></form></div>
+    {profile_html}
+    '''
+    return render_dashboard_page("User Lookup", body)
+
+
+@app.route("/dashboard/memory", methods=["GET"])
+def dashboard_memory_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    memory = dashboard_memory_summary()
+    rows = "".join([f"<tr><td>{m['file']}</td><td><span class='pill {'ok' if m['badge']=='OK' else 'bad'}'>{m['badge']}</span></td><td>{m['size']} KB</td></tr>" for m in memory])
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="grid2"><div class="card"><h3>💾 Memory Files</h3><table class="table"><tr><th>File</th><th>Status</th><th>Size</th></tr>{rows}</table></div><div class="card"><h3>Manual Backup</h3><p class="muted">يرسل ملفات الذاكرة + التقرير في روم الباك أب.</p><p><code>{MEMORY_BACKUP_CHANNEL_ID}</code></p><form method="post" action="/dashboard/backup"><button class="btn primary">💾 Create Backup Now</button></form></div></div>
+    '''
+    return render_dashboard_page("Memory", body)
+
+
+@app.route("/dashboard/settings", methods=["GET"])
+def dashboard_settings_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="card"><h3>⚙️ Runtime Settings</h3><p class="muted">التغييرات هنا تنحفظ في <code>{DASHBOARD_SETTINGS_FILE}</code> وتشتغل بعد الريستارت إذا الملف موجود.</p><form method="post" action="/dashboard/settings" class="formgrid"><div><label>Coin Name</label><input name="COIN_NAME" value="{clean_text(COIN_NAME, 40)}"></div><div><label>Commands Channel ID</label><input name="COMMANDS_CHANNEL_ID" value="{COMMANDS_CHANNEL_ID}"></div><div><label>Gambling Channel ID</label><input name="GAMBLING_CHANNEL_ID" value="{GAMBLING_CHANNEL_ID}"></div><div><label>Memory Backup Channel ID</label><input name="MEMORY_BACKUP_CHANNEL_ID" value="{MEMORY_BACKUP_CHANNEL_ID}"></div><div><label>Gamble Cooldown Seconds</label><input name="GAMBLE_COOLDOWN_SECONDS" value="{GAMBLE_COOLDOWN_SECONDS}"></div><div><label>Economy Guide Interval Hours</label><input name="ECONOMY_GUIDE_HOURS" value="{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}"></div><div><label>Booster Weekly Reward</label><input name="BOOSTER_WEEKLY_REWARD" value="{BOOSTER_WEEKLY_REWARD}"></div><div style="display:flex;align-items:end"><button class="btn primary" type="submit">Save Settings</button></div></form></div>
+    '''
+    return render_dashboard_page("Settings", body)
+
+
+@app.route("/dashboard/settings", methods=["POST"])
+def dashboard_settings_action():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
+    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    try:
+        COIN_NAME = str(request.form.get("COIN_NAME", COIN_NAME)).strip()[:40] or COIN_NAME
+        COMMANDS_CHANNEL_ID = parse_int_field(request.form.get("COMMANDS_CHANNEL_ID"), COMMANDS_CHANNEL_ID, 1)
+        GAMBLING_CHANNEL_ID = parse_int_field(request.form.get("GAMBLING_CHANNEL_ID"), GAMBLING_CHANNEL_ID, 1)
+        MEMORY_BACKUP_CHANNEL_ID = parse_int_field(request.form.get("MEMORY_BACKUP_CHANNEL_ID"), MEMORY_BACKUP_CHANNEL_ID, 1)
+        GAMBLE_COOLDOWN_SECONDS = parse_int_field(request.form.get("GAMBLE_COOLDOWN_SECONDS"), GAMBLE_COOLDOWN_SECONDS, 0)
+        hours_raw = str(request.form.get("ECONOMY_GUIDE_HOURS", "7")).strip()
+        try:
+            ECONOMY_EXPLAIN_INTERVAL_SECONDS = max(60, int(float(hours_raw) * 3600))
+        except:
+            pass
+        BOOSTER_WEEKLY_REWARD = parse_int_field(request.form.get("BOOSTER_WEEKLY_REWARD"), BOOSTER_WEEKLY_REWARD, 0)
+        dashboard_save_settings_file({
+            "COIN_NAME": COIN_NAME,
+            "COMMANDS_CHANNEL_ID": COMMANDS_CHANNEL_ID,
+            "GAMBLING_CHANNEL_ID": GAMBLING_CHANNEL_ID,
+            "MEMORY_BACKUP_CHANNEL_ID": MEMORY_BACKUP_CHANNEL_ID,
+            "GAMBLE_COOLDOWN_SECONDS": GAMBLE_COOLDOWN_SECONDS,
+            "ECONOMY_EXPLAIN_INTERVAL_SECONDS": ECONOMY_EXPLAIN_INTERVAL_SECONDS,
+            "BOOSTER_WEEKLY_REWARD": BOOSTER_WEEKLY_REWARD,
+        })
+        msg = "Settings saved. Some loop intervals may fully apply after restart."
+    except Exception as e:
+        return redirect("/dashboard/settings?err=" + urllib.parse.quote(str(e)))
+    return redirect("/dashboard/settings?msg=" + urllib.parse.quote(msg))
 
 
 @app.route("/dashboard/economy", methods=["POST"])
@@ -2451,23 +2769,25 @@ def dashboard_economy_action():
     if denied:
         return denied
     try:
-        user_id = int(request.form.get("user_id", "0"))
-        amount = int(str(request.form.get("amount", "0")).replace(",", ""))
+        user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
+        amount = parse_int_field(request.form.get("amount", "0"), 0, 0)
         action = request.form.get("action", "add")
         if action == "add":
             balance = add_money(user_id, amount)
-            msg = f"Added {amount:,} {COIN_NAME} to {user_id}. New balance: {balance:,}"
+            msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
         elif action == "remove":
             ok, balance = remove_money(user_id, amount)
-            msg = f"Removed {amount:,} {COIN_NAME} from {user_id}. New balance: {balance:,}" if ok else f"User {user_id} does not have enough balance. Current: {balance:,}"
+            msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
         elif action == "set":
             balance = set_balance(user_id, amount)
-            msg = f"Set {user_id} balance to {balance:,} {COIN_NAME}"
+            msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
         else:
             msg = "Unknown action."
     except Exception as e:
         msg = f"Economy action failed: {e}"
-    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
+    back = request.referrer or "/dashboard/economy"
+    sep = "&" if "?" in back else "?"
+    return redirect(back + sep + "msg=" + urllib.parse.quote(msg))
 
 
 @app.route("/dashboard/levels", methods=["POST"])
@@ -2476,23 +2796,25 @@ def dashboard_levels_action():
     if denied:
         return denied
     try:
-        user_id = int(request.form.get("user_id", "0"))
-        amount = int(str(request.form.get("amount", "0")).replace(",", ""))
+        user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
+        amount = parse_int_field(request.form.get("amount", "0"), 0, 0)
         action = request.form.get("action", "add_xp")
         if action == "add_xp":
             xp, level, leveled = add_xp(user_id, amount)
-            msg = f"Added {amount:,} XP to {user_id}. Level: {level}, XP: {xp:,}"
+            msg = f"Added {fmt_num(amount)} XP to {user_id}. Level: {level}, XP: {fmt_num(xp)}"
         elif action == "set_level":
             xp, level = dashboard_set_level_data(user_id, level=amount)
-            msg = f"Set {user_id} level to {level}. XP: {xp:,}"
+            msg = f"Set {user_id} level to {level}. XP: {fmt_num(xp)}"
         elif action == "set_xp":
             xp, level = dashboard_set_level_data(user_id, xp=amount)
-            msg = f"Set {user_id} XP to {xp:,}. Level: {level}"
+            msg = f"Set {user_id} XP to {fmt_num(xp)}. Level: {level}"
         else:
             msg = "Unknown action."
     except Exception as e:
         msg = f"Level action failed: {e}"
-    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
+    back = request.referrer or "/dashboard/levels"
+    sep = "&" if "?" in back else "?"
+    return redirect(back + sep + "msg=" + urllib.parse.quote(msg))
 
 
 @app.route("/dashboard/backup", methods=["POST"])
@@ -2510,7 +2832,9 @@ def dashboard_backup_action():
             msg = result
     except Exception as e:
         msg = f"Backup failed: {e}"
-    return redirect("/dashboard?msg=" + urllib.parse.quote(msg))
+    back = request.referrer or "/dashboard/memory"
+    sep = "&" if "?" in back else "?"
+    return redirect(back + sep + "msg=" + urllib.parse.quote(msg))
 
 
 def run():
