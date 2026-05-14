@@ -112,6 +112,65 @@ LOOTBOX_COOLDOWN_SECONDS = 10
 DEFAULT_EVENT_PRIZE = 100000
 DEFAULT_EVENT_DURATION_MINUTES = 60
 PUBLIC_LEADERBOARD_ENABLED = True
+
+# =========================
+# REAL ESTATE EMPIRE SETTINGS
+# Limited property system controlled from the market buttons.
+# =========================
+REAL_ESTATE_ENABLED = True
+REAL_ESTATE_RENT_COOLDOWN_SECONDS = 6 * 60 * 60
+REAL_ESTATE_SALE_TAX_PERCENT = 5
+AUCTION_MINUTES_DEFAULT = 30
+auction_task = None
+
+PROPERTY_TYPES = {
+    "room": {
+        "emoji": "🏚️",
+        "name": "Small Room",
+        "count": 20,
+        "price": 25000,
+        "rent": 1000,
+        "upgrade_base": 15000,
+        "max_level": 5,
+    },
+    "apartment": {
+        "emoji": "🏠",
+        "name": "Apartment",
+        "count": 10,
+        "price": 100000,
+        "rent": 5000,
+        "upgrade_base": 60000,
+        "max_level": 5,
+    },
+    "office": {
+        "emoji": "🏢",
+        "name": "Office",
+        "count": 5,
+        "price": 300000,
+        "rent": 18000,
+        "upgrade_base": 180000,
+        "max_level": 5,
+    },
+    "tower": {
+        "emoji": "🏙️",
+        "name": "Tower",
+        "count": 2,
+        "price": 1000000,
+        "rent": 75000,
+        "upgrade_base": 650000,
+        "max_level": 5,
+    },
+    "palace": {
+        "emoji": "👑",
+        "name": "Royal Palace",
+        "count": 1,
+        "price": 3500000,
+        "rent": 250000,
+        "upgrade_base": 2000000,
+        "max_level": 5,
+    },
+}
+
 lootbox_cooldowns = {}
 timed_roles_task = None
 
@@ -145,6 +204,8 @@ COMMAND_SYSTEM_MAP = {
     "رصيدي": "economy", "رصيد": "economy", "راتب": "economy", "بوست": "economy", "تحويل": "economy", "اغنى": "economy",
     "اعطاءفلوس": "economy", "سحبفلوس": "economy", "تصفيرفلوس": "economy",
     "متجر": "shop", "شراء": "shop", "صندوق": "shop",
+    "عقارات": "shop", "عقاراتي": "shop", "ايجار": "shop", "ملاك": "shop",
+    "عرض_عقار": "shop", "سوق_العقارات": "shop", "مزادات": "shop", "مزاد_عقار": "shop",
     "فعاليات": "events", "فعالية": "events",
     "شرح_القمار": "gambling", "حظ": "gambling", "دبل": "gambling", "سلوت": "gambling", "وجه": "gambling", "بلاكجاك": "gambling",
     "حماية": "protection", "اعدادات": "protection", "تحذير": "protection", "تحذيرات": "protection", "تصفير": "protection",
@@ -442,6 +503,39 @@ def init_db():
             status TEXT DEFAULT 'active'
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS real_estate_properties (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            type_key TEXT,
+            unit_number INTEGER,
+            display_name TEXT,
+            owner_id INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            last_rent_claim INTEGER DEFAULT 0,
+            for_sale_price INTEGER DEFAULT 0,
+            created_at INTEGER
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS real_estate_auctions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            property_id INTEGER,
+            seller_id INTEGER,
+            start_price INTEGER,
+            highest_bid INTEGER DEFAULT 0,
+            highest_bidder INTEGER DEFAULT 0,
+            ends_at INTEGER,
+            status TEXT DEFAULT 'active',
+            created_at INTEGER
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+    seed_real_estate_properties()
+    return
 
     conn.commit()
     conn.close()
@@ -1985,9 +2079,902 @@ async def create_game_voice_channel(guild, source_channel, game, player_ids, max
     return voice_channel
 
 
+
+# =========================
+# REAL ESTATE EMPIRE HELPERS
+# =========================
+
+def property_config(type_key):
+    return PROPERTY_TYPES.get(str(type_key))
+
+
+def property_title(row):
+    # row: id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
+    if not row:
+        return "Unknown Property"
+    _, type_key, unit_number, display_name, *_ = row
+    cfg = property_config(type_key) or {}
+    emoji = cfg.get("emoji", "🏠")
+    name = display_name or cfg.get("name", str(type_key))
+    return f"{emoji} {name} #{unit_number}"
+
+
+def property_rent_amount(type_key, level=1):
+    cfg = property_config(type_key)
+    if not cfg:
+        return 0
+    base = int(cfg.get("rent", 0))
+    level = max(1, int(level or 1))
+    return int(base * (1 + ((level - 1) * 0.35)))
+
+
+def property_upgrade_cost(type_key, level=1):
+    cfg = property_config(type_key)
+    if not cfg:
+        return 0
+    base = int(cfg.get("upgrade_base", 0))
+    level = max(1, int(level or 1))
+    return int(base * level)
+
+
+def seed_real_estate_properties():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        now = int(time.time())
+        for type_key, cfg in PROPERTY_TYPES.items():
+            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key = ?", (type_key,))
+            existing = int(cur.fetchone()[0] or 0)
+            target = int(cfg.get("count", 0))
+            for unit in range(existing + 1, target + 1):
+                cur.execute(
+                    """
+                    INSERT INTO real_estate_properties
+                    (type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price, created_at)
+                    VALUES (?, ?, ?, 0, 1, 0, 0, ?)
+                    """,
+                    (type_key, unit, cfg.get("name", type_key), now)
+                )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"seed_real_estate_properties error: {e}")
+
+
+def get_property_by_id(property_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
+            FROM real_estate_properties WHERE id = ?
+        """, (int(property_id),))
+        row = cur.fetchone()
+        conn.close()
+        return row
+    except:
+        return None
+
+
+def get_available_property(type_key):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
+            FROM real_estate_properties
+            WHERE type_key = ? AND owner_id = 0
+            ORDER BY unit_number ASC LIMIT 1
+        """, (str(type_key),))
+        row = cur.fetchone()
+        conn.close()
+        return row
+    except:
+        return None
+
+
+def real_estate_counts():
+    data = {}
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        for type_key, cfg in PROPERTY_TYPES.items():
+            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key=?", (type_key,))
+            total = int(cur.fetchone()[0] or 0)
+            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key=? AND owner_id=0", (type_key,))
+            available = int(cur.fetchone()[0] or 0)
+            data[type_key] = {"total": total, "available": available, "owned": max(0, total - available)}
+        conn.close()
+    except Exception as e:
+        print(f"real_estate_counts error: {e}")
+    return data
+
+
+def get_user_properties(user_id, limit=25):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
+            FROM real_estate_properties
+            WHERE owner_id = ?
+            ORDER BY type_key ASC, unit_number ASC
+            LIMIT ?
+        """, (int(user_id), int(limit)))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def get_for_sale_properties(limit=10):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
+            FROM real_estate_properties
+            WHERE for_sale_price > 0 AND owner_id > 0
+            ORDER BY for_sale_price ASC
+            LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def set_property_owner(property_id, owner_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=?", (int(owner_id), int(property_id)))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"set_property_owner error: {e}")
+        return False
+
+
+def set_property_for_sale(property_id, owner_id, price):
+    row = get_property_by_id(property_id)
+    if not row:
+        return False, "ما لقيت العقار."
+    if int(row[4] or 0) != int(owner_id):
+        return False, "هذا العقار مب ملكك."
+    if int(price) <= 0:
+        return False, "السعر لازم يكون أكبر من صفر."
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE real_estate_properties SET for_sale_price=? WHERE id=?", (int(price), int(property_id)))
+        conn.commit()
+        conn.close()
+        return True, "تم عرض العقار للبيع."
+    except Exception as e:
+        return False, str(e)
+
+
+def buy_property_from_system(user_id, type_key):
+    cfg = property_config(type_key)
+    if not cfg:
+        return False, "نوع العقار غير معروف.", None, 0
+    row = get_available_property(type_key)
+    if not row:
+        return False, "Sold Out — هذا النوع خلص من السوق الأساسي. اشترِ من لاعب أو ادخل مزاد.", None, 0
+    price = int(cfg.get("price", 0))
+    ok, balance = remove_money(user_id, price)
+    if not ok:
+        return False, f"رصيدك ما يكفي. تحتاج {coin_line(price)}.", row, price
+    set_property_owner(row[0], user_id)
+    return True, "تم شراء العقار بنجاح.", get_property_by_id(row[0]), price
+
+
+def buy_property_listing(buyer_id, property_id):
+    row = get_property_by_id(property_id)
+    if not row:
+        return False, "ما لقيت العقار.", None
+    owner_id = int(row[4] or 0)
+    price = int(row[7] or 0)
+    if owner_id <= 0 or price <= 0:
+        return False, "العقار مب معروض للبيع حالياً.", row
+    if owner_id == int(buyer_id):
+        return False, "ما تقدر تشتري عقارك من نفسك.", row
+    ok, new_balance = remove_money(buyer_id, price)
+    if not ok:
+        return False, f"رصيدك ما يكفي. السعر: {coin_line(price)}", row
+    tax = int(price * (REAL_ESTATE_SALE_TAX_PERCENT / 100))
+    seller_gets = price - tax
+    add_money(owner_id, seller_gets)
+    set_property_owner(property_id, buyer_id)
+    return True, f"تم الشراء. البائع استلم {coin_line(seller_gets)} بعد ضريبة {REAL_ESTATE_SALE_TAX_PERCENT}%.", get_property_by_id(property_id)
+
+
+def collect_rent_for_user(user_id):
+    rows = get_user_properties(user_id, limit=200)
+    now = int(time.time())
+    total = 0
+    ready = []
+    next_remaining = None
+    for row in rows:
+        prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
+        last_claim = int(last_claim or 0)
+        elapsed = now - last_claim
+        if last_claim == 0 or elapsed >= REAL_ESTATE_RENT_COOLDOWN_SECONDS:
+            rent = property_rent_amount(type_key, level)
+            total += rent
+            ready.append((prop_id, rent))
+        else:
+            remaining = REAL_ESTATE_RENT_COOLDOWN_SECONDS - elapsed
+            next_remaining = remaining if next_remaining is None else min(next_remaining, remaining)
+    if total <= 0:
+        return False, 0, next_remaining or REAL_ESTATE_RENT_COOLDOWN_SECONDS, len(rows)
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        for prop_id, rent in ready:
+            cur.execute("UPDATE real_estate_properties SET last_rent_claim=? WHERE id=?", (now, int(prop_id)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"collect_rent update error: {e}")
+    balance = add_money(user_id, total)
+    return True, total, 0, len(rows)
+
+
+def upgrade_property(user_id, property_id):
+    row = get_property_by_id(property_id)
+    if not row:
+        return False, "ما لقيت العقار.", None
+    prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
+    if int(owner_id or 0) != int(user_id):
+        return False, "هذا العقار مب ملكك.", row
+    cfg = property_config(type_key) or {}
+    max_level = int(cfg.get("max_level", 5))
+    level = int(level or 1)
+    if level >= max_level:
+        return False, f"العقار وصل أعلى تطوير Level {max_level}.", row
+    cost = property_upgrade_cost(type_key, level)
+    ok, balance = remove_money(user_id, cost)
+    if not ok:
+        return False, f"رصيدك ما يكفي. تكلفة التطوير: {coin_line(cost)}", row
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE real_estate_properties SET level=? WHERE id=?", (level + 1, int(property_id)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        add_money(user_id, cost)
+        return False, f"فشل التطوير ورجعت لك الفلوس: {e}", row
+    return True, f"تم تطوير العقار إلى Level {level + 1}. الدخل الجديد: {coin_line(property_rent_amount(type_key, level + 1))}", get_property_by_id(property_id)
+
+
+def create_property_auction(seller_id, property_id, minutes, start_price):
+    row = get_property_by_id(property_id)
+    if not row:
+        return False, "ما لقيت العقار.", None
+    if int(row[4] or 0) != int(seller_id):
+        return False, "هذا العقار مب ملكك.", row
+    if int(start_price) <= 0:
+        return False, "سعر البداية لازم يكون أكبر من صفر.", row
+    minutes = max(5, min(int(minutes), 1440))
+    ends_at = int(time.time()) + minutes * 60
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM real_estate_auctions WHERE property_id=? AND status='active'", (int(property_id),))
+        if cur.fetchone():
+            conn.close()
+            return False, "فيه مزاد شغال على هذا العقار بالفعل.", row
+        cur.execute("UPDATE real_estate_properties SET for_sale_price=0 WHERE id=?", (int(property_id),))
+        cur.execute("""
+            INSERT INTO real_estate_auctions
+            (property_id, seller_id, start_price, highest_bid, highest_bidder, ends_at, status, created_at)
+            VALUES (?, ?, ?, 0, 0, ?, 'active', ?)
+        """, (int(property_id), int(seller_id), int(start_price), ends_at, int(time.time())))
+        auction_id = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return True, "تم فتح المزاد.", auction_id
+    except Exception as e:
+        return False, str(e), row
+
+
+def get_active_auctions(limit=5):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT a.id, a.property_id, a.seller_id, a.start_price, a.highest_bid, a.highest_bidder, a.ends_at,
+                   p.type_key, p.unit_number, p.display_name, p.level
+            FROM real_estate_auctions a
+            JOIN real_estate_properties p ON p.id = a.property_id
+            WHERE a.status='active'
+            ORDER BY a.ends_at ASC LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def get_auction(auction_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT a.id, a.property_id, a.seller_id, a.start_price, a.highest_bid, a.highest_bidder, a.ends_at,
+                   p.type_key, p.unit_number, p.display_name, p.level
+            FROM real_estate_auctions a
+            JOIN real_estate_properties p ON p.id = a.property_id
+            WHERE a.id=? AND a.status='active'
+        """, (int(auction_id),))
+        row = cur.fetchone()
+        conn.close()
+        return row
+    except:
+        return None
+
+
+def place_auction_bid(user_id, auction_id, amount):
+    row = get_auction(auction_id)
+    if not row:
+        return False, "المزاد غير موجود أو انتهى.", None
+    auction_id, property_id, seller_id, start_price, highest_bid, highest_bidder, ends_at, type_key, unit_number, display_name, level = row
+    now = int(time.time())
+    if now >= int(ends_at):
+        return False, "المزاد انتهى. انتظر التسوية.", row
+    if int(seller_id) == int(user_id):
+        return False, "ما تقدر تزايد على مزادك.", row
+    min_required = max(int(start_price), int(highest_bid) + 1)
+    amount = int(amount)
+    if amount < min_required:
+        return False, f"لازم تزايد على الأقل بـ {coin_line(min_required)}.", row
+    balance = get_balance(user_id)
+    if balance < amount:
+        return False, f"رصيدك ما يكفي. رصيدك: {coin_line(balance)}", row
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("UPDATE real_estate_auctions SET highest_bid=?, highest_bidder=? WHERE id=?", (amount, int(user_id), int(auction_id)))
+        conn.commit()
+        conn.close()
+        return True, "تم تسجيل مزايدتك. الفلوس تُخصم عند نهاية المزاد إذا فزت.", get_auction(auction_id)
+    except Exception as e:
+        return False, str(e), row
+
+
+async def settle_ended_auctions(guild=None):
+    try:
+        now = int(time.time())
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, property_id, seller_id, start_price, highest_bid, highest_bidder, ends_at
+            FROM real_estate_auctions
+            WHERE status='active' AND ends_at <= ?
+        """, (now,))
+        rows = cur.fetchall()
+        for auction_id, property_id, seller_id, start_price, highest_bid, highest_bidder, ends_at in rows:
+            if int(highest_bidder or 0) > 0 and int(highest_bid or 0) > 0:
+                buyer_balance = get_balance(highest_bidder)
+                if buyer_balance >= int(highest_bid):
+                    remove_money(highest_bidder, highest_bid)
+                    tax = int(int(highest_bid) * (REAL_ESTATE_SALE_TAX_PERCENT / 100))
+                    seller_gets = int(highest_bid) - tax
+                    add_money(seller_id, seller_gets)
+                    cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=?", (int(highest_bidder), int(property_id)))
+                    cur.execute("UPDATE real_estate_auctions SET status='sold' WHERE id=?", (int(auction_id),))
+                    if guild:
+                        channel = await get_channel_by_id(guild, EVENTS_CHANNEL_ID)
+                        if channel:
+                            await channel.send(embed=discord.Embed(title="🔨 انتهى مزاد عقار", description=f"العقار #{property_id} انباع لـ <@{highest_bidder}> بسعر {coin_line(highest_bid)}.\nالبائع استلم {coin_line(seller_gets)}.", color=COLOR_GREEN))
+                else:
+                    cur.execute("UPDATE real_estate_auctions SET status='failed' WHERE id=?", (int(auction_id),))
+            else:
+                cur.execute("UPDATE real_estate_auctions SET status='ended_no_bid' WHERE id=?", (int(auction_id),))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"settle_ended_auctions error: {e}")
+
+
+async def auction_loop():
+    await bot.wait_until_ready()
+    await asyncio.sleep(30)
+    while not bot.is_closed():
+        try:
+            guild = bot.get_guild(GUILD_ID)
+            await settle_ended_auctions(guild)
+        except Exception as e:
+            print(f"auction_loop error: {e}")
+        await asyncio.sleep(60)
+
+
+def build_market_embed(member=None):
+    embed = discord.Embed(
+        title="🛒 Retards Market",
+        description=(
+            "متجر واضح بالأزرار — اختر اللي تبيه من تحت.\n"
+            "العقارات **محدودة**؛ إذا خلصت لازم تشتري من لاعب أو تدخل مزاد."
+        ),
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="💎 VIP Pass", value=f"السعر: {coin_line(SHOP_VIP_PRICE)}\nالمدة: **{SHOP_VIP_DAYS} أيام**", inline=True)
+    embed.add_field(name="🎁 Mystery Box", value=f"السعر: {coin_line(LOOTBOX_PRICE)}\nجوائز عشوائية و VIP مؤقت", inline=True)
+    embed.add_field(name="🏙️ Real Estate", value="عقارات محدودة + إيجار + بيع بين الأعضاء + مزادات", inline=False)
+    if member:
+        embed.set_author(name=f"{member.display_name} • Market", icon_url=member.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(member.id)), inline=True)
+        embed.add_field(name="🏠 عقاراتك", value=f"`{len(get_user_properties(member.id, 200))}` عقار", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} | Market Buttons")
+    return embed
+
+
+def build_real_estate_embed(member=None):
+    counts = real_estate_counts()
+    embed = discord.Embed(
+        title="🏙️ Real Estate Empire",
+        description=f"كل عقار محدود وله دخل كل **{format_seconds(REAL_ESTATE_RENT_COOLDOWN_SECONDS)}**. اشترِ بدري قبل ما يخلص السوق.",
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+    for key, cfg in PROPERTY_TYPES.items():
+        c = counts.get(key, {"available": 0, "total": cfg.get("count", 0)})
+        status = "✅ متوفر" if c["available"] > 0 else "❌ Sold Out"
+        embed.add_field(
+            name=f"{cfg['emoji']} {cfg['name']}",
+            value=(
+                f"السعر: {coin_line(cfg['price'])}\n"
+                f"الإيجار: {coin_line(cfg['rent'])}\n"
+                f"المتاح: **{c['available']} / {c['total']}** — {status}"
+            ),
+            inline=True
+        )
+    if member:
+        embed.set_author(name=f"{member.display_name} • Real Estate", icon_url=member.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(member.id)), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} | Limited Properties")
+    return embed
+
+
+def build_user_assets_embed(member):
+    rows = get_user_properties(member.id, 100)
+    embed = discord.Embed(title="💼 ممتلكاتي", color=COLOR_PURPLE, timestamp=discord.utils.utcnow())
+    embed.set_author(name=f"{member.display_name} • Assets", icon_url=member.display_avatar.url)
+    if not rows:
+        embed.description = "ما عندك عقارات حالياً. افتح السوق واشترِ أول عقار."
+    else:
+        total_rent = sum(property_rent_amount(r[1], r[5]) for r in rows)
+        lines = []
+        for r in rows[:12]:
+            sale = f" | للبيع: {coin_line(r[7], bold=False)}" if int(r[7] or 0) > 0 else ""
+            lines.append(f"`#{r[0]}` {property_title(r)} — Lv.{r[5]} — إيجار {short_money(property_rent_amount(r[1], r[5]))}{sale}")
+        embed.description = "\n".join(lines)
+        if len(rows) > 12:
+            embed.description += f"\n... و {len(rows)-12} عقارات زيادة"
+        embed.add_field(name="📈 دخل الإيجار الكامل", value=coin_line(total_rent), inline=True)
+    embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(member.id)), inline=True)
+    embed.set_footer(text="استخدم الأزرار لجمع الإيجار، عرض للبيع، فتح مزاد، أو تطوير عقار.")
+    return embed
+
+
+def build_property_market_embed(member=None):
+    rows = get_for_sale_properties(10)
+    embed = discord.Embed(title="🏘️ سوق العقارات بين الأعضاء", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
+    if not rows:
+        embed.description = "ما فيه عقارات معروضة للبيع حالياً."
+    else:
+        lines = []
+        for r in rows:
+            lines.append(f"`#{r[0]}` {property_title(r)} — Lv.{r[5]} — السعر {coin_line(r[7], bold=False)} — المالك <@{r[4]}>")
+        embed.description = "\n".join(lines)[:3900]
+    if member:
+        embed.set_author(name=f"{member.display_name} • Property Market", icon_url=member.display_avatar.url)
+    embed.set_footer(text=f"الضريبة على البيع: {REAL_ESTATE_SALE_TAX_PERCENT}%")
+    return embed
+
+
+def build_auction_embed(member=None):
+    auctions = get_active_auctions(5)
+    embed = discord.Embed(title="🔨 مزادات العقارات", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
+    if not auctions:
+        embed.description = "ما فيه مزادات شغالة حالياً."
+    else:
+        lines = []
+        for a in auctions:
+            auction_id, prop_id, seller_id, start_price, highest_bid, highest_bidder, ends_at, type_key, unit_number, display_name, level = a
+            title = f"{(property_config(type_key) or {}).get('emoji','🏠')} {display_name} #{unit_number}"
+            high = coin_line(highest_bid if highest_bid else start_price, bold=False)
+            bidder = f"<@{highest_bidder}>" if int(highest_bidder or 0) else "لا يوجد"
+            lines.append(f"`A#{auction_id}` {title} — أعلى سعر: {high} — المزايد: {bidder} — ينتهي <t:{int(ends_at)}:R>")
+        embed.description = "\n".join(lines)
+    if member:
+        embed.set_author(name=f"{member.display_name} • Auctions", icon_url=member.display_avatar.url)
+    embed.set_footer(text="المزايدة لا تخصم إلا إذا انتهى المزاد وفزت.")
+    return embed
+
 # =========================
 # VIEWS
 # =========================
+
+
+class MarketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="VIP Pass", style=discord.ButtonStyle.primary, emoji="💎")
+    async def vip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="💎 VIP Pass",
+            description=(
+                f"السعر: {coin_line(SHOP_VIP_PRICE)}\n"
+                f"المدة: **{SHOP_VIP_DAYS} أيام**\n\n"
+                "تحصل على رتبة VIP مؤقتة ومنظر مميز في السيرفر."
+            ),
+            color=COLOR_PURPLE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_author(name=f"{interaction.user.display_name} • VIP Checkout", icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(interaction.user.id)), inline=True)
+        await interaction.response.send_message(embed=embed, view=VipConfirmView(), ephemeral=True)
+
+    @discord.ui.button(label="Mystery Box", style=discord.ButtonStyle.success, emoji="🎁")
+    async def box_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🎁 Mystery Box",
+            description=(
+                f"السعر: {coin_line(LOOTBOX_PRICE)}\n"
+                "الجوائز: Coins / VIP مؤقت / Event Winner مؤقت / Jackpot\n\n"
+                "اضغط فتح الصندوق إذا جاهز للحظ."
+            ),
+            color=COLOR_GREEN,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_author(name=f"{interaction.user.display_name} • Lootbox", icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(get_balance(interaction.user.id)), inline=True)
+        await interaction.response.send_message(embed=embed, view=LootboxConfirmView(), ephemeral=True)
+
+    @discord.ui.button(label="Real Estate", style=discord.ButtonStyle.secondary, emoji="🏙️")
+    async def real_estate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=build_real_estate_embed(interaction.user), view=RealEstateView(), ephemeral=True)
+
+    @discord.ui.button(label="ممتلكاتي", style=discord.ButtonStyle.secondary, emoji="💼")
+    async def assets_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(embed=build_user_assets_embed(interaction.user), view=MyAssetsView(), ephemeral=True)
+
+    @discord.ui.button(label="رصيدي", style=discord.ButtonStyle.secondary, emoji="🪙")
+    async def wallet_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        xp, lvl = get_level_data(interaction.user.id)
+        embed = discord.Embed(title="💼 Wallet", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
+        embed.set_author(name=interaction.user.display_name, icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="الرصيد", value=coin_line(get_balance(interaction.user.id)), inline=False)
+        embed.add_field(name="Level", value=f"Lv.{lvl} | XP {xp}/{lvl*100}", inline=True)
+        embed.add_field(name="العقارات", value=f"{len(get_user_properties(interaction.user.id, 200))} عقار", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class VipConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="تأكيد شراء VIP", style=discord.ButtonStyle.success, emoji="✅")
+    async def confirm_vip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        vip_role, _ = await ensure_custom_roles(guild)
+        if not vip_role:
+            await interaction.response.send_message("❌ ما قدرت أجهز رتبة VIP. تأكد من صلاحية Manage Roles.", ephemeral=True)
+            return
+        ok, new_balance = remove_money(interaction.user.id, SHOP_VIP_PRICE)
+        if not ok:
+            await interaction.response.send_message(f"❌ رصيدك ما يكفي. تحتاج {coin_line(SHOP_VIP_PRICE)}.", ephemeral=True)
+            return
+        try:
+            await interaction.user.add_roles(vip_role, reason=f"{BOT_BRAND} shop VIP button purchase")
+            expires_at = int(time.time()) + int(SHOP_VIP_DAYS) * 86400
+            add_timed_role_record(interaction.user.id, vip_role.id, expires_at, "Shop VIP button purchase")
+            record_shop_purchase(interaction.user.id, "vip_button", SHOP_VIP_PRICE)
+            embed = discord.Embed(title="✅ تم شراء VIP", description=f"تم إعطاؤك {vip_role.mention} لمدة **{SHOP_VIP_DAYS} أيام**.", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+            embed.add_field(name="السعر", value=coin_line(SHOP_VIP_PRICE), inline=True)
+            embed.add_field(name="رصيدك الجديد", value=coin_line(new_balance), inline=True)
+            embed.add_field(name="ينتهي", value=f"<t:{expires_at}:R>", inline=False)
+            await interaction.response.edit_message(embed=embed, view=None)
+        except Exception as e:
+            add_money(interaction.user.id, SHOP_VIP_PRICE)
+            await interaction.response.send_message(f"❌ فشل إعطاء الرتبة ورجعت لك الفلوس: `{clean_text(str(e), 250)}`", ephemeral=True)
+
+    @discord.ui.button(label="إلغاء", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="تم الإلغاء.", embed=None, view=None)
+
+
+class LootboxConfirmView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="فتح الصندوق", style=discord.ButtonStyle.success, emoji="🎁")
+    async def open_box(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now = time.time()
+        last = lootbox_cooldowns.get(interaction.user.id, 0)
+        if now - last < LOOTBOX_COOLDOWN_SECONDS:
+            await interaction.response.send_message(f"⏳ باقي {LOOTBOX_COOLDOWN_SECONDS - (now-last):.1f} ثانية.", ephemeral=True)
+            return
+        lootbox_cooldowns[interaction.user.id] = now
+        ok, new_balance = remove_money(interaction.user.id, LOOTBOX_PRICE)
+        if not ok:
+            await interaction.response.send_message(f"❌ رصيدك ما يكفي. سعر الصندوق {coin_line(LOOTBOX_PRICE)}.", ephemeral=True)
+            return
+        rewards = [
+            ("coins", int(LOOTBOX_PRICE * 0.25), 28, "Common"),
+            ("coins", int(LOOTBOX_PRICE * 0.75), 24, "Uncommon"),
+            ("coins", int(LOOTBOX_PRICE * 1.5), 20, "Rare"),
+            ("coins", int(LOOTBOX_PRICE * 3), 12, "Epic"),
+            ("vip_hours", 12, 8, "Epic VIP"),
+            ("winner_hours", 6, 5, "Legendary Role"),
+            ("coins", int(LOOTBOX_PRICE * 7), 3, "Mythic Jackpot"),
+        ]
+        pool=[]
+        for reward_type, value, weight, rarity in rewards:
+            pool.extend([(reward_type, value, rarity)] * int(weight))
+        reward_type, value, rarity = random.choice(pool)
+        desc=""
+        color=COLOR_BLUE
+        if reward_type == "coins":
+            add_money(interaction.user.id, int(value))
+            profit = int(value) - int(LOOTBOX_PRICE)
+            desc = f"ربحت {coin_line(value)}\nصافي النتيجة: {money_delta(profit)}"
+            color = COLOR_GREEN if profit >= 0 else COLOR_YELLOW
+        elif reward_type == "vip_hours":
+            vip_role, _ = await ensure_custom_roles(interaction.guild)
+            if vip_role:
+                await interaction.user.add_roles(vip_role, reason=f"{BOT_BRAND} lootbox VIP reward")
+                expires_at = int(time.time()) + int(value) * 3600
+                add_timed_role_record(interaction.user.id, vip_role.id, expires_at, "Lootbox VIP reward")
+                desc = f"ربحت {vip_role.mention} لمدة **{value} ساعة**. ينتهي <t:{expires_at}:R>"
+            color = COLOR_PURPLE
+        else:
+            _, winner_role = await ensure_custom_roles(interaction.guild)
+            if winner_role:
+                await interaction.user.add_roles(winner_role, reason=f"{BOT_BRAND} lootbox winner reward")
+                expires_at = int(time.time()) + int(value) * 3600
+                add_timed_role_record(interaction.user.id, winner_role.id, expires_at, "Lootbox winner reward")
+                desc = f"ربحت {winner_role.mention} لمدة **{value} ساعات**. ينتهي <t:{expires_at}:R>"
+            color = COLOR_ORANGE
+        record_lootbox(interaction.user.id, LOOTBOX_PRICE, reward_type, value)
+        record_shop_purchase(interaction.user.id, "lootbox_button", LOOTBOX_PRICE)
+        embed = discord.Embed(title=f"🎁 Mystery Box • {rarity}", description=desc, color=color, timestamp=discord.utils.utcnow())
+        embed.set_author(name=f"{interaction.user.display_name} فتح صندوق", icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="رصيدك الآن", value=coin_line(get_balance(interaction.user.id)), inline=False)
+        await interaction.response.edit_message(embed=embed, view=None)
+
+    @discord.ui.button(label="إلغاء", style=discord.ButtonStyle.danger, emoji="❌")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(content="تم الإلغاء.", embed=None, view=None)
+
+
+class PurchasePropertyButton(discord.ui.Button):
+    def __init__(self, type_key):
+        cfg = property_config(type_key)
+        label = cfg.get("name", type_key) if cfg else type_key
+        emoji = cfg.get("emoji", "🏠") if cfg else "🏠"
+        super().__init__(label=label, style=discord.ButtonStyle.primary, emoji=emoji)
+        self.type_key = type_key
+
+    async def callback(self, interaction: discord.Interaction):
+        if not REAL_ESTATE_ENABLED:
+            await interaction.response.send_message("🔒 نظام العقارات مقفل مؤقتًا.", ephemeral=True)
+            return
+        ok, message, row, price = buy_property_from_system(interaction.user.id, self.type_key)
+        if not ok:
+            await interaction.response.send_message(f"❌ {message}", ephemeral=True)
+            return
+        embed = discord.Embed(title="✅ تم شراء عقار", description=f"ملكت الآن: **{property_title(row)}**", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+        embed.add_field(name="السعر", value=coin_line(price), inline=True)
+        embed.add_field(name="الإيجار", value=coin_line(property_rent_amount(row[1], row[5])), inline=True)
+        embed.add_field(name="رصيدك", value=coin_line(get_balance(interaction.user.id)), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class RealEstateView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        for type_key in PROPERTY_TYPES.keys():
+            self.add_item(PurchasePropertyButton(type_key))
+
+    @discord.ui.button(label="عقاراتي", style=discord.ButtonStyle.secondary, emoji="💼", row=2)
+    async def my_properties(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_user_assets_embed(interaction.user), view=MyAssetsView())
+
+    @discord.ui.button(label="جمع الإيجار", style=discord.ButtonStyle.success, emoji="💰", row=2)
+    async def collect_rent(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, total, remaining, count = collect_rent_for_user(interaction.user.id)
+        if not ok:
+            await interaction.response.send_message(f"⏳ ما فيه إيجار جاهز. أقرب إيجار بعد: **{format_seconds(remaining)}**", ephemeral=True)
+            return
+        await interaction.response.send_message(f"✅ جمعت إيجار {count} عقار: {coin_line(total)}\nرصيدك الآن: {coin_line(get_balance(interaction.user.id))}", ephemeral=True)
+
+    @discord.ui.button(label="سوق اللاعبين", style=discord.ButtonStyle.secondary, emoji="🏘️", row=2)
+    async def player_market(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_property_market_embed(interaction.user), view=PropertyMarketView())
+
+    @discord.ui.button(label="المزادات", style=discord.ButtonStyle.secondary, emoji="🔨", row=2)
+    async def auctions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_auction_embed(interaction.user), view=AuctionListView())
+
+
+class MyAssetsView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+
+    @discord.ui.button(label="جمع الإيجار", style=discord.ButtonStyle.success, emoji="💰")
+    async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ok, total, remaining, count = collect_rent_for_user(interaction.user.id)
+        if not ok:
+            await interaction.response.send_message(f"⏳ ما فيه إيجار جاهز. أقرب إيجار بعد: **{format_seconds(remaining)}**", ephemeral=True)
+            return
+        await interaction.response.edit_message(embed=build_user_assets_embed(interaction.user), view=self)
+        await interaction.followup.send(f"✅ جمعت: {coin_line(total)}", ephemeral=True)
+
+    @discord.ui.button(label="عرض للبيع", style=discord.ButtonStyle.secondary, emoji="🏷️")
+    async def list_sale(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ListPropertyModal())
+
+    @discord.ui.button(label="فتح مزاد", style=discord.ButtonStyle.secondary, emoji="🔨")
+    async def start_auction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(StartAuctionModal())
+
+    @discord.ui.button(label="تطوير عقار", style=discord.ButtonStyle.primary, emoji="⬆️")
+    async def upgrade(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(UpgradePropertyModal())
+
+    @discord.ui.button(label="رجوع للسوق", style=discord.ButtonStyle.secondary, emoji="↩️")
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_real_estate_embed(interaction.user), view=RealEstateView())
+
+
+class ListPropertyModal(discord.ui.Modal, title="عرض عقار للبيع"):
+    property_id = discord.ui.TextInput(label="Property ID", placeholder="مثال: 12", required=True, max_length=20)
+    price = discord.ui.TextInput(label="السعر", placeholder="مثال: 150000", required=True, max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            prop_id = int(str(self.property_id.value).strip())
+            price = parse_bet_amount(str(self.price.value).strip())
+        except:
+            await interaction.response.send_message("❌ البيانات غير صحيحة.", ephemeral=True)
+            return
+        if price is None:
+            await interaction.response.send_message("❌ السعر غير صحيح.", ephemeral=True)
+            return
+        ok, msg = set_property_for_sale(prop_id, interaction.user.id, price)
+        color = COLOR_GREEN if ok else COLOR_RED
+        await interaction.response.send_message(embed=discord.Embed(title="🏷️ عرض عقار للبيع", description=msg, color=color), ephemeral=True)
+
+
+class StartAuctionModal(discord.ui.Modal, title="فتح مزاد عقار"):
+    property_id = discord.ui.TextInput(label="Property ID", placeholder="مثال: 12", required=True, max_length=20)
+    minutes = discord.ui.TextInput(label="مدة المزاد بالدقائق", placeholder="مثال: 30", required=True, max_length=20)
+    start_price = discord.ui.TextInput(label="سعر البداية", placeholder="مثال: 100000", required=True, max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            prop_id = int(str(self.property_id.value).strip())
+            minutes = int(str(self.minutes.value).strip())
+            start_price = parse_bet_amount(str(self.start_price.value).strip())
+        except:
+            await interaction.response.send_message("❌ البيانات غير صحيحة.", ephemeral=True)
+            return
+        if start_price is None:
+            await interaction.response.send_message("❌ سعر البداية غير صحيح.", ephemeral=True)
+            return
+        ok, msg, auction_id = create_property_auction(interaction.user.id, prop_id, minutes, start_price)
+        if not ok:
+            await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
+            return
+        embed = discord.Embed(title="🔨 مزاد عقار جديد", description=f"فتح <@{interaction.user.id}> مزاد على العقار `#{prop_id}`.\nسعر البداية: {coin_line(start_price)}\nينتهي بعد: **{minutes} دقيقة**", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
+        channel = await get_channel_by_id(interaction.guild, EVENTS_CHANNEL_ID)
+        if channel:
+            await channel.send(embed=embed, view=AuctionListView())
+        await interaction.response.send_message("✅ تم فتح المزاد ونشره في روم الفعاليات.", ephemeral=True)
+
+
+class UpgradePropertyModal(discord.ui.Modal, title="تطوير عقار"):
+    property_id = discord.ui.TextInput(label="Property ID", placeholder="مثال: 12", required=True, max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            prop_id = int(str(self.property_id.value).strip())
+        except:
+            await interaction.response.send_message("❌ رقم العقار غير صحيح.", ephemeral=True)
+            return
+        ok, msg, row = upgrade_property(interaction.user.id, prop_id)
+        await interaction.response.send_message(embed=discord.Embed(title="⬆️ تطوير عقار", description=msg, color=COLOR_GREEN if ok else COLOR_RED), ephemeral=True)
+
+
+class PropertyMarketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        rows = get_for_sale_properties(5)
+        for row in rows:
+            self.add_item(BuyListingButton(row[0], row[7]))
+
+    @discord.ui.button(label="تحديث", style=discord.ButtonStyle.secondary, emoji="🔄", row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_property_market_embed(interaction.user), view=PropertyMarketView())
+
+    @discord.ui.button(label="رجوع للعقارات", style=discord.ButtonStyle.secondary, emoji="↩️", row=2)
+    async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_real_estate_embed(interaction.user), view=RealEstateView())
+
+
+class BuyListingButton(discord.ui.Button):
+    def __init__(self, property_id, price):
+        super().__init__(label=f"شراء #{property_id}", style=discord.ButtonStyle.success, emoji="🛒")
+        self.property_id = int(property_id)
+
+    async def callback(self, interaction: discord.Interaction):
+        ok, msg, row = buy_property_listing(interaction.user.id, self.property_id)
+        await interaction.response.send_message(embed=discord.Embed(title="🏘️ شراء عقار", description=msg, color=COLOR_GREEN if ok else COLOR_RED), ephemeral=True)
+
+
+class AuctionListView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        rows = get_active_auctions(5)
+        for row in rows:
+            auction_id = row[0]
+            self.add_item(BidButton(auction_id, 10000, f"A#{auction_id} +10k"))
+            self.add_item(BidButton(auction_id, 50000, f"A#{auction_id} +50k"))
+
+    @discord.ui.button(label="مزايدة مخصصة", style=discord.ButtonStyle.primary, emoji="✍️", row=3)
+    async def custom_bid(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(CustomBidModal())
+
+    @discord.ui.button(label="تحديث", style=discord.ButtonStyle.secondary, emoji="🔄", row=3)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(embed=build_auction_embed(interaction.user), view=AuctionListView())
+
+
+class BidButton(discord.ui.Button):
+    def __init__(self, auction_id, increment, label):
+        super().__init__(label=label, style=discord.ButtonStyle.secondary, emoji="🔨")
+        self.auction_id = int(auction_id)
+        self.increment = int(increment)
+
+    async def callback(self, interaction: discord.Interaction):
+        row = get_auction(self.auction_id)
+        if not row:
+            await interaction.response.send_message("❌ المزاد غير موجود أو انتهى.", ephemeral=True)
+            return
+        current = int(row[4] or row[3] or 0)
+        amount = current + self.increment
+        ok, msg, new_row = place_auction_bid(interaction.user.id, self.auction_id, amount)
+        await interaction.response.send_message(embed=discord.Embed(title="🔨 مزايدة", description=f"{msg}\nالمبلغ: {coin_line(amount)}", color=COLOR_GREEN if ok else COLOR_RED), ephemeral=True)
+
+
+class CustomBidModal(discord.ui.Modal, title="مزايدة مخصصة"):
+    auction_id = discord.ui.TextInput(label="Auction ID", placeholder="مثال: 1", required=True, max_length=20)
+    amount = discord.ui.TextInput(label="مبلغ المزايدة", placeholder="مثال: 250000", required=True, max_length=20)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            auction_id = int(str(self.auction_id.value).strip())
+            amount = parse_bet_amount(str(self.amount.value).strip())
+        except:
+            await interaction.response.send_message("❌ البيانات غير صحيحة.", ephemeral=True)
+            return
+        if amount is None:
+            await interaction.response.send_message("❌ المبلغ غير صحيح.", ephemeral=True)
+            return
+        ok, msg, row = place_auction_bid(interaction.user.id, auction_id, amount)
+        await interaction.response.send_message(embed=discord.Embed(title="🔨 مزايدة مخصصة", description=f"{msg}\nالمبلغ: {coin_line(amount)}", color=COLOR_GREEN if ok else COLOR_RED), ephemeral=True)
+
 
 class JoinPlayView(discord.ui.View):
     def __init__(self, game, max_players, host_id, note=""):
@@ -3720,7 +4707,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
-    global memory_backup_task, economy_explain_task, booster_weekly_task, timed_roles_task
+    global memory_backup_task, economy_explain_task, booster_weekly_task, timed_roles_task, auction_task
 
     guild = bot.get_guild(GUILD_ID)
 
@@ -3747,6 +4734,9 @@ async def on_ready():
 
     if timed_roles_task is None or timed_roles_task.done():
         timed_roles_task = asyncio.create_task(timed_roles_loop())
+
+    if auction_task is None or auction_task.done():
+        auction_task = asyncio.create_task(auction_loop())
 
     await bot.change_presence(
         status=discord.Status.online,
@@ -6369,14 +7359,14 @@ def build_shop_embed(member=None):
     return embed
 
 
-@bot.command(name="متجر", aliases=["shop"])
+@bot.command(name="متجر", aliases=["shop", "market"])
 async def shop_command(ctx):
     if not SHOP_ENABLED:
         await ctx.send(embed=discord.Embed(title="🔒 المتجر مقفل", description="الإدارة قفلت المتجر مؤقتًا.", color=COLOR_RED), delete_after=8)
         return
     if not await require_shop_channel(ctx):
         return
-    await ctx.send(embed=build_shop_embed(ctx.author))
+    await ctx.send(embed=build_market_embed(ctx.author), view=MarketView())
 
 
 @bot.command(name="شراء", aliases=["buy"])
@@ -6500,6 +7490,116 @@ async def lootbox_command(ctx):
     embed.add_field(name="💰 سعر الصندوق", value=coin_line(LOOTBOX_PRICE), inline=True)
     embed.add_field(name="💼 رصيدك الآن", value=coin_line(get_balance(ctx.author.id)), inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Lootbox")
+    await ctx.send(embed=embed)
+
+
+
+@bot.command(name="عقارات", aliases=["realestate", "real_estate", "properties"])
+async def real_estate_command(ctx):
+    if not SHOP_ENABLED or not REAL_ESTATE_ENABLED:
+        await ctx.send(embed=discord.Embed(title="🔒 العقارات مقفلة", description="الإدارة قفلت نظام العقارات مؤقتًا.", color=COLOR_RED), delete_after=8)
+        return
+    if not await require_shop_channel(ctx):
+        return
+    await ctx.send(embed=build_real_estate_embed(ctx.author), view=RealEstateView())
+
+
+@bot.command(name="عقاراتي", aliases=["myproperties", "assets"])
+async def my_properties_command(ctx):
+    if not await require_shop_channel(ctx):
+        return
+    await ctx.send(embed=build_user_assets_embed(ctx.author), view=MyAssetsView())
+
+
+@bot.command(name="ايجار", aliases=["rent"])
+async def rent_command(ctx):
+    if not await require_shop_channel(ctx):
+        return
+    ok, total, remaining, count = collect_rent_for_user(ctx.author.id)
+    if not ok:
+        await ctx.send(embed=discord.Embed(title="⏳ الإيجار غير جاهز", description=f"عقاراتك: `{count}`\nأقرب إيجار بعد: **{format_seconds(remaining)}**", color=COLOR_ORANGE), delete_after=10)
+        return
+    embed = discord.Embed(title="💰 تم جمع الإيجار", description=f"جمعت من عقاراتك: {coin_line(total)}", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+    embed.add_field(name="رصيدك الآن", value=coin_line(get_balance(ctx.author.id)), inline=False)
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="سوق_العقارات", aliases=["propertymarket"])
+async def property_market_command(ctx):
+    if not await require_shop_channel(ctx):
+        return
+    await ctx.send(embed=build_property_market_embed(ctx.author), view=PropertyMarketView())
+
+
+@bot.command(name="مزادات", aliases=["auctions"])
+async def auctions_command(ctx):
+    if not await require_shop_channel(ctx):
+        return
+    await settle_ended_auctions(ctx.guild)
+    await ctx.send(embed=build_auction_embed(ctx.author), view=AuctionListView())
+
+
+@bot.command(name="عرض_عقار", aliases=["list_property"])
+async def list_property_command(ctx, property_id: int = None, price: str = None):
+    if not await require_shop_channel(ctx):
+        return
+    if property_id is None or price is None:
+        await ctx.send("استخدم: `!عرض_عقار رقم_العقار السعر` مثال: `!عرض_عقار 12 150k`", delete_after=10)
+        return
+    parsed_price = parse_bet_amount(price)
+    if parsed_price is None:
+        await ctx.send("❌ السعر غير صحيح.", delete_after=8)
+        return
+    ok, msg = set_property_for_sale(property_id, ctx.author.id, parsed_price)
+    await ctx.send(embed=discord.Embed(title="🏷️ عرض عقار للبيع", description=msg, color=COLOR_GREEN if ok else COLOR_RED))
+
+
+@bot.command(name="مزاد_عقار", aliases=["auction_property"])
+async def auction_property_command(ctx, property_id: int = None, minutes: int = None, start_price: str = None):
+    if not await require_shop_channel(ctx):
+        return
+    if property_id is None or minutes is None or start_price is None:
+        await ctx.send("استخدم: `!مزاد_عقار رقم_العقار الدقائق سعر_البداية` مثال: `!مزاد_عقار 12 30 100k`", delete_after=10)
+        return
+    parsed_price = parse_bet_amount(start_price)
+    if parsed_price is None:
+        await ctx.send("❌ سعر البداية غير صحيح.", delete_after=8)
+        return
+    ok, msg, auction_id = create_property_auction(ctx.author.id, property_id, minutes, parsed_price)
+    if not ok:
+        await ctx.send(embed=discord.Embed(title="❌ فشل فتح المزاد", description=msg, color=COLOR_RED))
+        return
+    embed = discord.Embed(title="🔨 مزاد عقار جديد", description=f"فتح {ctx.author.mention} مزاد على العقار `#{property_id}`.\nسعر البداية: {coin_line(parsed_price)}\nينتهي: <t:{int(time.time()) + int(minutes)*60}:R>", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
+    channel = await get_channel_by_id(ctx.guild, EVENTS_CHANNEL_ID)
+    if channel:
+        await channel.send(embed=embed, view=AuctionListView())
+    await ctx.send("✅ تم فتح المزاد.", delete_after=6)
+
+
+@bot.command(name="ملاك", aliases=["landlords"])
+async def landlords_command(ctx):
+    if not await require_shop_channel(ctx):
+        return
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT owner_id, COUNT(*) as c
+            FROM real_estate_properties
+            WHERE owner_id > 0
+            GROUP BY owner_id
+            ORDER BY c DESC
+            LIMIT 10
+        """)
+        rows = cur.fetchall()
+        conn.close()
+    except:
+        rows = []
+    embed = discord.Embed(title="🏙️ أكبر ملاك العقارات", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
+    if not rows:
+        embed.description = "ما فيه ملاك عقارات حتى الآن."
+    else:
+        embed.description = "\n".join([f"`{i}.` <@{uid}> — **{count}** عقار" for i, (uid, count) in enumerate(rows, 1)])
     await ctx.send(embed=embed)
 
 
