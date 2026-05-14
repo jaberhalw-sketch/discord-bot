@@ -117,7 +117,7 @@ COMMAND_SYSTEM_MAP = {
     "انشاء": "admin", "اعداد": "admin", "لوحة": "admin", "اعلان": "admin", "مسح": "admin", "قفل": "admin", "فتح": "admin",
     "اقتراح": "community", "لعب": "lfg", "سحب": "giveaway", "رولات": "roles",
     "لفلي": "levels", "لفل": "levels", "ترتيب": "levels",
-    "رصيدي": "economy", "رصيد": "economy", "يومي": "economy", "بوست": "economy", "تحويل": "economy", "اغنى": "economy",
+    "رصيدي": "economy", "رصيد": "economy", "راتب": "economy", "بوست": "economy", "تحويل": "economy", "اغنى": "economy",
     "اعطاءفلوس": "economy", "سحبفلوس": "economy", "تصفيرفلوس": "economy",
     "شرح_القمار": "gambling", "حظ": "gambling", "دبل": "gambling", "سلوت": "gambling", "وجه": "gambling", "بلاكجاك": "gambling",
     "حماية": "protection", "اعدادات": "protection", "تحذير": "protection", "تحذيرات": "protection", "تصفير": "protection",
@@ -700,10 +700,11 @@ def coin_line(amount, bold=True):
     except:
         value = 0
 
+    short = f" (`{short_money(value)}`)" if abs(value) >= 100_000 else ""
     if bold:
-        return f"**{value:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+        return f"{ECONOMY_EMOJI} **{value:,}** {COIN_NAME}{short}"
 
-    return f"{value:,} {ECONOMY_EMOJI} {COIN_NAME}"
+    return f"{ECONOMY_EMOJI} {value:,} {COIN_NAME}{short}"
 
 
 def money_delta(amount):
@@ -713,7 +714,17 @@ def money_delta(amount):
         amount = 0
 
     sign = "+" if amount >= 0 else ""
-    return f"**{sign}{amount:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+    icon = "📈" if amount > 0 else "📉" if amount < 0 else "➖"
+    return f"{icon} **{sign}{amount:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+
+
+def casino_status_line(label, value):
+    return f"**{label}:** {value}"
+
+
+def pretty_casino_box(lines):
+    body = "\n".join(lines)
+    return f"```ansi\n{body}\n```"
 
 
 def get_money_rank(user_id):
@@ -748,9 +759,11 @@ def clean_bar(percent, length=12):
 def slot_box(roll):
     return (
         "```txt\n"
-        "╔═══════════════╗\n"
-        f"║  {roll[0]} │ {roll[1]} │ {roll[2]}  ║\n"
-        "╚═══════════════╝\n"
+        "╭───────────────╮\n"
+        "│   NM CASINO   │\n"
+        "├───────────────┤\n"
+        f"│  {roll[0]}  │  {roll[1]}  │  {roll[2]}  │\n"
+        "╰───────────────╯\n"
         "```"
     )
 
@@ -956,29 +969,55 @@ async def validate_gamble(ctx, amount_text):
     amount = parse_bet_amount(amount_text)
 
     if amount is None:
-        await ctx.send("❌ اكتب مبلغ صحيح. مثال: `!حظ 500` أو `!حظ 10k` أو `!حظ 1m`")
+        embed = discord.Embed(
+            title="🎰 مبلغ غير صحيح",
+            description="اكتب مبلغ واضح مثل: `!حظ 500` أو `!حظ 10k` أو `!حظ 1m`",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} • NM Casino")
+        await ctx.send(embed=embed, delete_after=10)
         return None
 
     if amount <= 0:
-        await ctx.send("❌ مبلغ الرهان لازم يكون أكبر من صفر.")
+        embed = discord.Embed(
+            title="❌ رهان مرفوض",
+            description="مبلغ الرهان لازم يكون أكبر من صفر.",
+            color=COLOR_RED,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} • NM Casino")
+        await ctx.send(embed=embed, delete_after=8)
         return None
 
     ok, remaining = can_gamble_now(ctx.author.id)
 
     if not ok:
-        await ctx.send(f"⏳ انتظر **{remaining:.1f} ثانية** قبل القمار مرة ثانية.", delete_after=4)
+        embed = discord.Embed(
+            title="⏳ انتظر شوي",
+            description=f"باقي **{remaining:.1f} ثانية** قبل محاولة القمار التالية.",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text=f"{BOT_BRAND} • Cooldown {GAMBLE_COOLDOWN_SECONDS}s")
+        await ctx.send(embed=embed, delete_after=4)
         return None
 
     balance = get_balance(ctx.author.id)
 
     if balance < amount:
+        missing = amount - balance
         embed = discord.Embed(
             title="❌ رصيدك ما يكفي",
-            description=f"ما تقدر تدخل برهان أعلى من رصيدك.\n\n**Wallet:** {coin_line(balance)}\n**Bet:** {coin_line(amount)}",
+            description="ما تقدر تدخل برهان أعلى من الموجود في محفظتك.",
             color=COLOR_RED,
             timestamp=discord.utils.utcnow()
         )
-        embed.set_footer(text=f"{BOT_BRAND} | Gambling")
+        embed.set_author(name=f"{ctx.author.display_name} • Wallet Check", icon_url=ctx.author.display_avatar.url)
+        embed.add_field(name="💼 محفظتك", value=coin_line(balance), inline=True)
+        embed.add_field(name="🎯 الرهان", value=coin_line(amount), inline=True)
+        embed.add_field(name="📉 الناقص", value=coin_line(missing), inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} • NM Casino")
         await ctx.send(embed=embed)
         return None
 
@@ -993,17 +1032,17 @@ def gambling_embed(title, status, color, member, bet, result_amount=None, balanc
         timestamp=discord.utils.utcnow()
     )
 
-    embed.set_author(name=f"{member.display_name} • {game_name}", icon_url=member.display_avatar.url)
-    embed.add_field(name="🎯 Bet", value=coin_line(bet), inline=True)
+    embed.set_author(name=f"{member.display_name} • NM Casino", icon_url=member.display_avatar.url)
+    embed.add_field(name="🎯 الرهان", value=coin_line(bet), inline=True)
 
     if result_amount is not None:
-        embed.add_field(name="📈 Change", value=money_delta(result_amount), inline=True)
+        embed.add_field(name="💸 النتيجة", value=money_delta(result_amount), inline=True)
 
     if balance is not None:
-        embed.add_field(name="💼 New Balance", value=coin_line(balance), inline=False)
+        embed.add_field(name="💼 الرصيد الجديد", value=coin_line(balance), inline=False)
 
     if details:
-        embed.add_field(name="📌 Details", value=details, inline=False)
+        embed.add_field(name="📌 تفاصيل اللعبة", value=details, inline=False)
 
     embed.set_footer(text=f"{BOT_BRAND} • {game_name} • Cooldown {GAMBLE_COOLDOWN_SECONDS}s")
     return embed
@@ -1434,11 +1473,11 @@ def build_economy_guide_embed(auto=False):
     )
 
     embed.add_field(
-        name="🎁 المكافأة الساعية",
+        name="💸 الراتب",
         value=(
-            "`!يومي` أو `!ساعتي`\n"
-            "تقدر تاخذ مكافأة كل **ساعة**.\n"
-            "كل ما لفلك أعلى، المكافأة تزيد شوي."
+            "`!راتب`\n"
+            "تقدر تستلم راتب كل **ساعة**.\n"
+            "كل ما لفلك أعلى، الراتب يزيد شوي."
         ),
         inline=False
     )
@@ -1468,7 +1507,8 @@ def build_economy_guide_embed(auto=False):
             "`!حظ 500` نسبة 50/50\n"
             "`!دبل 500` أخطر، لكن يعطي دبل\n"
             "`!سلوت 500` رموز وجوائز عشوائية\n"
-            "`!وجه 500 ملك` أو `!وجه 500 كتابة`"
+            "`!وجه 500 ملك` أو `!وجه 500 كتابة\n"
+            "`!بلاكجاك 500` ضد الديلر"
         ),
         inline=False
     )
@@ -2775,7 +2815,7 @@ def dashboard_economy_page():
       <form class="card" method="post" action="/dashboard/economy"><h3>🎯 Set Balance</h3><label>User ID</label><input name="user_id" required><label>New Balance</label><input name="amount" placeholder="100000" required><input type="hidden" name="action" value="set"><div style="height:10px"></div><button class="btn primary">Set</button></form>
     </div>
     <div style="height:14px"></div>
-    <div class="card"><h3>🪙 Economy Leaderboard</h3><table class="table"><tr><th>User</th><th>Balance</th><th>Last Hourly</th></tr>{table}</table></div>
+    <div class="card"><h3>🪙 Economy Leaderboard</h3><table class="table"><tr><th>User</th><th>Balance</th><th>Last Salary</th></tr>{table}</table></div>
     '''
     return render_dashboard_page("Economy", body)
 
@@ -3902,7 +3942,7 @@ async def help_cmd(ctx):
 `!اقتصاد` - شرح النظام
 `!رصيدي`
 `!رصيد @شخص`
-`!يومي` أو `!ساعتي`
+`!راتب`
 `!بوست` أو `!اسبوعي`
 `!تحويل @شخص 500`
 `!اغنى`
@@ -4436,25 +4476,27 @@ async def my_balance(ctx):
     balance = get_balance(ctx.author.id)
     xp, level = get_level_data(ctx.author.id)
     needed = level * 100
-    daily_bonus = DAILY_REWARD_BASE + (int(level) * 25)
+    salary_bonus = DAILY_REWARD_BASE + (int(level) * 25)
     rank = get_money_rank(ctx.author.id)
-    progress = clean_bar(xp / needed if needed else 0)
+    progress = clean_bar(xp / needed if needed else 0, 14)
 
     embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Retard Wallet",
+        title=f"{ECONOMY_EMOJI} Economy Wallet",
         description=(
-            f"محفظة {ctx.author.mention}\n"
+            f"**محفظة {ctx.author.mention}**\n"
             f"`{progress}` **{xp:,}/{needed:,} XP**"
         ),
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
+    embed.set_author(name=f"{ctx.author.display_name} • Wallet", icon_url=ctx.author.display_avatar.url)
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.add_field(name="💼 Balance", value=coin_line(balance), inline=False)
-    embed.add_field(name="🏆 Money Rank", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
-    embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
-    embed.add_field(name="⏰ Hourly Reward", value=coin_line(daily_bonus), inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Economy Wallet")
+    embed.add_field(name="💼 الرصيد", value=coin_line(balance), inline=False)
+    embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
+    embed.add_field(name="🏅 اللفل", value=f"**{level}**", inline=True)
+    embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
+    embed.add_field(name="⚡ أوامر سريعة", value="`!راتب` • `!تحويل @شخص مبلغ` • `!اغنى`", inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Economy System")
     await ctx.send(embed=embed)
 
 
@@ -4467,30 +4509,31 @@ async def balance(ctx, member: discord.Member = None):
     balance_amount = get_balance(member.id)
     xp, level_num = get_level_data(member.id)
     needed = level_num * 100
-    daily_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
+    salary_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
     rank = get_money_rank(member.id)
-    progress = clean_bar(xp / needed if needed else 0)
+    progress = clean_bar(xp / needed if needed else 0, 14)
 
     embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Retard Wallet",
+        title=f"{ECONOMY_EMOJI} Economy Wallet",
         description=(
-            f"محفظة {member.mention}\n"
+            f"**محفظة {member.mention}**\n"
             f"`{progress}` **{xp:,}/{needed:,} XP**"
         ),
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
+    embed.set_author(name=f"{member.display_name} • Wallet", icon_url=member.display_avatar.url)
     embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
-    embed.add_field(name="🏆 Money Rank", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
-    embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
-    embed.add_field(name="⏰ Hourly Reward", value=coin_line(daily_bonus), inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Economy Wallet")
+    embed.add_field(name="💼 الرصيد", value=coin_line(balance_amount), inline=False)
+    embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
+    embed.add_field(name="🏅 اللفل", value=f"**{level_num}**", inline=True)
+    embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Economy System")
     await ctx.send(embed=embed)
 
 
-@bot.command(name="يومي", aliases=["daily", "ساعتي", "hourly"])
-async def daily(ctx):
+@bot.command(name="راتب", aliases=["salary", "pay"])
+async def salary(ctx):
     if not await require_commands_channel(ctx):
         return
 
@@ -4499,72 +4542,30 @@ async def daily(ctx):
 
     if not success:
         embed = discord.Embed(
-            title="⏳ المكافأة الساعية مأخوذة",
-            description=f"ارجع بعد **{format_seconds(remaining)}**.",
+            title="⏳ الراتب غير جاهز",
+            description=f"راتبك القادم بعد **{format_seconds(remaining)}**.",
             color=COLOR_ORANGE,
             timestamp=discord.utils.utcnow()
         )
-        embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
-        embed.set_footer(text=f"{BOT_BRAND} • Hourly Reward")
+        embed.set_author(name=f"{ctx.author.display_name} • Salary", icon_url=ctx.author.display_avatar.url)
+        embed.add_field(name="💼 محفظتك الآن", value=coin_line(balance_amount), inline=False)
+        embed.add_field(name="💡 الأمر", value="استخدم `!راتب` كل ساعة.", inline=False)
+        embed.set_footer(text=f"{BOT_BRAND} • Salary System")
         await ctx.send(embed=embed)
         return
 
     embed = discord.Embed(
-        title="🎁 Hourly Reward Claimed",
-        description=f"تم إضافة المكافأة لمحفظتك يا {ctx.author.mention}.",
+        title="💸 تم استلام الراتب",
+        description=f"تم إيداع الراتب في محفظتك يا {ctx.author.mention}.",
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
+    embed.set_author(name=f"{ctx.author.display_name} • Salary", icon_url=ctx.author.display_avatar.url)
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.add_field(name="🎁 Reward", value=money_delta(reward), inline=True)
-    embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
-    embed.add_field(name="🏅 Level Bonus", value=f"Level **{level}**", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • كل ساعة تقدر تاخذ المكافأة")
-    await ctx.send(embed=embed)
-
-
-@bot.command(name="بوست", aliases=["boost", "booster", "اسبوعي", "weekly"])
-async def booster_weekly(ctx):
-    if not await require_commands_channel(ctx):
-        return
-
-    if not is_server_booster(ctx.author):
-        embed = discord.Embed(
-            title="🚀 مكافأة البوست الأسبوعية",
-            description=f"هذي المكافأة خاصة للي عندهم رتبة <@&{SERVER_BOOSTER_ROLE_ID}>.",
-            color=COLOR_ORANGE,
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(name="المطلوب", value="سو Server Boost أو خذ رتبة البوست عشان تقدر تستلمها.", inline=False)
-        embed.set_footer(text=f"{BOT_BRAND} • Booster Weekly")
-        await ctx.send(embed=embed)
-        return
-
-    success, remaining, balance_amount, reward = claim_booster_weekly(ctx.author.id)
-
-    if not success:
-        embed = discord.Embed(
-            title="⏳ مكافأة البوست مو جاهزة",
-            description=f"ارجع بعد **{format_seconds(remaining)}**.",
-            color=COLOR_ORANGE,
-            timestamp=discord.utils.utcnow()
-        )
-        embed.add_field(name="💼 Balance", value=coin_line(balance_amount), inline=False)
-        embed.set_footer(text=f"{BOT_BRAND} • Booster Weekly")
-        await ctx.send(embed=embed)
-        return
-
-    embed = discord.Embed(
-        title="🚀 Booster Weekly Claimed",
-        description=f"شكراً على دعم السيرفر يا {ctx.author.mention}.",
-        color=COLOR_PURPLE,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.add_field(name="🎁 Weekly Reward", value=money_delta(reward), inline=True)
-    embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
-    embed.add_field(name="⏳ Cooldown", value="كل أسبوع", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Server Booster Reward")
+    embed.add_field(name="💵 الراتب", value=money_delta(reward), inline=True)
+    embed.add_field(name="🏅 بونص اللفل", value=f"Level **{level}**", inline=True)
+    embed.add_field(name="💼 الرصيد الجديد", value=coin_line(balance_amount), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • تقدر تستلم راتب جديد كل ساعة")
     await ctx.send(embed=embed)
 
 
@@ -4770,27 +4771,27 @@ def build_blackjack_embed(member, bet, player_cards, dealer_cards, status, color
     dealer_value = "?" if hide_dealer and not finished else str(dealer_total)
 
     embed = discord.Embed(
-        title="🎴 Blackjack Table",
+        title="🎴 Blackjack • NM Casino",
         description=status,
         color=color,
         timestamp=discord.utils.utcnow()
     )
-    embed.set_author(name=f"{member.display_name} • NM Casino", icon_url=member.display_avatar.url)
-    embed.add_field(name="🎯 Bet", value=coin_line(bet), inline=True)
+    embed.set_author(name=f"{member.display_name} • Blackjack Table", icon_url=member.display_avatar.url)
+    embed.add_field(name="🎯 الرهان", value=coin_line(bet), inline=True)
 
     if change is not None:
-        embed.add_field(name="📈 Change", value=money_delta(change), inline=True)
+        embed.add_field(name="💸 النتيجة", value=money_delta(change), inline=True)
 
     if balance is not None:
-        embed.add_field(name="💼 Balance", value=coin_line(balance), inline=False)
+        embed.add_field(name="💼 الرصيد", value=coin_line(balance), inline=False)
 
     embed.add_field(
-        name=f"🧍 Your Hand — {player_total}",
+        name=f"🧍 يدك — {player_total}",
         value=hand_text(player_cards),
         inline=False
     )
     embed.add_field(
-        name=f"🤵 Dealer Hand — {dealer_value}",
+        name=f"🤵 الديلر — {dealer_value}",
         value=dealer_display,
         inline=False
     )
@@ -4993,7 +4994,7 @@ async def gamble_luck(ctx, amount=None):
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
             "🎲 Lucky Roll",
-            "✅ **WIN** — فزت بالدبل.",
+            "✅ **فوز نظيف** — دبل الرهان وصل لمحفظتك.",
             COLOR_GREEN,
             ctx.author,
             bet,
@@ -5006,7 +5007,7 @@ async def gamble_luck(ctx, amount=None):
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
             "🎲 Lucky Roll",
-            "❌ **LOSE** — راحت عليك هالمرة.",
+            "❌ **خسارة** — الرهان راح للكازينو.",
             COLOR_RED,
             ctx.author,
             bet,
@@ -5033,7 +5034,7 @@ async def gamble_double(ctx, amount=None):
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
             "💎 Double Risk",
-            "✅ **DOUBLE HIT** — مخاطرة وطلعت لك.",
+            "💎 **دبل ناجح** — مخاطرة عالية وربحت.",
             COLOR_GREEN,
             ctx.author,
             bet,
@@ -5046,7 +5047,7 @@ async def gamble_double(ctx, amount=None):
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
             "💎 Double Risk",
-            "❌ **BUST** — الدبل ما ضبط.",
+            "💥 **فشل الدبل** — المخاطرة ما ضبطت.",
             COLOR_RED,
             ctx.author,
             bet,
@@ -5147,7 +5148,7 @@ async def gamble_flip(ctx, amount=None, choice=None):
         balance = add_money(ctx.author.id, payout)
         embed = gambling_embed(
             "🪙 Coin Flip",
-            "✅ **CORRECT PICK** — توقعت صح.",
+            "✅ **اختيار صحيح** — الكوين جات على اختيارك.",
             COLOR_GREEN,
             ctx.author,
             bet,
@@ -5160,7 +5161,7 @@ async def gamble_flip(ctx, amount=None, choice=None):
         balance = get_balance(ctx.author.id)
         embed = gambling_embed(
             "🪙 Coin Flip",
-            "❌ **WRONG PICK** — توقعت غلط.",
+            "❌ **اختيار غلط** — الكوين عاندتك.",
             COLOR_RED,
             ctx.author,
             bet,
