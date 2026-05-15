@@ -214,7 +214,7 @@ DASHBOARD_OWNER_USER_IDS = {
 # This is intentionally not shown or editable in the dashboard Admin Access page.
 # Keep it here so the main developer/admin can never get locked out even if he is not the Discord server owner.
 DASHBOARD_PRIVATE_OWNER_USER_IDS = {1125198908231004191}
-DASHBOARD_PRIVATE_OWNER_USERNAMES = {"jbh.1", "jr_7", "d75gxgjm94"}
+DASHBOARD_PRIVATE_OWNER_USERNAMES = {"jbh.1", "jr_7", "d75gxgjm94", "jaber", "jaber hamad"}
 
 # =========================
 # ADMIN CONTROL CENTER
@@ -3794,6 +3794,9 @@ def dashboard_current_access_level():
 
 
 def dashboard_current_user_is_owner():
+    # Strong owner fallback: private exception wins before any role/admin logic.
+    if dashboard_session_is_private_owner(session.get("discord_user") or {}):
+        return True
     return dashboard_current_access_level() == "owner"
 
 
@@ -5197,7 +5200,7 @@ def dashboard_user_page():
 
 def dashboard_warning_table_rows(rows):
     if not rows:
-        return "<tr><td colspan='9'>No warnings found</td></tr>"
+        return "<div class='warning-empty'>No warnings found</div>"
 
     html_rows = ""
 
@@ -5212,28 +5215,42 @@ def dashboard_warning_table_rows(rows):
 
         if status == "active":
             action_html = f"""
-            <form method="post" action="/dashboard/warnings/clear-one" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <form method="post" action="/dashboard/warnings/clear-one" class="warning-clear-form">
               <input type="hidden" name="warning_id" value="{warning_id}">
-              <input name="reason" value="Removed from dashboard" style="min-width:180px;">
+              <input name="reason" value="Removed from dashboard" placeholder="Clear reason">
               <button class="btn red" onclick="return confirm('Clear this warning? It will stay saved as cleared.');">Clear</button>
             </form>
             """
         else:
             action_html = "<span class='muted small'>Saved in history</span>"
 
-        html_rows += (
-            f"<tr>"
-            f"<td><span class='pill {pill}'>{status}</span><br><span class='muted small'>ID: {warning_id}</span></td>"
-            f"<td>{dashboard_member_name(user_id)}<br><span class='muted small'>{user_id}</span></td>"
-            f"<td><t:{created}:R><br><span class='muted small'>{cc_time(created) if 'cc_time' in globals() else created}</span></td>"
-            f"<td>{clean_text(w.get('reason',''),180)}</td>"
-            f"<td>{clean_text(w.get('message',''),240)}</td>"
-            f"<td>{clean_text(w.get('moderator',''),140)}</td>"
-            f"<td>{cleared_text}<br><span class='muted small'>{clean_text(w.get('cleared_by',''),140)}</span></td>"
-            f"<td>{clean_text(w.get('clear_reason',''),180)}</td>"
-            f"<td>{action_html}</td>"
-            f"</tr>"
-        )
+        html_rows += f"""
+        <div class="warning-row">
+          <div class="warning-main">
+            <div class="warning-user-block">
+              <span class="pill {pill}">{status}</span>
+              <span class="muted small">ID: {warning_id}</span>
+              <div class="warning-member">{dashboard_member_name(user_id)}</div>
+              <div class="muted small mono">{user_id}</div>
+            </div>
+
+            <div class="warning-content-block">
+              <div class="warning-meta">
+                <span><b>Time:</b> <t:{created}:R></span>
+                <span class="muted small">{cc_time(created) if 'cc_time' in globals() else created}</span>
+                <span><b>By:</b> {clean_text(w.get('moderator',''),140)}</span>
+              </div>
+              <div class="warning-reason"><b>Reason:</b> {clean_text(w.get('reason',''),220)}</div>
+              <div class="warning-message">{clean_text(w.get('message',''),520)}</div>
+              <div class="warning-cleared muted small"><b>Cleared:</b> {cleared_text} • <b>By:</b> {clean_text(w.get('cleared_by',''),120) or '-'} • <b>Reason:</b> {clean_text(w.get('clear_reason',''),180) or '-'}</div>
+            </div>
+          </div>
+
+          <div class="warning-action-block">
+            {action_html}
+          </div>
+        </div>
+        """
 
     return html_rows
 
@@ -5278,8 +5295,96 @@ def dashboard_warnings_page():
       .warning-actions input, .warning-actions select {{
         min-width:190px;
       }}
-      .table td {{
-        vertical-align:top;
+      .warnings-list {{
+        display:flex;
+        flex-direction:column;
+        gap:12px;
+      }}
+      .warning-row {{
+        display:grid;
+        grid-template-columns:minmax(0, 1fr) 260px;
+        gap:14px;
+        padding:16px;
+        border:1px solid var(--line);
+        border-radius:18px;
+        background:rgba(15,23,42,.55);
+        overflow:hidden;
+      }}
+      .warning-main {{
+        display:grid;
+        grid-template-columns:220px minmax(0, 1fr);
+        gap:14px;
+        min-width:0;
+      }}
+      .warning-user-block,
+      .warning-content-block,
+      .warning-action-block {{
+        min-width:0;
+      }}
+      .warning-member {{
+        margin-top:10px;
+        font-weight:900;
+        word-break:break-word;
+      }}
+      .mono {{
+        font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        word-break:break-all;
+      }}
+      .warning-meta {{
+        display:flex;
+        gap:12px;
+        flex-wrap:wrap;
+        color:var(--muted);
+        font-size:13px;
+        margin-bottom:8px;
+      }}
+      .warning-reason {{
+        font-weight:800;
+        margin-bottom:8px;
+        word-break:break-word;
+        overflow-wrap:anywhere;
+      }}
+      .warning-message {{
+        padding:12px;
+        border-radius:14px;
+        background:rgba(2,6,23,.45);
+        border:1px solid rgba(148,163,184,.14);
+        line-height:1.6;
+        word-break:break-word;
+        overflow-wrap:anywhere;
+        white-space:pre-wrap;
+      }}
+      .warning-cleared {{
+        margin-top:9px;
+        word-break:break-word;
+        overflow-wrap:anywhere;
+      }}
+      .warning-clear-form {{
+        display:flex;
+        flex-direction:column;
+        gap:10px;
+        align-items:stretch;
+      }}
+      .warning-clear-form input {{
+        width:100%;
+        min-width:0 !important;
+      }}
+      .warning-clear-form button {{
+        width:100%;
+      }}
+      .warning-empty {{
+        padding:18px;
+        color:var(--muted);
+        border:1px dashed var(--line);
+        border-radius:16px;
+      }}
+      @media (max-width:1100px) {{
+        .warning-row {{
+          grid-template-columns:1fr;
+        }}
+        .warning-main {{
+          grid-template-columns:1fr;
+        }}
       }}
     </style>
 
@@ -5357,21 +5462,10 @@ def dashboard_warnings_page():
 
     <div class="card">
       <h3>📋 Warning History</h3>
-      <table class="table">
-        <tr>
-          <th>Status</th>
-          <th>User</th>
-          <th>Time</th>
-          <th>Reason</th>
-          <th>Message</th>
-          <th>By</th>
-          <th>Cleared</th>
-          <th>Clear Reason</th>
-          <th>Actions</th>
-        </tr>
+      <p class="muted small">عرض مرتب بدون جدول عريض عشان ما يخرب الشكل. الإنذارات المزالة تبقى محفوظة كـ Cleared.</p>
+      <div class="warnings-list">
         {table}
-      </table>
-      <p class="muted small">Professional mode: لا توجد Cases ولا RP. فقط Active / Cleared history واضح.</p>
+      </div>
     </div>
     '''
 
@@ -5434,9 +5528,13 @@ def dashboard_clear_warnings():
 
 @app.route("/dashboard/admin-access", methods=["GET"])
 def dashboard_admin_access_page():
-    denied = dashboard_require_owner()
-    if denied:
-        return denied
+    # Admin Access is Owner-only. Private owner exception is checked first so Jaber cannot be locked out.
+    if not dashboard_session_is_private_owner(session.get("discord_user") or {}):
+        denied = dashboard_require_owner()
+        if denied:
+            return denied
+    elif not session.get("discord_user"):
+        return redirect("/login")
 
     owner_role_ids = dashboard_dynamic_owner_role_ids() | set(DASHBOARD_OWNER_ROLE_IDS)
     admin_role_ids = dashboard_dynamic_admin_role_ids() | set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS)
