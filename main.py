@@ -3749,11 +3749,14 @@ def dashboard_access_level(user_id):
     if user_id in DASHBOARD_PRIVATE_OWNER_USER_IDS:
         return "owner"
 
-    if user_id in DASHBOARD_OWNER_USER_IDS:
+    if user_id in DASHBOARD_OWNER_USER_IDS or user_id in dashboard_dynamic_owner_user_ids():
         return "owner"
 
     if guild and user_id == int(guild.owner_id):
         return "owner"
+
+    if user_id in dashboard_dynamic_admin_user_ids():
+        return "admin"
 
     member = dashboard_get_member_sync(user_id)
 
@@ -4073,6 +4076,14 @@ def dashboard_dynamic_admin_role_ids():
     return dashboard_setting_int_set("dashboard_admin_role_ids")
 
 
+def dashboard_dynamic_owner_user_ids():
+    return dashboard_setting_int_set("dashboard_owner_user_ids")
+
+
+def dashboard_dynamic_admin_user_ids():
+    return dashboard_setting_int_set("dashboard_admin_user_ids")
+
+
 def parse_dashboard_role_id_list(values):
     cleaned = []
     seen = set()
@@ -4098,6 +4109,93 @@ def dashboard_get_guild_roles():
             continue
         roles.append(role)
     return roles
+
+
+async def dashboard_chunk_guild_members():
+    guild = bot.get_guild(GUILD_ID) if bot else None
+    if not guild:
+        return []
+    try:
+        await guild.chunk(cache=True)
+    except Exception:
+        pass
+    return list(guild.members)
+
+
+def dashboard_get_guild_members_sync(force_chunk=True):
+    guild = bot.get_guild(GUILD_ID) if bot else None
+    if not guild:
+        return []
+    if force_chunk:
+        try:
+            future = asyncio.run_coroutine_threadsafe(dashboard_chunk_guild_members(), bot.loop)
+            members = future.result(timeout=12)
+            if members:
+                return members
+        except Exception:
+            pass
+    try:
+        return list(guild.members)
+    except Exception:
+        return []
+
+
+def dashboard_members_for_role(role_id):
+    role_id = int(role_id)
+    members = []
+    for member in dashboard_get_guild_members_sync(force_chunk=True):
+        try:
+            if any(r.id == role_id for r in member.roles):
+                members.append(member)
+        except Exception:
+            pass
+    return sorted(members, key=lambda m: str(m.display_name).lower())
+
+
+def dashboard_member_access_badge(user_id):
+    level = dashboard_access_level(int(user_id))
+    if int(user_id) in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+        return "<span class='pill ok'>Owner</span>"
+    if level == "owner":
+        return "<span class='pill ok'>Owner</span>"
+    if level == "admin":
+        return "<span class='pill'>Admin</span>"
+    return "<span class='pill bad'>No Access</span>"
+
+
+def dashboard_member_card_line(member):
+    try:
+        avatar = member.display_avatar.url
+    except Exception:
+        avatar = ""
+    if avatar:
+        avatar_html = f"<img src='{dash_escape(avatar, 300)}' class='miniavatar'>"
+    else:
+        avatar_html = "<span class='miniavatar blankavatar'>?</span>"
+    bot_badge = " <span class='muted small'>BOT</span>" if getattr(member, "bot", False) else ""
+    return (
+        f"<a class='memberline' href='/dashboard/admin-access/member/{member.id}'>"
+        f"{avatar_html}"
+        f"<span><b>{dash_escape(member.display_name, 80)}</b>{bot_badge}<br>"
+        f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span></span>"
+        f"<span class='memberbadge'>{dashboard_member_access_badge(member.id)}</span>"
+        f"</a>"
+    )
+
+
+def parse_dashboard_user_id_list(values):
+    cleaned = []
+    seen = set()
+    for value in values:
+        try:
+            user_id = int(str(value).strip())
+        except Exception:
+            continue
+        if user_id <= 0 or user_id in seen:
+            continue
+        seen.add(user_id)
+        cleaned.append(user_id)
+    return cleaned
 
 
 def parse_bool_field(value, default=False):
@@ -5342,11 +5440,28 @@ def dashboard_admin_access_page():
 
     owner_role_ids = dashboard_dynamic_owner_role_ids() | set(DASHBOARD_OWNER_ROLE_IDS)
     admin_role_ids = dashboard_dynamic_admin_role_ids() | set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS)
+    owner_user_ids = dashboard_dynamic_owner_user_ids() | set(DASHBOARD_OWNER_USER_IDS)
+    admin_user_ids = dashboard_dynamic_admin_user_ids()
     admin_role_ids = admin_role_ids - owner_role_ids
+    admin_user_ids = admin_user_ids - owner_user_ids - set(DASHBOARD_PRIVATE_OWNER_USER_IDS)
+
     roles = dashboard_get_guild_roles()
+    all_members = dashboard_get_guild_members_sync(force_chunk=True)
+    member_count = len([m for m in all_members if not getattr(m, "bot", False)])
+    bot_count = len([m for m in all_members if getattr(m, "bot", False)])
 
     role_rows = []
     for role in roles:
+        members = dashboard_members_for_role(role.id)
+        human_members = [m for m in members if not getattr(m, "bot", False)]
+        sample_members = human_members[:6]
+        more_count = max(0, len(human_members) - len(sample_members))
+        member_links = "".join([dashboard_member_card_line(member) for member in sample_members])
+        if more_count:
+            member_links += f"<div class='muted small' style='padding:8px 0 0 42px'>+{more_count} more members</div>"
+        if not member_links:
+            member_links = "<span class='muted small'>No human members in this role.</span>"
+
         managed_note = " <span class='muted small'>Managed</span>" if getattr(role, "managed", False) else ""
         owner_checked = "checked" if role.id in owner_role_ids else ""
         admin_checked = "checked" if role.id in admin_role_ids else ""
@@ -5354,14 +5469,25 @@ def dashboard_admin_access_page():
         <tr>
           <td>
             <b>{dash_escape(role.name, 90)}</b>{managed_note}<br>
-            <span class="muted small">ID: <code>{role.id}</code> • Position: {role.position}</span>
+            <span class="muted small">ID: <code>{role.id}</code> • Position: {role.position} • Members: {len(human_members)}</span>
           </td>
-          <td><label class="checkrow ownercheck"><input type="checkbox" name="owner_roles" value="{role.id}" {owner_checked}> Owner Access</label></td>
-          <td><label class="checkrow admincheck"><input type="checkbox" name="admin_roles" value="{role.id}" {admin_checked}> Admin Access</label></td>
+          <td><label class="checkrow ownercheck"><input type="checkbox" name="owner_roles" value="{role.id}" {owner_checked}> Owner</label></td>
+          <td><label class="checkrow admincheck"><input type="checkbox" name="admin_roles" value="{role.id}" {admin_checked}> Admin</label></td>
+          <td>{member_links}</td>
         </tr>
         """)
 
-    roles_html = "".join(role_rows) or "<tr><td colspan='3'>No roles found. Make sure the bot is online and can read the guild.</td></tr>"
+    roles_html = "".join(role_rows) or "<tr><td colspan='4'>No roles found. Make sure the bot is online and can read the guild.</td></tr>"
+
+    owner_users_html = "".join([
+        f"<tr><td>{dashboard_member_name(uid)}<br><span class='muted small'>ID: <code>{uid}</code></span></td><td><span class='pill ok'>Owner</span></td><td><a class='btn smallbtn' href='/dashboard/admin-access/member/{uid}'>Edit</a></td></tr>"
+        for uid in sorted(owner_user_ids)
+    ]) or "<tr><td colspan='3'>No visible direct Owner users. Private owner exception is hidden.</td></tr>"
+
+    admin_users_html = "".join([
+        f"<tr><td>{dashboard_member_name(uid)}<br><span class='muted small'>ID: <code>{uid}</code></span></td><td><span class='pill'>Admin</span></td><td><a class='btn smallbtn' href='/dashboard/admin-access/member/{uid}'>Edit</a></td></tr>"
+        for uid in sorted(admin_user_ids)
+    ]) or "<tr><td colspan='3'>No direct Admin users selected yet.</td></tr>"
 
     owner_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(owner_role_ids)]) if owner_role_ids else "No Owner Access roles selected yet. Bootstrap owner still works."
     admin_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(admin_role_ids)]) if admin_role_ids else "No Admin Access roles selected yet."
@@ -5376,21 +5502,32 @@ def dashboard_admin_access_page():
       .ownercheck {{color:#fde68a}}
       .admincheck {{color:#bfdbfe}}
       .access-box {{border:1px solid var(--line); border-radius:18px; padding:14px; background:rgba(15,23,42,.55)}}
+      .miniavatar {{width:30px;height:30px;border-radius:999px;object-fit:cover;flex:0 0 auto;background:#1e293b;display:inline-flex;align-items:center;justify-content:center}}
+      .blankavatar {{font-size:12px;color:var(--muted)}}
+      .memberline {{display:flex;align-items:center;gap:10px;text-decoration:none;color:var(--text);padding:8px;border:1px solid rgba(148,163,184,.12);border-radius:14px;margin:6px 0;background:rgba(2,6,23,.25)}}
+      .memberline:hover {{border-color:rgba(124,92,255,.65);background:rgba(124,92,255,.08)}}
+      .memberbadge {{margin-left:auto}}
+      .smallbtn {{padding:8px 12px;font-size:12px;border-radius:12px}}
+      .quickform {{display:flex;gap:10px;flex-wrap:wrap;align-items:center}}
+      .quickform input {{max-width:320px}}
+      .table td {{vertical-align:top}}
     </style>
 
     <div class="hero">
       <div class="card">
         <div class="big">🔐 Admin Access</div>
-        <p class="muted">اختار رتب الداشبورد من هنا بدل ما تكتب Discord Role IDs يدويًا في Railway.</p>
+        <p class="muted">هنا تضبط صلاحيات الداشبورد من داخل الموقع: رتب كاملة أو أشخاص محددين. اضغط على أي عضو عشان تختار صلاحياته.</p>
         <div style="height:10px"></div>
-        <span class="pill gold">Owner controls everything</span>
-        <span class="pill">Admin has limited access</span>
+        <span class="pill gold">Owner = Full Access</span>
+        <span class="pill">Admin = Limited Access</span>
+        <span class="pill ok">Members loaded: {member_count}</span>
+        <span class="pill">Bots: {bot_count}</span>
       </div>
       <div class="card">
-        <h3>🛡️ Safety</h3>
+        <h3>🛡️ الشرح</h3>
         <p class="muted access-note">
-          أنت كـ Discord server owner أو الموجود في <code>DASHBOARD_OWNER_USER_IDS</code> تظل Owner دائمًا حتى لو شلت كل الرتب بالغلط.
-          هذا يمنع إنك تقفل على نفسك الداشبورد.
+          <b>Owner</b> يقدر يسوي كل شيء داخل الداشبورد. <b>Admin</b> يدخل صفحات المراقبة والإنذارات والأشياء المحدودة فقط.<br>
+          تقدر تعطي الصلاحية عن طريق رتبة كاملة أو تضغط عضو وتعطيه صلاحية مباشرة.
         </p>
       </div>
     </div>
@@ -5398,13 +5535,37 @@ def dashboard_admin_access_page():
     <div class="grid2">
       <div class="card">
         <h3>👑 Owner Access</h3>
-        <p class="muted access-note">يقدر يسوي كل شيء داخل الداشبورد: إعدادات، اقتصاد، لفل، تحذيرات، ميموري، Control Center، Audit، OAuth Debug، وتعديل صلاحيات الداشبورد.</p>
+        <p class="muted access-note">صلاحية كاملة: Settings, Control Center, Audit, OAuth Debug, Memory actions, Economy/Levels edit, Admin Access.</p>
         <div class="access-box">{dash_escape(owner_roles_text, 500)}</div>
       </div>
       <div class="card">
         <h3>🧰 Admin Access</h3>
-        <p class="muted access-note">صلاحيات محدودة للإدارة اليومية: Overview، Command Center، Warnings، User Lookup، ومراقبة السيرفر. ما يقدر يعدل صفحات Owner only.</p>
+        <p class="muted access-note">صلاحية محدودة: Overview, Command Center, Warnings, User Lookup ومراقبة السيرفر بدون التحكم الخطير.</p>
         <div class="access-box">{dash_escape(admin_roles_text, 500)}</div>
+      </div>
+    </div>
+
+    <div style="height:14px"></div>
+
+    <div class="card">
+      <h3>👤 Give Access to Specific Member</h3>
+      <p class="muted">إذا الشخص ما عنده رتبة معينة أو تبي استثناء واضح، حط User ID واضغط Open. بعدين اختار Owner / Admin / No Access.</p>
+      <form class="quickform" method="get" action="/dashboard/admin-access/member-open">
+        <input name="user_id" placeholder="Discord User ID" required>
+        <button class="btn">Open Member</button>
+      </form>
+    </div>
+
+    <div style="height:14px"></div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>👑 Direct Owner Users</h3>
+        <table class="table"><tr><th>Member</th><th>Access</th><th>Action</th></tr>{owner_users_html}</table>
+      </div>
+      <div class="card">
+        <h3>🧰 Direct Admin Users</h3>
+        <table class="table"><tr><th>Member</th><th>Access</th><th>Action</th></tr>{admin_users_html}</table>
       </div>
     </div>
 
@@ -5412,19 +5573,163 @@ def dashboard_admin_access_page():
 
     <form method="post" action="/dashboard/admin-access">
       <div class="card">
-        <h3>⚙️ Select Dashboard Roles</h3>
-        <p class="muted">حدد الرتب اللي تبيها. إذا رتبة مختارة Owner و Admin بنفس الوقت، بيتم اعتمادها Owner فقط.</p>
+        <h3>⚙️ Roles & Members</h3>
+        <p class="muted">تقدر تحدد الرتب وتشوف أول أعضاء داخل كل رتبة. اضغط على أي عضو عشان تعطيه صلاحية مباشرة. إذا رتبة مختارة Owner و Admin بنفس الوقت، بيتم اعتمادها Owner فقط.</p>
         <table class="table">
-          <tr><th>Discord Role</th><th>Owner</th><th>Admin</th></tr>
+          <tr><th>Discord Role</th><th>Owner</th><th>Admin</th><th>Members in Role</th></tr>
           {roles_html}
         </table>
         <div style="height:12px"></div>
-        <button class="btn green" onclick="return confirm('Save dashboard access roles?');">💾 Save Admin Access</button>
+        <button class="btn green" onclick="return confirm('Save dashboard access roles?');">💾 Save Role Access</button>
         <a class="btn" href="/dashboard">Back</a>
       </div>
     </form>
     """
     return render_dashboard_page("Admin Access", body)
+
+
+@app.route("/dashboard/admin-access/member-open", methods=["GET"])
+def dashboard_admin_access_member_open():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    user_id = str(request.args.get("user_id", "")).strip()
+    if not user_id.isdigit():
+        return redirect("/dashboard/admin-access?err=" + urllib.parse.quote("Enter a valid Discord User ID."))
+    return redirect(f"/dashboard/admin-access/member/{user_id}")
+
+
+@app.route("/dashboard/admin-access/member/<int:user_id>", methods=["GET"])
+def dashboard_member_access_page(user_id):
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    member = dashboard_get_member_sync(user_id)
+    direct_owner_ids = dashboard_dynamic_owner_user_ids()
+    direct_admin_ids = dashboard_dynamic_admin_user_ids()
+
+    if user_id in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+        direct_state = "private_owner"
+    elif user_id in direct_owner_ids or user_id in DASHBOARD_OWNER_USER_IDS:
+        direct_state = "owner"
+    elif user_id in direct_admin_ids:
+        direct_state = "admin"
+    else:
+        direct_state = "none"
+
+    name = str(member) if member else f"User {user_id}"
+    display_name = member.display_name if member else name
+    avatar = member.display_avatar.url if member else ""
+    avatar_html = f"<img src='{dash_escape(avatar, 300)}' style='width:74px;height:74px;border-radius:24px;object-fit:cover'>" if avatar else "<div style='width:74px;height:74px;border-radius:24px;background:#1e293b;display:flex;align-items:center;justify-content:center'>?</div>"
+    roles_html = ""
+    if member:
+        role_parts = []
+        for role in sorted([r for r in member.roles if r.name != "@everyone"], key=lambda r: r.position, reverse=True):
+            access_hint = ""
+            if role.id in (dashboard_dynamic_owner_role_ids() | set(DASHBOARD_OWNER_ROLE_IDS)):
+                access_hint = " <span class='pill ok'>Owner role</span>"
+            elif role.id in (dashboard_dynamic_admin_role_ids() | set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS)):
+                access_hint = " <span class='pill'>Admin role</span>"
+            role_parts.append(f"<div class='rolepill'>@{dash_escape(role.name, 80)}{access_hint}<br><span class='muted small'>ID: <code>{role.id}</code></span></div>")
+        roles_html = "".join(role_parts) or "<p class='muted'>No roles.</p>"
+    else:
+        roles_html = "<p class='muted'>Member not found in cache. You can still set direct access by ID.</p>"
+
+    owner_checked = "checked" if direct_state == "owner" else ""
+    admin_checked = "checked" if direct_state == "admin" else ""
+    none_checked = "checked" if direct_state == "none" else ""
+    private_note = ""
+    disabled = ""
+    if direct_state == "private_owner":
+        owner_checked = "checked"
+        disabled = "disabled"
+        private_note = "<div class='toast ok'>هذا العضو عنده Private Owner Exception داخل الكود وما يطلع ضمن قوائم التعديل العادية.</div>"
+
+    body = f"""
+    {dashboard_toast_html()}
+    {private_note}
+    <style>
+      .profilehead {{display:flex;gap:16px;align-items:center}}
+      .rolepill {{border:1px solid var(--line);border-radius:16px;padding:10px 12px;margin:8px 0;background:rgba(15,23,42,.45)}}
+      .radioaccess {{display:grid;gap:10px;margin-top:12px}}
+      .radioaccess label {{display:flex;gap:10px;align-items:flex-start;border:1px solid var(--line);border-radius:16px;padding:14px;background:rgba(15,23,42,.45);font-weight:900}}
+      .radioaccess input {{width:auto;margin-top:3px}}
+    </style>
+
+    <div class="card">
+      <div class="profilehead">
+        {avatar_html}
+        <div>
+          <div class="big">{dash_escape(display_name, 100)}</div>
+          <p class="muted">@{dash_escape(name, 120)} • ID: <code>{user_id}</code></p>
+          {dashboard_member_access_badge(user_id)}
+        </div>
+      </div>
+    </div>
+
+    <div style="height:14px"></div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>🔐 Dashboard Permission</h3>
+        <p class="muted">اختار صلاحية مباشرة لهذا العضو. الصلاحية المباشرة تفيد لو ما تبي تعطي رتبة كاملة صلاحية داشبورد.</p>
+        <form method="post" action="/dashboard/admin-access/member/{user_id}">
+          <div class="radioaccess">
+            <label><input type="radio" name="access_level" value="owner" {owner_checked} {disabled}> <span>👑 Owner<br><span class='muted small'>Full access to everything in dashboard.</span></span></label>
+            <label><input type="radio" name="access_level" value="admin" {admin_checked} {disabled}> <span>🧰 Admin<br><span class='muted small'>Limited access for monitoring and moderation.</span></span></label>
+            <label><input type="radio" name="access_level" value="none" {none_checked} {disabled}> <span>🚫 No Direct Access<br><span class='muted small'>Remove direct access. Role-based access can still apply.</span></span></label>
+          </div>
+          <div style="height:12px"></div>
+          <button class="btn green" {disabled}>💾 Save Member Access</button>
+          <a class="btn" href="/dashboard/admin-access">Back</a>
+        </form>
+      </div>
+      <div class="card">
+        <h3>🏷️ Discord Roles</h3>
+        <p class="muted">الرتب اللي عند العضو حاليًا، وإذا رتبة منها تعطي صلاحية داشبورد بيطلع جنبها توضيح.</p>
+        {roles_html}
+      </div>
+    </div>
+    """
+    return render_dashboard_page("Member Access", body)
+
+
+@app.route("/dashboard/admin-access/member/<int:user_id>", methods=["POST"])
+def dashboard_member_access_action(user_id):
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    if int(user_id) in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+        return redirect(f"/dashboard/admin-access/member/{user_id}?err=" + urllib.parse.quote("Private owner exception cannot be changed here."))
+
+    level = str(request.form.get("access_level", "none")).strip().lower()
+    if level not in {"owner", "admin", "none"}:
+        level = "none"
+
+    data = dashboard_load_settings_file()
+    owner_ids = set(parse_dashboard_user_id_list(data.get("dashboard_owner_user_ids", [])))
+    admin_ids = set(parse_dashboard_user_id_list(data.get("dashboard_admin_user_ids", [])))
+
+    owner_ids.discard(int(user_id))
+    admin_ids.discard(int(user_id))
+
+    if level == "owner":
+        owner_ids.add(int(user_id))
+    elif level == "admin":
+        admin_ids.add(int(user_id))
+
+    dashboard_merge_settings({
+        "dashboard_owner_user_ids": sorted(owner_ids),
+        "dashboard_admin_user_ids": sorted(admin_ids),
+        "dashboard_member_access_updated_at": int(time.time()),
+        "dashboard_member_access_updated_by": str((session.get("discord_user") or {}).get("username", "Dashboard")),
+    })
+
+    admin = session.get("discord_user", {}).get("username", "Dashboard")
+    dashboard_log_action("Updated dashboard member access", f"user_id={user_id} | level={level}", admin)
+    return redirect(f"/dashboard/admin-access/member/{user_id}?msg=" + urllib.parse.quote("Member dashboard access saved."))
 
 
 @app.route("/dashboard/admin-access", methods=["POST"])
