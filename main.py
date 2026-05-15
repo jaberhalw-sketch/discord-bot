@@ -189,6 +189,27 @@ DASHBOARD_ADMIN_ROLE_IDS = {
     if x.strip().isdigit()
 }
 
+# Dashboard permission tiers.
+# OWNER = full control over every dashboard page/action.
+# ADMIN = limited dashboard access for monitoring + warnings management only.
+DASHBOARD_OWNER_ROLE_IDS = {
+    int(x.strip())
+    for x in os.getenv("DASHBOARD_OWNER_ROLE_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
+DASHBOARD_LIMITED_ADMIN_ROLE_IDS = {
+    int(x.strip())
+    for x in os.getenv("DASHBOARD_LIMITED_ADMIN_ROLE_IDS", os.getenv("DASHBOARD_ADMIN_ROLE_IDS", "")).split(",")
+    if x.strip().isdigit()
+}
+
+DASHBOARD_OWNER_USER_IDS = {
+    int(x.strip())
+    for x in os.getenv("DASHBOARD_OWNER_USER_IDS", "").split(",")
+    if x.strip().isdigit()
+}
+
 # =========================
 # ADMIN CONTROL CENTER
 # =========================
@@ -2079,6 +2100,50 @@ def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manua
     return active_before
 
 
+def clear_single_warning_by_id(warning_id, cleared_by="Dashboard", clear_reason="Manual clear"):
+    """
+    Clears one active warning row without deleting it.
+    The row stays in warning_history with status='cleared'.
+    """
+    warning_id = int(warning_id)
+    changed = 0
+    user_id = None
+
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+
+        cur.execute("SELECT user_id FROM warning_history WHERE id = ? AND status = 'active'", (warning_id,))
+        row = cur.fetchone()
+
+        if not row:
+            conn.close()
+            return 0, None
+
+        user_id = int(row[0])
+
+        cur.execute("""
+            UPDATE warning_history
+            SET status = 'cleared',
+                cleared_at = ?,
+                cleared_by = ?,
+                clear_reason = ?
+            WHERE id = ? AND status = 'active'
+        """, (int(time.time()), str(cleared_by), str(clear_reason), warning_id))
+
+        changed = cur.rowcount
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        print(f"Clear single warning error: {e}")
+        return 0, user_id
+
+    return int(changed or 0), user_id
+
+
+
+
 def add_warning(member, reason, message_text, moderator):
     user_id = str(member.id)
 
@@ -3623,30 +3688,114 @@ def dashboard_get_member_sync(user_id):
         return None
 
 
-def dashboard_user_has_access(user_id):
+
+def dashboard_member_has_role(member, role_ids):
+    try:
+        if not member or not role_ids:
+            return False
+        return any(int(role.id) in role_ids for role in member.roles)
+    except:
+        return False
+
+
+def dashboard_access_level(user_id):
+    """
+    Returns:
+      owner = full dashboard access
+      admin = limited dashboard access
+      none  = no dashboard access
+
+    Access can be controlled from /dashboard/admin-access.
+    Railway/env owner IDs and the Discord guild owner remain bootstrap owners so you cannot lock yourself out.
+    """
     try:
         user_id = int(user_id)
     except:
-        return False
+        return "none"
+
     guild = bot.get_guild(GUILD_ID)
+
+    # Bootstrap owners: keep these forever for safety.
+    if user_id in DASHBOARD_OWNER_USER_IDS:
+        return "owner"
+
     if guild and user_id == int(guild.owner_id):
-        return True
+        return "owner"
+
     member = dashboard_get_member_sync(user_id)
+
     if not member:
-        return False
+        return "none"
+
+    owner_roles = set(DASHBOARD_OWNER_ROLE_IDS) | dashboard_dynamic_owner_role_ids()
+    admin_roles = set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS) | dashboard_dynamic_admin_role_ids()
+
+    if dashboard_member_has_role(member, owner_roles):
+        return "owner"
+
+    if dashboard_member_has_role(member, admin_roles):
+        return "admin"
+
+    # Discord Administrator is allowed to enter only as limited admin, unless you give it an Owner Access role above.
     if member.guild_permissions.administrator:
-        return True
-    if DASHBOARD_ADMIN_ROLE_IDS:
-        return any(role.id in DASHBOARD_ADMIN_ROLE_IDS for role in member.roles)
-    return False
+        return "admin"
+
+    return "none"
+
+
+def dashboard_user_has_access(user_id):
+    return dashboard_access_level(user_id) in ("owner", "admin")
+
+
+def dashboard_current_access_level():
+    user = session.get("discord_user") or {}
+    return dashboard_access_level(user.get("id"))
+
+
+def dashboard_current_user_is_owner():
+    return dashboard_current_access_level() == "owner"
+
+
+def dashboard_access_denied_html(message="حسابك ما عنده صلاحية لهذا الجزء من الداشبورد."):
+    return render_dashboard_page(
+        "Access Denied",
+        f"""
+        <div class="card danger">
+          <h2>🚫 Access Denied</h2>
+          <p>{clean_text(message, 500)}</p>
+          <p class="muted">Owner يقدر يسوي كل شيء. Admin صلاحياته محدودة.</p>
+          <a class="btn" href="/dashboard">Back to Dashboard</a>
+          <a class="btn" href="/logout">Logout</a>
+        </div>
+        """,
+        status=403
+    )
 
 
 def dashboard_require_admin():
     if not session.get("discord_user"):
         return redirect("/login")
     if not dashboard_user_has_access(session["discord_user"].get("id")):
-        return render_dashboard_page("Access Denied", '<div class="card danger"><h2>🚫 Access Denied</h2><p>حسابك داخل Discord ما عنده صلاحية دخول للداشبورد.</p><p>الدخول مسموح فقط لصاحب السيرفر أو اللي عنده Administrator أو الرتب المحددة.</p><a class="btn" href="/logout">Logout</a></div>', status=403)
+        return dashboard_access_denied_html("حسابك داخل Discord ما عنده صلاحية دخول للداشبورد.")
     return None
+
+
+def dashboard_require_owner():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    if not dashboard_current_user_is_owner():
+        return dashboard_access_denied_html("هذه الصفحة أو العملية مخصصة لرتبة Owner فقط.")
+    return None
+
+
+def dashboard_role_badge_html():
+    level = dashboard_current_access_level()
+    if level == "owner":
+        return "<span class='pill ok'>Owner Access</span>"
+    if level == "admin":
+        return "<span class='pill'>Admin Limited</span>"
+    return "<span class='pill bad'>No Access</span>"
 
 
 def dashboard_count_table(table):
@@ -3683,6 +3832,18 @@ def dashboard_set_level_data(user_id, xp=None, level=None):
     conn.commit()
     conn.close()
     return new_xp, new_level
+
+
+def dashboard_role_name(role_id):
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if guild:
+            role = guild.get_role(int(role_id))
+            if role:
+                return f"@{role.name}"
+        return f"Role {role_id}"
+    except:
+        return f"Role {role_id}"
 
 
 def dashboard_member_name(user_id):
@@ -3851,6 +4012,54 @@ def get_dashboard_setting(key, default=None):
     if isinstance(data, dict) and key in data:
         return data.get(key)
     return default
+
+
+def dashboard_setting_int_set(key):
+    values = get_dashboard_setting(key, [])
+    if not isinstance(values, list):
+        return set()
+    cleaned = set()
+    for value in values:
+        try:
+            cleaned.add(int(value))
+        except:
+            pass
+    return cleaned
+
+
+def dashboard_dynamic_owner_role_ids():
+    return dashboard_setting_int_set("dashboard_owner_role_ids")
+
+
+def dashboard_dynamic_admin_role_ids():
+    return dashboard_setting_int_set("dashboard_admin_role_ids")
+
+
+def parse_dashboard_role_id_list(values):
+    cleaned = []
+    seen = set()
+    for value in values:
+        try:
+            role_id = int(value)
+        except:
+            continue
+        if role_id <= 0 or role_id in seen:
+            continue
+        seen.add(role_id)
+        cleaned.append(role_id)
+    return cleaned
+
+
+def dashboard_get_guild_roles():
+    guild = bot.get_guild(GUILD_ID) if bot else None
+    if not guild:
+        return []
+    roles = []
+    for role in sorted(guild.roles, key=lambda r: r.position, reverse=True):
+        if role.name == "@everyone":
+            continue
+        roles.append(role)
+    return roles
 
 
 def parse_bool_field(value, default=False):
@@ -4516,6 +4725,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/events">🎉 Events</a>
       <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
       <a class="navitem" href="/dashboard/warnings">⚠️ Warnings</a>
+      <a class="navitem" href="/dashboard/admin-access">🔐 Admin Access</a>
       <a class="navitem" href="/dashboard/memory">💾 Memory</a>
       <a class="navitem" href="/dashboard/control">🛡️ Control Center</a>
       <a class="navitem" href="/dashboard/audit">🕵️ Audit Center</a>
@@ -4848,29 +5058,48 @@ def dashboard_user_page():
     return render_dashboard_page("User Lookup", body)
 
 
+
 def dashboard_warning_table_rows(rows):
     if not rows:
-        return "<tr><td colspan='8'>No warnings found</td></tr>"
-    html = ""
+        return "<tr><td colspan='9'>No warnings found</td></tr>"
+
+    html_rows = ""
+
     for w in rows:
+        warning_id = int(w.get("id") or 0)
         status = clean_text(w.get("status", ""), 40)
         pill = "ok" if status == "cleared" else "bad"
         created = int(w.get("created_at") or 0)
         cleared_at = int(w.get("cleared_at") or 0)
         cleared_text = f"<t:{cleared_at}:R>" if cleared_at else "-"
-        html += (
+        user_id = int(w.get("user_id") or 0)
+
+        if status == "active":
+            action_html = f"""
+            <form method="post" action="/dashboard/warnings/clear-one" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+              <input type="hidden" name="warning_id" value="{warning_id}">
+              <input name="reason" value="Removed from dashboard" style="min-width:180px;">
+              <button class="btn red" onclick="return confirm('Clear this warning? It will stay saved as cleared.');">Clear</button>
+            </form>
+            """
+        else:
+            action_html = "<span class='muted small'>Saved in history</span>"
+
+        html_rows += (
             f"<tr>"
-            f"<td><span class='pill {pill}'>{status}</span></td>"
-            f"<td>{dashboard_member_name(w.get('user_id'))}<br><span class='muted small'>{int(w.get('user_id') or 0)}</span></td>"
-            f"<td><t:{created}:R></td>"
+            f"<td><span class='pill {pill}'>{status}</span><br><span class='muted small'>ID: {warning_id}</span></td>"
+            f"<td>{dashboard_member_name(user_id)}<br><span class='muted small'>{user_id}</span></td>"
+            f"<td><t:{created}:R><br><span class='muted small'>{cc_time(created) if 'cc_time' in globals() else created}</span></td>"
             f"<td>{clean_text(w.get('reason',''),180)}</td>"
-            f"<td>{clean_text(w.get('message',''),220)}</td>"
+            f"<td>{clean_text(w.get('message',''),240)}</td>"
             f"<td>{clean_text(w.get('moderator',''),140)}</td>"
-            f"<td>{cleared_text}<br><span class='muted small'>{clean_text(w.get('cleared_by',''),120)}</span></td>"
-            f"<td>{clean_text(w.get('clear_reason',''),160)}</td>"
+            f"<td>{cleared_text}<br><span class='muted small'>{clean_text(w.get('cleared_by',''),140)}</span></td>"
+            f"<td>{clean_text(w.get('clear_reason',''),180)}</td>"
+            f"<td>{action_html}</td>"
             f"</tr>"
         )
-    return html
+
+    return html_rows
 
 
 @app.route("/dashboard/warnings", methods=["GET"])
@@ -4878,30 +5107,167 @@ def dashboard_warnings_page():
     denied = dashboard_require_admin()
     if denied:
         return denied
-    status = request.args.get("status", "active").strip().lower()
+
+    status = request.args.get("status", "all").strip().lower()
     if status not in ("active", "cleared", "all"):
-        status = "active"
+        status = "all"
+
     user_id_raw = request.args.get("user_id", "").strip()
     uid = int(user_id_raw) if user_id_raw.isdigit() else None
+
     active, cleared, active_users, total_users = get_warning_summary_counts()
-    rows = get_warning_history(user_id=uid, status=status, limit=250)
+    rows = get_warning_history(user_id=uid, status=status, limit=300)
     table = dashboard_warning_table_rows(rows)
+
+    active_selected = "primary" if status == "active" else ""
+    cleared_selected = "primary" if status == "cleared" else ""
+    all_selected = "primary" if status == "all" else ""
+
     body = f'''
     {dashboard_toast_html()}
+
+    <style>
+      .warning-tabs {{
+        display:flex;
+        gap:8px;
+        flex-wrap:wrap;
+        margin-top:10px;
+      }}
+      .warning-actions {{
+        display:flex;
+        gap:10px;
+        flex-wrap:wrap;
+        align-items:end;
+      }}
+      .warning-actions input, .warning-actions select {{
+        min-width:190px;
+      }}
+      .table td {{
+        vertical-align:top;
+      }}
+    </style>
+
+    <div class="hero">
+      <div class="card">
+        <div class="big">⚠️ Warnings Manager</div>
+        <p class="muted">إدارة الإنذارات بشكل مباشر. أي إنذار يتم إزالته ما ينحذف؛ يتحول إلى Cleared ويبقى محفوظ في نفس الجدول.</p>
+        <div>{dashboard_role_badge_html()}</div>
+      </div>
+      <div class="card">
+        <h3>Quick Status</h3>
+        <p class="muted">Owner كامل الصلاحيات. Admin صلاحيات محدودة حسب الداشبورد.</p>
+      </div>
+    </div>
+
     <div class="grid4">
       <div class="card stat"><div class="icon">⚠️</div><div class="num">{fmt_num(active)}</div><div class="label">Active Warnings</div></div>
       <div class="card stat"><div class="icon">✅</div><div class="num">{fmt_num(cleared)}</div><div class="label">Cleared Warnings</div></div>
       <div class="card stat"><div class="icon">👥</div><div class="num">{fmt_num(active_users)}</div><div class="label">Users with Active</div></div>
       <div class="card stat"><div class="icon">📚</div><div class="num">{fmt_num(total_users)}</div><div class="label">Users in History</div></div>
     </div>
+
     <div style="height:14px"></div>
-    <div class="card"><h3>🔎 Warning Filters</h3><form method="get" action="/dashboard/warnings" class="grid3"><div><label>Status</label><select name="status"><option value="active" {'selected' if status=='active' else ''}>Active only</option><option value="cleared" {'selected' if status=='cleared' else ''}>Cleared only</option><option value="all" {'selected' if status=='all' else ''}>All history</option></select></div><div><label>User ID</label><input name="user_id" value="{clean_text(user_id_raw,80)}" placeholder="Optional"></div><div><label>&nbsp;</label><button class="btn primary">Apply Filter</button></div></form></div>
+
+    <div class="card">
+      <h3>🔎 Filter</h3>
+      <div class="warning-tabs">
+        <a class="btn {all_selected}" href="/dashboard/warnings?status=all">All History</a>
+        <a class="btn {active_selected}" href="/dashboard/warnings?status=active">Active Only</a>
+        <a class="btn {cleared_selected}" href="/dashboard/warnings?status=cleared">Cleared Only</a>
+      </div>
+      <div style="height:12px"></div>
+      <form method="get" action="/dashboard/warnings" class="warning-actions">
+        <div>
+          <label>Status</label>
+          <select name="status">
+            <option value="all" {'selected' if status=='all' else ''}>All history</option>
+            <option value="active" {'selected' if status=='active' else ''}>Active only</option>
+            <option value="cleared" {'selected' if status=='cleared' else ''}>Cleared only</option>
+          </select>
+        </div>
+        <div>
+          <label>User ID</label>
+          <input name="user_id" value="{clean_text(user_id_raw,80)}" placeholder="Optional Discord user ID">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="btn primary">Apply</button>
+        </div>
+      </form>
+    </div>
+
     <div style="height:14px"></div>
-    <div class="card"><h3>🧹 Clear User Warnings</h3><form method="post" action="/dashboard/warnings/clear" class="grid3"><div><label>User ID</label><input name="user_id" required placeholder="Discord user ID"></div><div><label>Reason</label><input name="reason" value="Dashboard clear"></div><div><label>&nbsp;</label><button class="btn red">Clear Active Warnings</button></div></form></div>
+
+    <div class="card">
+      <h3>🧹 Clear All Active Warnings For User</h3>
+      <p class="muted">يمسح الإنذارات النشطة لعضو معيّن من الحالة فقط، لكن يحفظها في السجل كـ Cleared.</p>
+      <form method="post" action="/dashboard/warnings/clear" class="warning-actions">
+        <div>
+          <label>User ID</label>
+          <input name="user_id" required placeholder="Discord user ID">
+        </div>
+        <div>
+          <label>Reason</label>
+          <input name="reason" value="Removed from dashboard">
+        </div>
+        <div>
+          <label>&nbsp;</label>
+          <button class="btn red" onclick="return confirm('Clear all active warnings for this user? They will stay in history.');">Clear User Active Warnings</button>
+        </div>
+      </form>
+    </div>
+
     <div style="height:14px"></div>
-    <div class="card"><h3>⚠️ Warning History</h3><table class="table"><tr><th>Status</th><th>User</th><th>Time</th><th>Reason</th><th>Message</th><th>By</th><th>Cleared</th><th>Clear Reason</th></tr>{table}</table><p class="muted small">من الآن أي تصفير ما ينحذف؛ يتحول إلى Cleared ويبقى هنا.</p></div>
+
+    <div class="card">
+      <h3>📋 Warning History</h3>
+      <table class="table">
+        <tr>
+          <th>Status</th>
+          <th>User</th>
+          <th>Time</th>
+          <th>Reason</th>
+          <th>Message</th>
+          <th>By</th>
+          <th>Cleared</th>
+          <th>Clear Reason</th>
+          <th>Actions</th>
+        </tr>
+        {table}
+      </table>
+      <p class="muted small">Professional mode: لا توجد Cases ولا RP. فقط Active / Cleared history واضح.</p>
+    </div>
     '''
+
     return render_dashboard_page("Warnings", body)
+
+
+@app.route("/dashboard/warnings/clear-one", methods=["POST"])
+def dashboard_clear_single_warning():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+
+    warning_id = request.form.get("warning_id", "").strip()
+    reason = request.form.get("reason", "Removed from dashboard").strip() or "Removed from dashboard"
+
+    if not warning_id.isdigit():
+        return redirect("/dashboard/warnings?err=" + urllib.parse.quote("Invalid warning ID"))
+
+    admin = session.get("discord_user") or {}
+    admin_name = admin.get("username", "Dashboard Admin")
+    cleared, user_id = clear_single_warning_by_id(
+        int(warning_id),
+        cleared_by=f"{admin_name} ({admin.get('id','0')})",
+        clear_reason=reason
+    )
+
+    dashboard_log_action("Cleared one warning", f"warning_id={warning_id} | user_id={user_id} | count={cleared} | reason={reason}", admin)
+
+    if cleared:
+        return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(str(user_id or "")) + "&msg=" + urllib.parse.quote("Warning cleared and saved in history."))
+
+    return redirect("/dashboard/warnings?status=all&err=" + urllib.parse.quote("Warning not found or already cleared."))
 
 
 @app.route("/dashboard/warnings/clear", methods=["POST"])
@@ -4909,15 +5275,142 @@ def dashboard_clear_warnings():
     denied = dashboard_require_admin()
     if denied:
         return denied
+
     user_id = request.form.get("user_id", "").strip()
-    reason = request.form.get("reason", "Dashboard clear").strip() or "Dashboard clear"
+    reason = request.form.get("reason", "Removed from dashboard").strip() or "Removed from dashboard"
+
     if not user_id.isdigit():
         return redirect("/dashboard/warnings?err=" + urllib.parse.quote("Invalid user ID"))
+
     admin = session.get("discord_user") or {}
     admin_name = admin.get("username", "Dashboard Admin")
-    cleared = clear_warnings_for_user(int(user_id), cleared_by=f"{admin_name} ({admin.get('id','0')})", clear_reason=reason)
-    dashboard_log_action("Cleared warnings", f"user_id={user_id} | count={cleared} | reason={reason}", admin)
-    return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(user_id) + "&msg=" + urllib.parse.quote(f"Cleared {cleared} active warnings."))
+
+    cleared = clear_warnings_for_user(
+        int(user_id),
+        cleared_by=f"{admin_name} ({admin.get('id','0')})",
+        clear_reason=reason
+    )
+
+    dashboard_log_action("Cleared user warnings", f"user_id={user_id} | count={cleared} | reason={reason}", admin)
+    return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(user_id) + "&msg=" + urllib.parse.quote(f"Cleared {cleared} active warnings and kept them in history."))
+
+
+
+@app.route("/dashboard/admin-access", methods=["GET"])
+def dashboard_admin_access_page():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    owner_role_ids = dashboard_dynamic_owner_role_ids() | set(DASHBOARD_OWNER_ROLE_IDS)
+    admin_role_ids = dashboard_dynamic_admin_role_ids() | set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS)
+    admin_role_ids = admin_role_ids - owner_role_ids
+    roles = dashboard_get_guild_roles()
+
+    role_rows = []
+    for role in roles:
+        managed_note = " <span class='muted small'>Managed</span>" if getattr(role, "managed", False) else ""
+        owner_checked = "checked" if role.id in owner_role_ids else ""
+        admin_checked = "checked" if role.id in admin_role_ids else ""
+        role_rows.append(f"""
+        <tr>
+          <td>
+            <b>{dash_escape(role.name, 90)}</b>{managed_note}<br>
+            <span class="muted small">ID: <code>{role.id}</code> • Position: {role.position}</span>
+          </td>
+          <td><label class="checkrow ownercheck"><input type="checkbox" name="owner_roles" value="{role.id}" {owner_checked}> Owner Access</label></td>
+          <td><label class="checkrow admincheck"><input type="checkbox" name="admin_roles" value="{role.id}" {admin_checked}> Admin Access</label></td>
+        </tr>
+        """)
+
+    roles_html = "".join(role_rows) or "<tr><td colspan='3'>No roles found. Make sure the bot is online and can read the guild.</td></tr>"
+
+    owner_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(owner_role_ids)]) if owner_role_ids else "No Owner Access roles selected yet. Bootstrap owner still works."
+    admin_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(admin_role_ids)]) if admin_role_ids else "No Admin Access roles selected yet."
+
+    body = f"""
+    {dashboard_toast_html()}
+
+    <style>
+      .access-note {{line-height:1.8}}
+      .checkrow {{display:flex; align-items:center; gap:10px; margin:0; color:var(--text); font-size:13px; font-weight:900}}
+      .checkrow input {{width:auto; transform:scale(1.15)}}
+      .ownercheck {{color:#fde68a}}
+      .admincheck {{color:#bfdbfe}}
+      .access-box {{border:1px solid var(--line); border-radius:18px; padding:14px; background:rgba(15,23,42,.55)}}
+    </style>
+
+    <div class="hero">
+      <div class="card">
+        <div class="big">🔐 Admin Access</div>
+        <p class="muted">اختار رتب الداشبورد من هنا بدل ما تكتب Discord Role IDs يدويًا في Railway.</p>
+        <div style="height:10px"></div>
+        <span class="pill gold">Owner controls everything</span>
+        <span class="pill">Admin has limited access</span>
+      </div>
+      <div class="card">
+        <h3>🛡️ Safety</h3>
+        <p class="muted access-note">
+          أنت كـ Discord server owner أو الموجود في <code>DASHBOARD_OWNER_USER_IDS</code> تظل Owner دائمًا حتى لو شلت كل الرتب بالغلط.
+          هذا يمنع إنك تقفل على نفسك الداشبورد.
+        </p>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div class="card">
+        <h3>👑 Owner Access</h3>
+        <p class="muted access-note">يقدر يسوي كل شيء داخل الداشبورد: إعدادات، اقتصاد، لفل، تحذيرات، ميموري، Control Center، Audit، OAuth Debug، وتعديل صلاحيات الداشبورد.</p>
+        <div class="access-box">{dash_escape(owner_roles_text, 500)}</div>
+      </div>
+      <div class="card">
+        <h3>🧰 Admin Access</h3>
+        <p class="muted access-note">صلاحيات محدودة للإدارة اليومية: Overview، Command Center، Warnings، User Lookup، ومراقبة السيرفر. ما يقدر يعدل صفحات Owner only.</p>
+        <div class="access-box">{dash_escape(admin_roles_text, 500)}</div>
+      </div>
+    </div>
+
+    <div style="height:14px"></div>
+
+    <form method="post" action="/dashboard/admin-access">
+      <div class="card">
+        <h3>⚙️ Select Dashboard Roles</h3>
+        <p class="muted">حدد الرتب اللي تبيها. إذا رتبة مختارة Owner و Admin بنفس الوقت، بيتم اعتمادها Owner فقط.</p>
+        <table class="table">
+          <tr><th>Discord Role</th><th>Owner</th><th>Admin</th></tr>
+          {roles_html}
+        </table>
+        <div style="height:12px"></div>
+        <button class="btn green" onclick="return confirm('Save dashboard access roles?');">💾 Save Admin Access</button>
+        <a class="btn" href="/dashboard">Back</a>
+      </div>
+    </form>
+    """
+    return render_dashboard_page("Admin Access", body)
+
+
+@app.route("/dashboard/admin-access", methods=["POST"])
+def dashboard_admin_access_action():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    owner_roles = parse_dashboard_role_id_list(request.form.getlist("owner_roles"))
+    admin_roles = parse_dashboard_role_id_list(request.form.getlist("admin_roles"))
+    owner_set = set(owner_roles)
+    admin_roles = [role_id for role_id in admin_roles if role_id not in owner_set]
+
+    dashboard_merge_settings({
+        "dashboard_owner_role_ids": owner_roles,
+        "dashboard_admin_role_ids": admin_roles,
+        "dashboard_access_updated_at": int(time.time()),
+        "dashboard_access_updated_by": str((session.get("discord_user") or {}).get("username", "Dashboard")),
+    })
+
+    admin = session.get("discord_user", {}).get("username", "Dashboard")
+    dashboard_log_action("Updated dashboard access roles", f"owner_roles={owner_roles} | admin_roles={admin_roles}", admin)
+
+    return redirect("/dashboard/admin-access?msg=" + urllib.parse.quote("Admin Access roles saved."))
 
 
 @app.route("/dashboard/memory", methods=["GET"])
@@ -4937,7 +5430,7 @@ def dashboard_memory_page():
 
 @app.route("/dashboard/control", methods=["GET"])
 def dashboard_control_page():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     control = dashboard_control_settings()
@@ -4975,7 +5468,7 @@ def dashboard_control_page():
 
 @app.route("/dashboard/control/save", methods=["POST"])
 def dashboard_control_save():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     try:
@@ -4998,7 +5491,7 @@ def dashboard_control_save():
 
 @app.route("/dashboard/control/emergency", methods=["POST"])
 def dashboard_control_emergency():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     enabled = request.form.get("enabled") == "1"
@@ -5011,7 +5504,7 @@ def dashboard_control_emergency():
 
 @app.route("/dashboard/audit", methods=["GET"])
 def dashboard_audit_page():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     rows = dashboard_audit_rows(DASHBOARD_AUDIT_LOG_LIMIT)
@@ -5228,7 +5721,7 @@ def dashboard_command_center_page():
 
 @app.route("/dashboard/settings", methods=["GET"])
 def dashboard_settings_page():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
 
@@ -5304,7 +5797,7 @@ def dashboard_settings_page():
 
 @app.route("/dashboard/settings", methods=["POST"])
 def dashboard_settings_action():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     global BOT_BRAND, COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID, GIVEAWAYS_CHANNEL_ID
@@ -5378,7 +5871,7 @@ def dashboard_settings_action():
 
 @app.route("/dashboard/create-roles")
 def dashboard_create_roles_action():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     try:
@@ -5395,7 +5888,7 @@ def dashboard_create_roles_action():
 
 @app.route("/dashboard/economy", methods=["POST"])
 def dashboard_economy_action():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     try:
@@ -5447,7 +5940,7 @@ def dashboard_economy_action():
 
 @app.route("/dashboard/levels", methods=["POST"])
 def dashboard_levels_action():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     try:
@@ -5477,7 +5970,7 @@ def dashboard_levels_action():
 
 @app.route("/dashboard/backup", methods=["POST"])
 def dashboard_backup_action():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
     try:
