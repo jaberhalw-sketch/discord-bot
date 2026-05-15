@@ -5540,21 +5540,78 @@ def dashboard_admin_access_page():
     admin_role_ids = dashboard_dynamic_admin_role_ids() | set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS)
     owner_user_ids = dashboard_dynamic_owner_user_ids() | set(DASHBOARD_OWNER_USER_IDS)
     admin_user_ids = dashboard_dynamic_admin_user_ids()
+
+    # Owner wins if the same role/user is selected in both lists.
     admin_role_ids = admin_role_ids - owner_role_ids
     admin_user_ids = admin_user_ids - owner_user_ids - set(DASHBOARD_PRIVATE_OWNER_USER_IDS)
 
     roles = dashboard_get_guild_roles()
-    all_members = dashboard_get_guild_members_sync(force_chunk=True)
-    member_count = len([m for m in all_members if not getattr(m, "bot", False)])
+
+    # IMPORTANT PERFORMANCE FIX:
+    # Do NOT chunk/fetch members once for every role. That makes /admin-access look like it is loading forever.
+    # Default uses cached members instantly. Add ?refresh=1 when you want to force one guild chunk refresh.
+    force_refresh = str(request.args.get("refresh", "")).strip() == "1"
+    all_members = dashboard_get_guild_members_sync(force_chunk=force_refresh)
+    humans = [m for m in all_members if not getattr(m, "bot", False)]
+    member_count = len(humans)
     bot_count = len([m for m in all_members if getattr(m, "bot", False)])
+
+    members_by_role = {}
+    for member in all_members:
+        try:
+            if getattr(member, "bot", False):
+                continue
+            for role in getattr(member, "roles", []):
+                members_by_role.setdefault(int(role.id), []).append(member)
+        except Exception:
+            pass
+
+    for rid in list(members_by_role.keys()):
+        try:
+            members_by_role[rid] = sorted(members_by_role[rid], key=lambda m: str(m.display_name).lower())
+        except Exception:
+            pass
+
+    def fast_access_badge_for_member(member):
+        try:
+            uid = int(member.id)
+            if uid in DASHBOARD_PRIVATE_OWNER_USER_IDS or uid in owner_user_ids:
+                return "<span class='pill ok'>Owner</span>"
+            if uid in admin_user_ids:
+                return "<span class='pill'>Admin</span>"
+            role_ids = {int(r.id) for r in getattr(member, "roles", [])}
+            if role_ids.intersection(owner_role_ids):
+                return "<span class='pill ok'>Owner</span>"
+            if role_ids.intersection(admin_role_ids):
+                return "<span class='pill'>Admin</span>"
+        except Exception:
+            pass
+        return "<span class='pill bad'>No Access</span>"
+
+    def member_line_fast(member):
+        try:
+            avatar = member.display_avatar.url
+        except Exception:
+            avatar = ""
+        if avatar:
+            avatar_html = f"<img src='{dash_escape(avatar, 300)}' class='miniavatar'>"
+        else:
+            avatar_html = "<span class='miniavatar blankavatar'>?</span>"
+        return (
+            f"<a class='memberline' href='/dashboard/admin-access/member/{member.id}'>"
+            f"{avatar_html}"
+            f"<span><b>{dash_escape(member.display_name, 80)}</b><br>"
+            f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span></span>"
+            f"<span class='memberbadge'>{fast_access_badge_for_member(member)}</span>"
+            f"</a>"
+        )
 
     role_rows = []
     for role in roles:
-        members = dashboard_members_for_role(role.id)
-        human_members = [m for m in members if not getattr(m, "bot", False)]
+        human_members = members_by_role.get(int(role.id), [])
         sample_members = human_members[:6]
         more_count = max(0, len(human_members) - len(sample_members))
-        member_links = "".join([dashboard_member_card_line(member) for member in sample_members])
+        member_links = "".join([member_line_fast(member) for member in sample_members])
         if more_count:
             member_links += f"<div class='muted small' style='padding:8px 0 0 42px'>+{more_count} more members</div>"
         if not member_links:
@@ -5590,6 +5647,8 @@ def dashboard_admin_access_page():
     owner_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(owner_role_ids)]) if owner_role_ids else "No Owner Access roles selected yet. Bootstrap owner still works."
     admin_roles_text = ", ".join([dashboard_role_name(rid) for rid in sorted(admin_role_ids)]) if admin_role_ids else "No Admin Access roles selected yet."
 
+    member_cache_note = "Forced refresh used." if force_refresh else "Using fast cached members. If members are missing, click Refresh Members once."
+
     body = f"""
     {dashboard_toast_html()}
 
@@ -5620,6 +5679,8 @@ def dashboard_admin_access_page():
         <span class="pill">Admin = Limited Access</span>
         <span class="pill ok">Members loaded: {member_count}</span>
         <span class="pill">Bots: {bot_count}</span>
+        <span class="pill">{dash_escape(member_cache_note, 120)}</span>
+        <a class="btn smallbtn" href="/dashboard/admin-access?refresh=1">🔄 Refresh Members</a>
       </div>
       <div class="card">
         <h3>🛡️ الشرح</h3>
