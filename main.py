@@ -597,6 +597,8 @@ def init_db():
 
     conn.commit()
     conn.close()
+    # Persist SQLite as the source of truth so cleared warnings do not come back after restart.
+    rebuild_warnings_json_from_active_history()
     seed_real_estate_properties()
     return
 
@@ -1994,6 +1996,19 @@ def migrate_warnings_json_to_history(cur=None):
                 moderator = str(warn_data.get("moderator", "غير معروف"))
                 created_at = warning_time_to_unix(warn_data.get("time"))
                 legacy_key = make_warning_legacy_key(user_id, reason, message_text, created_at)
+
+                # Do not resurrect warnings that were already cleared from the dashboard.
+                # Older JSON backups can still contain the warning after it has been marked
+                # cleared in SQLite, so we skip importing if the same user/reason/message
+                # already exists in history in any status.
+                cur.execute("""
+                    SELECT id FROM warning_history
+                    WHERE user_id = ? AND reason = ? AND message = ?
+                    LIMIT 1
+                """, (int(user_id), reason, message_text))
+                if cur.fetchone():
+                    continue
+
                 cur.execute("""
                     INSERT OR IGNORE INTO warning_history
                     (user_id, reason, message, moderator, source, status, created_at, legacy_key)
@@ -2086,6 +2101,40 @@ def get_warning_summary_counts():
         return 0, 0, 0, 0
 
 
+def rebuild_warnings_json_from_active_history():
+    """
+    Keeps warnings.json in sync with SQLite warning_history.
+    This prevents cleared dashboard warnings from coming back after a bot restart
+    or memory restore. Only active warnings are written back to warnings.json.
+    """
+    global warnings
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, reason, message, moderator, created_at
+            FROM warning_history
+            WHERE status = 'active'
+            ORDER BY created_at ASC, id ASC
+        """)
+        rebuilt = {}
+        for user_id, reason, message_text, moderator, created_at in cur.fetchall():
+            key = str(int(user_id))
+            rebuilt.setdefault(key, []).append({
+                "reason": str(reason or "غير معروف"),
+                "message": str(message_text or "غير معروف"),
+                "moderator": str(moderator or "غير معروف"),
+                "time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(created_at or time.time())))
+            })
+        conn.close()
+        warnings = rebuilt
+        save_warnings()
+        return True
+    except Exception as e:
+        print(f"Rebuild warnings json error: {e}")
+        return False
+
+
 def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manual clear"):
     user_id = int(user_id)
     active_before = get_active_warning_count(user_id)
@@ -2101,6 +2150,7 @@ def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manua
         """, (int(time.time()), str(cleared_by), str(clear_reason), user_id))
         conn.commit()
         conn.close()
+        rebuild_warnings_json_from_active_history()
     except Exception as e:
         print(f"Clear warning history error: {e}")
     return active_before
@@ -2140,6 +2190,7 @@ def clear_single_warning_by_id(warning_id, cleared_by="Dashboard", clear_reason=
         changed = cur.rowcount
         conn.commit()
         conn.close()
+        rebuild_warnings_json_from_active_history()
 
     except Exception as e:
         print(f"Clear single warning error: {e}")
@@ -4834,18 +4885,18 @@ DASHBOARD_BASE_TEMPLATE = r'''
       --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4;--shadow:0 24px 80px rgba(0,0,0,.42)
     }
     *{box-sizing:border-box} html{scroll-behavior:smooth}
-    body{margin:0;min-height:100vh;background:
+    body{margin:0;min-height:100vh;overflow-x:hidden;background:
       radial-gradient(circle at 15% -10%,rgba(88,101,242,.35),transparent 35%),
       radial-gradient(circle at 85% 0%,rgba(139,92,246,.22),transparent 30%),
       linear-gradient(180deg,#090e1b 0%,#070a12 100%);font-family:Inter,ui-sans-serif,system-ui,Arial,sans-serif;color:var(--text)}
     a{color:inherit;text-decoration:none} code{background:rgba(15,23,42,.9);border:1px solid var(--line);padding:3px 7px;border-radius:9px;color:#dbeafe}
-    .layout{display:grid;grid-template-columns:278px 1fr;min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px;border-right:1px solid var(--line);background:rgba(7,10,18,.68);backdrop-filter:blur(18px)}
+    .layout{display:grid;grid-template-columns:278px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px;border-right:1px solid var(--line);background:rgba(7,10,18,.68);backdrop-filter:blur(18px)}
     .brand{display:flex;align-items:center;gap:12px;margin-bottom:24px}.logo{width:48px;height:48px;border-radius:18px;background:linear-gradient(135deg,var(--blue),var(--purple));display:grid;place-items:center;font-size:25px;box-shadow:0 18px 45px rgba(88,101,242,.25)}
     .brand h1{font-size:20px;margin:0;letter-spacing:.2px}.brand p{margin:4px 0 0;color:var(--muted);font-size:12px}.navlist{display:grid;gap:8px}.navitem{display:flex;align-items:center;gap:10px;padding:12px 13px;border:1px solid transparent;border-radius:15px;color:#c8d2e4;font-weight:800}.navitem:hover,.navitem.active{background:rgba(88,101,242,.14);border-color:rgba(88,101,242,.26);color:#fff}.navfoot{position:absolute;bottom:20px;left:20px;right:20px;color:var(--muted);font-size:12px}
-    .main{padding:24px;max-width:1380px;width:100%;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:14px}.headline h2{font-size:30px;margin:0}.headline p{color:var(--muted);margin:6px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(23,31,49,.92);padding:10px 14px;border-radius:14px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:900;box-shadow:0 10px 30px rgba(0,0,0,.14)}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel),rgba(13,19,33,.9));border:1px solid var(--line);border-radius:24px;padding:18px;box-shadow:var(--shadow);backdrop-filter:blur(16px)}.card h3{margin:0 0 13px;font-size:17px}.stat{position:relative;overflow:hidden}.stat:after{content:"";position:absolute;right:-18px;top:-18px;width:90px;height:90px;border-radius:999px;background:rgba(88,101,242,.16)}.stat .icon{font-size:23px}.stat .num{font-size:32px;font-weight:1000;margin-top:10px}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.muted{color:var(--muted)}.small{font-size:12px}.toast{padding:13px 15px;border-radius:16px;border:1px solid var(--line);margin-bottom:14px;font-weight:850}.toast.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.3)}.toast.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+    .main{padding:24px;max-width:1480px;width:100%;min-width:0;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:14px}.headline h2{font-size:30px;margin:0}.headline p{color:var(--muted);margin:6px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(23,31,49,.92);padding:10px 14px;border-radius:14px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:900;box-shadow:0 10px 30px rgba(0,0,0,.14)}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel),rgba(13,19,33,.9));border:1px solid var(--line);border-radius:24px;padding:18px;box-shadow:var(--shadow);backdrop-filter:blur(16px);min-width:0}.card h3{margin:0 0 13px;font-size:17px}.stat{position:relative;overflow:hidden}.stat:after{content:"";position:absolute;right:-18px;top:-18px;width:90px;height:90px;border-radius:999px;background:rgba(88,101,242,.16)}.stat .icon{font-size:23px}.stat .num{font-size:32px;font-weight:1000;margin-top:10px}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.muted{color:var(--muted)}.small{font-size:12px}.toast{padding:13px 15px;border-radius:16px;border:1px solid var(--line);margin-bottom:14px;font-weight:850}.toast.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.3)}.toast.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
     .table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px}.table td{padding:12px 10px;background:rgba(15,23,42,.55);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.2)}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}
-    .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:20px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:800}input,select{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:12px;outline:none}input:focus,select:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}
+    .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:20px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:800}input,select,textarea{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:12px;outline:none}input:focus,select:focus,textarea:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}
     @media(max-width:1000px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.navfoot{position:static;margin-top:16px}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:24px}}
   .switchgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.switchcard{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(255,255,255,.04)}.toggleline{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{width:52px;height:28px;border-radius:999px;background:#3b4252;position:relative;display:inline-block}.switch input{display:none}.slider{position:absolute;cursor:pointer;inset:0;border-radius:999px}.slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#22c55e}.switch input:checked+.slider:before{transform:translateX(24px)}.dangerzone{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
 </style>
@@ -4874,11 +4925,21 @@ DASHBOARD_BASE_TEMPLATE = r'''
     <div class="navfoot">{% if user %}<div class="pill">👤 {{ user.get('username') }}</div><div style="height:8px"></div><a class="btn" href="/logout">Logout</a>{% else %}<a class="btn primary" href="/login">Login with Discord</a>{% endif %}</div>
   </aside>
   <main class="main">
-    <div class="topbar"><div class="headline"><h2>{{ title }}</h2><p>Fast control panel for economy, levels, memory and casino.</p></div><div class="actions"><a class="btn" href="/">Status</a>{% if user %}<a class="btn primary" href="/dashboard">Dashboard</a>{% else %}<a class="btn primary" href="/login">Login</a>{% endif %}</div></div>
+    <div class="topbar"><div class="headline"><h2>{{ title }}</h2><p>Live admin dashboard for monitoring, economy, warnings, access and system health.</p></div><div class="actions"><a class="btn" href="/">Status</a>{% if user %}<a class="btn primary" href="/dashboard">Dashboard</a>{% else %}<a class="btn primary" href="/login">Login</a>{% endif %}</div></div>
     {{ body|safe }}
     <div class="footer">{{ brand }} • Protected by Discord OAuth</div>
   </main>
 </div>
+
+<script>
+  (() => {
+    const path = window.location.pathname;
+    document.querySelectorAll('.navitem').forEach(a => {
+      const href = a.getAttribute('href');
+      if (href && (path === href || (href !== '/dashboard' && path.startsWith(href)))) a.classList.add('active');
+    });
+  })();
+</script>
 </body>
 </html>
 '''
@@ -5215,17 +5276,18 @@ def dashboard_warning_table_rows(rows):
 
         if status == "active":
             action_html = f"""
-            <form method="post" action="/dashboard/warnings/clear-one" class="warning-clear-form">
+            <form method="post" action="/dashboard/warnings/clear-one" class="warning-clear-form js-warning-clear">
               <input type="hidden" name="warning_id" value="{warning_id}">
+              <input type="hidden" name="ajax" value="1">
               <input name="reason" value="Removed from dashboard" placeholder="Clear reason">
-              <button class="btn red" onclick="return confirm('Clear this warning? It will stay saved as cleared.');">Clear</button>
+              <button class="btn red">Clear</button>
             </form>
             """
         else:
             action_html = "<span class='muted small'>Saved in history</span>"
 
         html_rows += f"""
-        <div class="warning-row">
+        <div class="warning-row" data-warning-id="{warning_id}" data-user-id="{user_id}" data-status="{status}">
           <div class="warning-main">
             <div class="warning-user-block">
               <span class="pill {pill}">{status}</span>
@@ -5238,11 +5300,11 @@ def dashboard_warning_table_rows(rows):
               <div class="warning-meta">
                 <span><b>Time:</b> <t:{created}:R></span>
                 <span class="muted small">{cc_time(created) if 'cc_time' in globals() else created}</span>
-                <span><b>By:</b> {clean_text(w.get('moderator',''),140)}</span>
+                <span><b>By:</b> {dash_escape(w.get('moderator',''),140) if 'dash_escape' in globals() else html.escape(clean_text(w.get('moderator',''),140))}</span>
               </div>
-              <div class="warning-reason"><b>Reason:</b> {clean_text(w.get('reason',''),220)}</div>
-              <div class="warning-message">{clean_text(w.get('message',''),520)}</div>
-              <div class="warning-cleared muted small"><b>Cleared:</b> {cleared_text} • <b>By:</b> {clean_text(w.get('cleared_by',''),120) or '-'} • <b>Reason:</b> {clean_text(w.get('clear_reason',''),180) or '-'}</div>
+              <div class="warning-reason"><b>Reason:</b> {dash_escape(w.get('reason',''),220) if 'dash_escape' in globals() else html.escape(clean_text(w.get('reason',''),220))}</div>
+              <div class="warning-message">{dash_escape(w.get('message',''),520) if 'dash_escape' in globals() else html.escape(clean_text(w.get('message',''),520))}</div>
+              <div class="warning-cleared muted small"><b>Cleared:</b> {cleared_text} • <b>By:</b> {dash_escape(w.get('cleared_by',''),120) if 'dash_escape' in globals() else html.escape(clean_text(w.get('cleared_by',''),120)) or '-'} • <b>Reason:</b> {dash_escape(w.get('clear_reason',''),180) if 'dash_escape' in globals() else html.escape(clean_text(w.get('clear_reason',''),180)) or '-'}</div>
             </div>
           </div>
 
@@ -5302,14 +5364,17 @@ def dashboard_warnings_page():
       }}
       .warning-row {{
         display:grid;
-        grid-template-columns:minmax(0, 1fr) 260px;
+        grid-template-columns:minmax(0, 1fr) minmax(210px, 260px);
         gap:14px;
         padding:16px;
         border:1px solid var(--line);
         border-radius:18px;
         background:rgba(15,23,42,.55);
         overflow:hidden;
+        transition:.18s ease;
       }}
+      .warning-row:hover {{ border-color:rgba(88,101,242,.38); transform:translateY(-1px); }}
+      .warning-cleared-row {{ opacity:.72; }}
       .warning-main {{
         display:grid;
         grid-template-columns:220px minmax(0, 1fr);
@@ -5442,7 +5507,8 @@ def dashboard_warnings_page():
     <div class="card">
       <h3>🧹 Clear All Active Warnings For User</h3>
       <p class="muted">يمسح الإنذارات النشطة لعضو معيّن من الحالة فقط، لكن يحفظها في السجل كـ Cleared.</p>
-      <form method="post" action="/dashboard/warnings/clear" class="warning-actions">
+      <form method="post" action="/dashboard/warnings/clear" class="warning-actions js-warning-clear-all">
+        <input type="hidden" name="ajax" value="1">
         <div>
           <label>User ID</label>
           <input name="user_id" required placeholder="Discord user ID">
@@ -5453,7 +5519,7 @@ def dashboard_warnings_page():
         </div>
         <div>
           <label>&nbsp;</label>
-          <button class="btn red" onclick="return confirm('Clear all active warnings for this user? They will stay in history.');">Clear User Active Warnings</button>
+          <button class="btn red">Clear User Active Warnings</button>
         </div>
       </form>
     </div>
@@ -5467,6 +5533,88 @@ def dashboard_warnings_page():
         {table}
       </div>
     </div>
+    
+
+    <script>
+      function showWarningToast(message, ok=true) {{
+        let box = document.querySelector('.js-warning-toast');
+        if (!box) {{
+          box = document.createElement('div');
+          box.className = 'toast js-warning-toast';
+          const target = document.querySelector('.hero') || document.body;
+          target.parentNode.insertBefore(box, target.nextSibling);
+        }}
+        box.className = 'toast js-warning-toast ' + (ok ? 'ok' : 'bad');
+        box.textContent = message;
+        setTimeout(() => {{ if (box) box.remove(); }}, 3500);
+      }}
+
+      async function postWarningForm(form) {{
+        const btn = form.querySelector('button');
+        const oldText = btn ? btn.textContent : '';
+        if (btn) {{ btn.disabled = true; btn.textContent = 'Saving...'; }}
+        try {{
+          const res = await fetch(form.action, {{
+            method: 'POST',
+            body: new FormData(form),
+            headers: {{ 'X-Requested-With': 'XMLHttpRequest' }}
+          }});
+          const data = await res.json();
+          if (!data.ok) throw new Error(data.error || 'Failed');
+          return data;
+        }} finally {{
+          if (btn) {{ btn.disabled = false; btn.textContent = oldText; }}
+        }}
+      }}
+
+      document.querySelectorAll('.js-warning-clear').forEach(form => {{
+        form.addEventListener('submit', async (e) => {{
+          e.preventDefault();
+          if (!confirm('Clear this warning? It will stay saved as cleared.')) return;
+          try {{
+            const data = await postWarningForm(form);
+            const row = form.closest('.warning-row');
+            if (row) {{
+              row.dataset.status = 'cleared';
+              row.classList.add('warning-cleared-row');
+              const pill = row.querySelector('.pill');
+              if (pill) {{ pill.className = 'pill ok'; pill.textContent = 'cleared'; }}
+              const action = row.querySelector('.warning-action-block');
+              if (action) action.innerHTML = '<span class="muted small">Saved in history</span>';
+              const clearedLine = row.querySelector('.warning-cleared');
+              if (clearedLine) clearedLine.innerHTML = '<b>Cleared:</b> just now • <b>By:</b> Dashboard • <b>Reason:</b> ' + (data.reason || 'Removed from dashboard');
+            }}
+            showWarningToast(data.message || 'Warning cleared and saved in history.');
+          }} catch (err) {{
+            showWarningToast(err.message || 'Could not clear warning.', false);
+          }}
+        }});
+      }});
+
+      document.querySelectorAll('.js-warning-clear-all').forEach(form => {{
+        form.addEventListener('submit', async (e) => {{
+          e.preventDefault();
+          const userId = (form.querySelector('input[name="user_id"]') || {{}}).value || '';
+          if (!userId.trim()) {{ showWarningToast('Write a User ID first.', false); return; }}
+          if (!confirm('Clear all active warnings for this user? They will stay saved as cleared.')) return;
+          try {{
+            const data = await postWarningForm(form);
+            document.querySelectorAll('.warning-row[data-user-id="' + userId.trim() + '"][data-status="active"]').forEach(row => {{
+              row.dataset.status = 'cleared';
+              row.classList.add('warning-cleared-row');
+              const pill = row.querySelector('.pill');
+              if (pill) {{ pill.className = 'pill ok'; pill.textContent = 'cleared'; }}
+              const action = row.querySelector('.warning-action-block');
+              if (action) action.innerHTML = '<span class="muted small">Saved in history</span>';
+            }});
+            showWarningToast(data.message || 'Warnings cleared and saved in history.');
+          }} catch (err) {{
+            showWarningToast(err.message || 'Could not clear warnings.', false);
+          }}
+        }});
+      }});
+    </script>
+
     '''
 
     return render_dashboard_page("Warnings", body)
@@ -5481,7 +5629,11 @@ def dashboard_clear_single_warning():
     warning_id = request.form.get("warning_id", "").strip()
     reason = request.form.get("reason", "Removed from dashboard").strip() or "Removed from dashboard"
 
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.form.get("ajax") == "1"
+
     if not warning_id.isdigit():
+        if wants_json:
+            return {"ok": False, "error": "Invalid warning ID"}, 400
         return redirect("/dashboard/warnings?err=" + urllib.parse.quote("Invalid warning ID"))
 
     admin = session.get("discord_user") or {}
@@ -5495,8 +5647,12 @@ def dashboard_clear_single_warning():
     dashboard_log_action("Cleared one warning", f"warning_id={warning_id} | user_id={user_id} | count={cleared} | reason={reason}", admin)
 
     if cleared:
+        if wants_json:
+            return {"ok": True, "cleared": int(cleared), "user_id": str(user_id or ""), "reason": reason, "message": "Warning cleared and saved in history."}
         return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(str(user_id or "")) + "&msg=" + urllib.parse.quote("Warning cleared and saved in history."))
 
+    if wants_json:
+        return {"ok": False, "error": "Warning not found or already cleared."}, 404
     return redirect("/dashboard/warnings?status=all&err=" + urllib.parse.quote("Warning not found or already cleared."))
 
 
@@ -5509,7 +5665,11 @@ def dashboard_clear_warnings():
     user_id = request.form.get("user_id", "").strip()
     reason = request.form.get("reason", "Removed from dashboard").strip() or "Removed from dashboard"
 
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.form.get("ajax") == "1"
+
     if not user_id.isdigit():
+        if wants_json:
+            return {"ok": False, "error": "Invalid user ID"}, 400
         return redirect("/dashboard/warnings?err=" + urllib.parse.quote("Invalid user ID"))
 
     admin = session.get("discord_user") or {}
@@ -5522,6 +5682,8 @@ def dashboard_clear_warnings():
     )
 
     dashboard_log_action("Cleared user warnings", f"user_id={user_id} | count={cleared} | reason={reason}", admin)
+    if wants_json:
+        return {"ok": True, "cleared": int(cleared), "user_id": user_id, "reason": reason, "message": f"Cleared {cleared} active warnings and kept them in history."}
     return redirect("/dashboard/warnings?status=all&user_id=" + urllib.parse.quote(user_id) + "&msg=" + urllib.parse.quote(f"Cleared {cleared} active warnings and kept them in history."))
 
 
