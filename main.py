@@ -612,6 +612,16 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS processed_command_messages (
+            message_id INTEGER PRIMARY KEY,
+            user_id INTEGER DEFAULT 0,
+            command_name TEXT DEFAULT '',
+            created_at INTEGER
+        )
+    """)
+
+
     migrate_warnings_json_to_history(cur)
 
     conn.commit()
@@ -842,28 +852,67 @@ async def bulk_remove_money_from_all(guild, amount):
 
 
 def claim_daily(user_id, level):
-    balance, last_daily = get_money_data(user_id)
+    """Atomic salary claim.
+    This prevents double salary claims if the command is triggered twice at the same moment.
+    """
+    user_id = int(user_id)
     now = int(time.time())
-    cooldown = HOURLY_REWARD_COOLDOWN_SECONDS
+    cooldown = int(HOURLY_REWARD_COOLDOWN_SECONDS)
+    reward = int(DAILY_REWARD_BASE + (int(level) * 25))
 
-    if now - last_daily < cooldown:
-        remaining = cooldown - (now - last_daily)
-        return False, remaining, balance, 0
-
-    reward = DAILY_REWARD_BASE + (int(level) * 25)
-    balance += reward
+    # Ensure row exists first.
+    get_money_data(user_id)
 
     conn = db_connect()
     cur = conn.cursor()
-    cur.execute(
-        "UPDATE economy SET balance = ?, last_daily = ? WHERE user_id = ?",
-        (balance, now, user_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cur.execute("SELECT balance, last_daily FROM economy WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        balance = int(row[0] or 0) if row else 0
+        last_daily = int(row[1] or 0) if row else 0
 
-    return True, 0, balance, reward
+        if now - last_daily < cooldown:
+            conn.close()
+            remaining = cooldown - (now - last_daily)
+            return False, remaining, balance, 0
 
+        cur.execute("""
+            UPDATE economy
+            SET balance = balance + ?, last_daily = ?
+            WHERE user_id = ? AND (? - COALESCE(last_daily, 0)) >= ?
+        """, (reward, now, user_id, now, cooldown))
+
+        if cur.rowcount != 1:
+            # Another duplicate command/process claimed it first.
+            cur.execute("SELECT balance, last_daily FROM economy WHERE user_id = ?", (user_id,))
+            row = cur.fetchone()
+            balance = int(row[0] or 0) if row else balance
+            last_daily = int(row[1] or now) if row else now
+            conn.commit()
+            conn.close()
+            remaining = max(0, cooldown - (now - last_daily))
+            return False, remaining, balance, 0
+
+        cur.execute("SELECT balance FROM economy WHERE user_id = ?", (user_id,))
+        new_balance = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+
+        cc_record_event(
+            "money",
+            user_id=user_id,
+            amount=reward,
+            details=f"Salary claimed. New balance: {new_balance}"
+        )
+        return True, 0, new_balance, reward
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        print(f"Salary claim error: {e}")
+        balance, _ = get_money_data(user_id)
+        return False, cooldown, balance, 0
 
 def is_server_booster(member):
     if not member or not getattr(member, "guild", None):
@@ -1178,6 +1227,44 @@ def is_bypass(member):
     return member.id in BYPASS_USER_IDS or is_admin(member)
 
 
+def claim_command_message_once(ctx):
+    """Prevents the same Discord command message from being executed twice.
+    This protects money commands if Discord/Railway delivers the same command twice or two handlers overlap.
+    """
+    try:
+        message_id = int(getattr(ctx.message, "id", 0) or 0)
+        if message_id <= 0:
+            return True
+
+        command_name = ctx.command.name if getattr(ctx, "command", None) else "unknown"
+        now = int(time.time())
+
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS processed_command_messages (
+                message_id INTEGER PRIMARY KEY,
+                user_id INTEGER DEFAULT 0,
+                command_name TEXT DEFAULT '',
+                created_at INTEGER
+            )
+        """)
+        cur.execute(
+            "INSERT OR IGNORE INTO processed_command_messages (message_id, user_id, command_name, created_at) VALUES (?, ?, ?, ?)",
+            (message_id, int(ctx.author.id), str(command_name), now)
+        )
+        inserted = cur.rowcount == 1
+
+        # Keep the table small. Message IDs are only needed as a short-term duplicate guard.
+        cur.execute("DELETE FROM processed_command_messages WHERE created_at < ?", (now - 86400,))
+        conn.commit()
+        conn.close()
+        return inserted
+    except Exception as e:
+        print(f"Command duplicate guard error: {e}")
+        return True
+
+
 def parse_duration_to_seconds(duration_text):
     text = duration_text.strip().lower()
     match = re.fullmatch(r"(\d+)\s*([mhd])", text)
@@ -1276,6 +1363,10 @@ def can_gamble_now(user_id):
 
 async def validate_gamble(ctx, amount_text):
     if not await require_gambling_channel(ctx):
+        return None
+
+    # يمنع تنفيذ نفس رسالة القمار مرتين، عشان ما ينخصم الرهان مرتين.
+    if not claim_command_message_once(ctx):
         return None
 
     amount = parse_bet_amount(amount_text)
@@ -2038,6 +2129,16 @@ def log_vault_ensure_table(cur=None):
             deleted_at INTEGER DEFAULT 0
         )
     """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS processed_command_messages (
+            message_id INTEGER PRIMARY KEY,
+            user_id INTEGER DEFAULT 0,
+            command_name TEXT DEFAULT '',
+            created_at INTEGER
+        )
+    """)
+
 
     if close_conn and conn:
         conn.commit()
@@ -8690,6 +8791,10 @@ async def salary(ctx):
     if not await require_commands_channel(ctx):
         return
 
+    # يمنع تنفيذ نفس أمر الراتب مرتين لو صار تكرار من ديسكورد/الاستضافة.
+    if not claim_command_message_once(ctx):
+        return
+
     xp, level = get_level_data(ctx.author.id)
     success, remaining, balance_amount, reward = claim_daily(ctx.author.id, level)
 
@@ -10429,3 +10534,4 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
+    
