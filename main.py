@@ -6948,6 +6948,21 @@ async def on_message(message):
     if not message.guild or message.guild.id != GUILD_ID:
         return
 
+    raw_content = (message.content or "").strip().lower()
+
+    # Emergency direct replies: these bypass the dashboard command guard.
+    # If these work, the bot is reading messages and command processing is healthy enough to debug from Discord.
+    if raw_content in ("!بنق", "!بينق", "!بنج", "!ping", "!p"):
+        await message.channel.send(
+            embed=discord.Embed(
+                title="🏓 Pong",
+                description=f"{BOT_BRAND} شغال.\nLatency: `{round(bot.latency * 1000)} ms`",
+                color=COLOR_GREEN,
+                timestamp=discord.utils.utcnow()
+            )
+        )
+        return
+
     cc_record_event(
         "message",
         user_id=message.author.id,
@@ -7741,7 +7756,7 @@ async def create_logs_command(ctx):
         await loading.edit(content=f"❌ صار خطأ أثناء إنشاء رومات اللوقات:\n```{e}```")
 
 
-@bot.command(name="بنق", aliases=["ping"])
+@bot.command(name="بنق", aliases=["ping", "بينق", "بنج", "p"])
 async def ping(ctx):
     await ctx.send(
         embed=discord.Embed(
@@ -8716,6 +8731,17 @@ class BlackjackView(discord.ui.View):
         self.finished = True
         self.disable_buttons()
         # الرهان تم سحبه عند بداية اللعبة، والوقت انتهى بدون Stand/Hit.
+
+@bot.command(name="اقتصاد", aliases=["شرح", "شرح_الاقتصاد", "economy", "guide"])
+async def economy_guide_command(ctx):
+    if not ctx.guild or ctx.guild.id != GUILD_ID:
+        return
+
+    if not await require_commands_channel(ctx):
+        return
+
+    await ctx.send(embed=build_economy_guide_embed(auto=False))
+
 
 @bot.command(name="شرح_القمار", aliases=["قمار", "gambling", "gamblehelp"])
 async def gambling_help(ctx):
@@ -9981,4 +10007,3 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
-    
