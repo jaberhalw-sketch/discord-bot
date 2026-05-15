@@ -71,6 +71,7 @@ MEMORY_BACKUP_CHANNEL_ID = 1504161977063178370
 MEMORY_BACKUP_INTERVAL_SECONDS = 60 * 60
 ECONOMY_EXPLAIN_INTERVAL_SECONDS = 7 * 60 * 60
 ECONOMY_EXPLAIN_CHANNEL_ID = COMMANDS_CHANNEL_ID
+ECONOMY_GUIDE_AUTO_ENABLED = True
 HOURLY_REWARD_COOLDOWN_SECONDS = 60 * 60
 MEMORY_BACKUP_MESSAGE_TAG = "NM_MEMORY_BACKUP_V2"
 MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
@@ -1735,16 +1736,18 @@ async def restore_memory_from_backup(guild, force=False):
 
 
 def build_economy_guide_embed(auto=False):
-    title = "🪙 شرح نظام الاقتصاد واللفل"
+    """Premium-looking economy guide embed used for manual and automatic guide messages."""
+    title = "🪙 Retards Economy"
     description = (
-        "هذا شرح سريع للنظام. كل شيء يشتغل في روم الأوامر فقط.\n"
-        f"روم الأوامر: <#{COMMANDS_CHANNEL_ID}>"
+        f"**دليل مختصر ومرتب لنظام {BOT_BRAND}.**\n"
+        f"الأوامر الأساسية في <#{COMMANDS_CHANNEL_ID}>، وألعاب الكازينو في <#{GAMBLING_CHANNEL_ID}>."
     )
 
     if auto:
+        title = "🪙 Retards Economy • Quick Guide"
         description = (
-            "تذكير تلقائي: تقدر تستخدم أوامر الاقتصاد واللفل هنا.\n"
-            f"روم الأوامر: <#{COMMANDS_CHANNEL_ID}>"
+            "تذكير سريع للي ما يعرف النظام.\n"
+            f"الأوامر الأساسية هنا <#{COMMANDS_CHANNEL_ID}>، والقمار فقط في <#{GAMBLING_CHANNEL_ID}>."
         )
 
     embed = discord.Embed(
@@ -1755,69 +1758,108 @@ def build_economy_guide_embed(auto=False):
     )
 
     embed.add_field(
-        name="💰 الفلوس",
+        name="💼 المحفظة",
         value=(
-            f"العملة: **{COIN_NAME}**\n"
-            "`!رصيدي` يعرض رصيدك\n"
-            "`!رصيد @شخص` يعرض رصيد شخص\n"
-            "`!اغنى` يعرض أغنى 10 أعضاء"
+            f"`!رصيدي` عرض رصيدك\n"
+            f"`!رصيد @user` عرض رصيد عضو\n"
+            f"`!اغنى` توب أغنى الأعضاء\n"
+            f"**العملة:** {COIN_NAME}"
         ),
         inline=False
     )
 
     embed.add_field(
-        name="💸 الراتب",
+        name="⏱️ الراتب",
         value=(
-            "`!راتب`\n"
-            "تقدر تستلم راتب كل **ساعة**.\n"
-            "كل ما لفلك أعلى، الراتب يزيد شوي."
+            f"`!راتب` تستلم راتبك كل **{format_seconds(HOURLY_REWARD_COOLDOWN_SECONDS)}**\n"
+            "كل ما ارتفع لفلك، تزيد مكافأتك."
         ),
-        inline=False
+        inline=True
     )
 
     embed.add_field(
         name="📊 اللفل",
         value=(
-            "`!لفلي` يعرض لفلك و XP\n"
-            "`!لفل @شخص` يعرض لفل شخص\n"
-            "`!ترتيب` يعرض ترتيب اللفلات\n"
-            "تجمع XP من النشاط والرسائل بدون سبام."
+            "`!لفلي` عرض لفلك و XP\n"
+            "`!لفل @user` عرض لفل عضو\n"
+            "`!ترتيب` توب اللفلات"
         ),
-        inline=False
+        inline=True
     )
 
     embed.add_field(
-        name="🔁 التحويل",
-        value="`!تحويل @شخص 500` يحول فلوس لشخص ثاني.",
-        inline=False
-    )
-
-    embed.add_field(
-        name="🎰 القمار بعملة البوت",
+        name="🔁 التحويلات",
         value=(
-            f"روم القمار: <#{GAMBLING_CHANNEL_ID}>\n"
-            "`!شرح_القمار` شرح أوامر القمار\n"
-            "`!حظ 500` نسبة 50/50\n"
-            "`!دبل 500` أخطر، لكن يعطي دبل\n"
-            "`!سلوت 500` رموز وجوائز عشوائية\n"
-            "`!وجه 500 ملك` أو `!وجه 500 كتابة\n"
-            "`!بلاكجاك 500` ضد الديلر"
+            "`!تحويل @user 500` تحويل فلوس لعضو ثاني\n"
+            "كل التحويلات محفوظة في النظام للمراجعة."
         ),
         inline=False
     )
 
     embed.add_field(
-        name="🛡️ أوامر الإدارة",
+        name="🎰 الكازينو",
         value=(
-            "`!اعطاءفلوس @شخص 1000`\n"
-            "`!سحبفلوس @شخص 500`\n"
-            "`!تصفيرفلوس @شخص`"
+            f"يشتغل فقط في <#{GAMBLING_CHANNEL_ID}>\n"
+            "`!حظ 500` لعبة حظ 50/50\n"
+            "`!دبل 500` دبل أو خسارة\n"
+            "`!سلوت 500` سلوت وجوائز عشوائية\n"
+            "`!وجه 500 ملك` وجه/كتابة\n"
+            "`!بلاكجاك 500` بلاك جاك بالأزرار"
         ),
         inline=False
     )
 
-    embed.set_footer(text=f"{BOT_BRAND} | Economy Guide")
+    embed.add_field(
+        name="🛒 المتجر والجوائز",
+        value=(
+            "`!متجر` فتح المتجر بالأزرار\n"
+            "`!صندوق` شراء صندوق حظ\n"
+            "الـ VIP وجوائز الفعاليات مربوطة بالنظام."
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🏠 العقارات",
+        value=(
+            "`!عقارات` عرض العقارات\n"
+            "`!عقاراتي` عقاراتك\n"
+            "`!سوق_العقارات` السوق\n"
+            "`!مزادات` المزادات النشطة"
+        ),
+        inline=True
+    )
+
+    embed.add_field(
+        name="🛡️ أدوات الإدارة",
+        value=(
+            "`!اعطاءفلوس @user 1000`\n"
+            "`!سحبفلوس @user 500`\n"
+            "`!تصفيرفلوس @user`\n"
+            "كل عمليات الداشبورد محفوظة في Audit Center."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"{BOT_BRAND} • Economy • Levels • Casino")
     return embed
+
+def economy_guide_last_sent_key():
+    return "ECONOMY_GUIDE_LAST_SENT_AT"
+
+
+def economy_guide_last_sent_at():
+    try:
+        return int(get_dashboard_setting(economy_guide_last_sent_key(), 0) or 0)
+    except:
+        return 0
+
+
+def economy_guide_mark_sent():
+    try:
+        dashboard_merge_settings({economy_guide_last_sent_key(): int(time.time())})
+    except Exception as e:
+        print(f"Economy guide timestamp save error: {e}")
 
 
 async def economy_explain_loop():
@@ -1826,19 +1868,36 @@ async def economy_explain_loop():
 
     while not bot.is_closed():
         try:
-            guild = bot.get_guild(GUILD_ID)
+            if not ECONOMY_GUIDE_AUTO_ENABLED:
+                await asyncio.sleep(300)
+                continue
 
+            now = int(time.time())
+            last_sent = economy_guide_last_sent_at()
+            remaining = int(ECONOMY_EXPLAIN_INTERVAL_SECONDS) - (now - last_sent)
+
+            # Important: do not send immediately after every Railway redeploy/restart.
+            if last_sent > 0 and remaining > 0:
+                await asyncio.sleep(min(max(remaining, 60), 3600))
+                continue
+
+            # First time only: wait one full interval instead of spamming right after deploy.
+            if last_sent <= 0:
+                economy_guide_mark_sent()
+                await asyncio.sleep(min(max(int(ECONOMY_EXPLAIN_INTERVAL_SECONDS), 300), 3600))
+                continue
+
+            guild = bot.get_guild(GUILD_ID)
             if guild:
                 channel = await get_channel_by_id(guild, ECONOMY_EXPLAIN_CHANNEL_ID)
-
                 if channel:
                     await channel.send(embed=build_economy_guide_embed(auto=True))
+                    economy_guide_mark_sent()
 
         except Exception as e:
             print(f"Auto economy guide error: {e}")
 
-        await asyncio.sleep(ECONOMY_EXPLAIN_INTERVAL_SECONDS)
-
+        await asyncio.sleep(min(max(int(ECONOMY_EXPLAIN_INTERVAL_SECONDS), 300), 3600))
 
 async def memory_backup_loop():
     await bot.wait_until_ready()
@@ -4893,7 +4952,7 @@ def cc_guild_snapshot():
 
 def dashboard_apply_saved_settings():
     global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
-    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME, ECONOMY_GUIDE_AUTO_ENABLED
     global SHOP_CHANNEL_ID, EVENTS_CHANNEL_ID, BOT_ANNOUNCEMENTS_CHANNEL_ID, GIVEAWAYS_CHANNEL_ID
     global GAME_VOICE_CATEGORY_ID, LOGS_CATEGORY_ID, ECONOMY_EXPLAIN_CHANNEL_ID
     global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID, VIP_ROLE_NAME, EVENT_WINNER_ROLE_NAME, VIP_ROLE_COLOR, EVENT_WINNER_ROLE_COLOR
@@ -4916,6 +4975,7 @@ def dashboard_apply_saved_settings():
     EVENT_WINNER_ROLE_ID = parse_int_field(data.get("EVENT_WINNER_ROLE_ID", EVENT_WINNER_ROLE_ID), EVENT_WINNER_ROLE_ID, 0)
     GAMBLE_COOLDOWN_SECONDS = parse_int_field(data.get("GAMBLE_COOLDOWN_SECONDS", GAMBLE_COOLDOWN_SECONDS), GAMBLE_COOLDOWN_SECONDS, 0)
     ECONOMY_EXPLAIN_INTERVAL_SECONDS = parse_int_field(data.get("ECONOMY_EXPLAIN_INTERVAL_SECONDS", ECONOMY_EXPLAIN_INTERVAL_SECONDS), ECONOMY_EXPLAIN_INTERVAL_SECONDS, 60)
+    ECONOMY_GUIDE_AUTO_ENABLED = parse_bool_field(data.get("ECONOMY_GUIDE_AUTO_ENABLED", ECONOMY_GUIDE_AUTO_ENABLED), ECONOMY_GUIDE_AUTO_ENABLED)
     BOOSTER_WEEKLY_REWARD = parse_int_field(data.get("BOOSTER_WEEKLY_REWARD", BOOSTER_WEEKLY_REWARD), BOOSTER_WEEKLY_REWARD, 0)
     DAILY_REWARD_BASE = parse_int_field(data.get("DAILY_REWARD_BASE", DAILY_REWARD_BASE), DAILY_REWARD_BASE, 0)
     LEVEL_UP_COIN_BONUS = parse_int_field(data.get("LEVEL_UP_COIN_BONUS", LEVEL_UP_COIN_BONUS), LEVEL_UP_COIN_BONUS, 0)
@@ -6515,6 +6575,8 @@ def dashboard_settings_page():
             <label>Level Up Coin Bonus</label><input name="LEVEL_UP_COIN_BONUS" value="{LEVEL_UP_COIN_BONUS}">
             <label>Booster Weekly Reward</label><input name="BOOSTER_WEEKLY_REWARD" value="{BOOSTER_WEEKLY_REWARD}">
             <label>Economy Guide Interval Hours</label><input name="ECONOMY_GUIDE_HOURS" value="{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}">
+            <label><input type="checkbox" name="ECONOMY_GUIDE_AUTO_ENABLED" {checked(ECONOMY_GUIDE_AUTO_ENABLED)}> Auto Economy Guide Enabled</label>
+            <p class="muted">Auto guide now respects the saved last-send time, so redeploying the bot will not spam the guide again.</p>
           </div>
           <div class="card"><h3>🎰 Casino</h3>
             <label>Gamble Cooldown Seconds</label><input name="GAMBLE_COOLDOWN_SECONDS" value="{GAMBLE_COOLDOWN_SECONDS}">
@@ -6554,7 +6616,7 @@ def dashboard_settings_action():
         return denied
     global BOT_BRAND, COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID, GIVEAWAYS_CHANNEL_ID
     global SHOP_CHANNEL_ID, EVENTS_CHANNEL_ID, BOT_ANNOUNCEMENTS_CHANNEL_ID, ECONOMY_EXPLAIN_CHANNEL_ID, GAME_VOICE_CATEGORY_ID, LOGS_CATEGORY_ID
-    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME
+    global GAMBLE_COOLDOWN_SECONDS, ECONOMY_EXPLAIN_INTERVAL_SECONDS, BOOSTER_WEEKLY_REWARD, COIN_NAME, ECONOMY_GUIDE_AUTO_ENABLED
     global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID, VIP_ROLE_NAME, EVENT_WINNER_ROLE_NAME, VIP_ROLE_COLOR, EVENT_WINNER_ROLE_COLOR
     global SHOP_ENABLED, EVENTS_ENABLED, SHOP_VIP_PRICE, SHOP_VIP_DAYS, LOOTBOX_PRICE, LOOTBOX_COOLDOWN_SECONDS
     global DEFAULT_EVENT_PRIZE, DEFAULT_EVENT_DURATION_MINUTES, PUBLIC_LEADERBOARD_ENABLED, DAILY_REWARD_BASE, LEVEL_UP_COIN_BONUS
@@ -6585,6 +6647,7 @@ def dashboard_settings_action():
             ECONOMY_EXPLAIN_INTERVAL_SECONDS = max(60, int(float(str(request.form.get("ECONOMY_GUIDE_HOURS", "7")).strip()) * 3600))
         except:
             pass
+        ECONOMY_GUIDE_AUTO_ENABLED = "ECONOMY_GUIDE_AUTO_ENABLED" in request.form
         SHOP_ENABLED = "SHOP_ENABLED" in request.form
         EVENTS_ENABLED = "EVENTS_ENABLED" in request.form
         PUBLIC_LEADERBOARD_ENABLED = "PUBLIC_LEADERBOARD_ENABLED" in request.form
@@ -6606,6 +6669,7 @@ def dashboard_settings_action():
             "VIP_ROLE_COLOR": VIP_ROLE_COLOR, "EVENT_WINNER_ROLE_COLOR": EVENT_WINNER_ROLE_COLOR,
             "GAMBLE_COOLDOWN_SECONDS": GAMBLE_COOLDOWN_SECONDS,
             "ECONOMY_EXPLAIN_INTERVAL_SECONDS": ECONOMY_EXPLAIN_INTERVAL_SECONDS,
+            "ECONOMY_GUIDE_AUTO_ENABLED": ECONOMY_GUIDE_AUTO_ENABLED,
             "DAILY_REWARD_BASE": DAILY_REWARD_BASE, "LEVEL_UP_COIN_BONUS": LEVEL_UP_COIN_BONUS,
             "BOOSTER_WEEKLY_REWARD": BOOSTER_WEEKLY_REWARD,
             "SHOP_ENABLED": SHOP_ENABLED, "EVENTS_ENABLED": EVENTS_ENABLED,
@@ -9917,3 +9981,4 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
+    
