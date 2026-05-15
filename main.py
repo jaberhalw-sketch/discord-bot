@@ -7,6 +7,7 @@ import time
 import random
 import sqlite3
 import re
+import html
 import asyncio
 from pathlib import Path
 from flask import Flask, request, redirect, session, render_template_string
@@ -232,6 +233,7 @@ game_room_delete_tasks = {}
 memory_backup_task = None
 economy_explain_task = None
 booster_weekly_task = None
+BOT_STARTED_AT = time.time()
 
 LOG_CHANNEL_NAMES = {
     "message": "nm-message-logs",
@@ -550,6 +552,20 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS command_center_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_type TEXT,
+            user_id INTEGER DEFAULT 0,
+            user_name TEXT DEFAULT '',
+            channel_id INTEGER DEFAULT 0,
+            channel_name TEXT DEFAULT '',
+            amount INTEGER DEFAULT 0,
+            details TEXT DEFAULT '',
+            created_at INTEGER
+        )
+    """)
+
     migrate_warnings_json_to_history(cur)
 
     conn.commit()
@@ -662,6 +678,12 @@ def add_money(user_id, amount):
     )
     conn.commit()
     conn.close()
+    cc_record_event(
+        "money",
+        user_id=user_id,
+        amount=int(amount),
+        details=f"Money added. New balance: {balance}"
+    )
     return balance
 
 
@@ -685,6 +707,12 @@ def remove_money(user_id, amount):
     )
     conn.commit()
     conn.close()
+    cc_record_event(
+        "money",
+        user_id=user_id,
+        amount=-int(amount),
+        details=f"Money removed. New balance: {balance}"
+    )
     return True, balance
 
 
@@ -700,6 +728,12 @@ def set_balance(user_id, amount):
     )
     conn.commit()
     conn.close()
+    cc_record_event(
+        "money_set",
+        user_id=user_id,
+        amount=int(amount),
+        details=f"Balance set to: {amount}"
+    )
     return amount
 
 
@@ -1034,71 +1068,59 @@ def save_suggestion(user_id, suggestion):
 # =========================
 
 def normalize_bad_text(text):
-    text = str(text).lower()
+    """Normalize text without joining words together.
+    This is intentionally safe for profanity detection:
+    - spaces stay as separators
+    - punctuation becomes separators
+    - single banned words must match full tokens
+    - banned phrases must match complete token sequences
+    """
+    text = str(text or "").lower()
 
     replacements = {
-        "أ": "ا",
-        "إ": "ا",
-        "آ": "ا",
-        "ى": "ي",
-        "ئ": "ي",
-        "ؤ": "و",
-        "ة": "ه",
-        "ڤ": "ف",
-        "0": "o",
-        "1": "i",
-        "2": "ء",
-        "3": "ع",
-        "4": "a",
-        "5": "خ",
-        "6": "ط",
-        "7": "ح",
-        "8": "ق",
-        "9": "ص",
-        "@": "a",
-        "$": "s",
-        "!": "i",
-        "*": "",
-        "_": "",
-        "-": "",
-        ".": "",
-        ",": "",
-        "'": "",
-        '"': "",
-        "`": "",
-        " ": "",
+        "أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ئ": "ي", "ؤ": "و", "ة": "ه", "ڤ": "ف",
+        "0": "o", "1": "i", "2": "ء", "3": "ع", "4": "a", "5": "خ", "6": "ط", "7": "ح", "8": "ق", "9": "ص",
+        "@": "a", "$": "s", "!": "i",
         "ـ": "",
     }
 
     for old, new in replacements.items():
         text = text.replace(old, new)
 
+    # Do NOT remove spaces. Anything that is not Arabic/English letters or numbers becomes a separator.
+    text = re.sub(r"[^a-z0-9\u0600-\u06FF]+", " ", text)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
+    text = re.sub(r"\s+", " ", text).strip()
     return text
 
 
 def contains_bad_word(content):
-    original = str(content).lower()
     normalized_message = normalize_bad_text(content)
+    if not normalized_message:
+        return False
 
-    for word in bad_words:
-        word = word.lower().strip()
+    tokens = normalized_message.split()
+    token_set = set(tokens)
 
-        if not word:
+    for raw_word in bad_words:
+        normalized_word = normalize_bad_text(raw_word)
+        if not normalized_word:
             continue
 
-        normalized_word = normalize_bad_text(word)
+        parts = normalized_word.split()
 
-        if len(normalized_word) >= 3 and normalized_word in normalized_message:
-            return True
+        # Single banned word: exact standalone token only.
+        if len(parts) == 1:
+            if parts[0] in token_set:
+                return True
+            continue
 
-        pattern = r'(?<![\w\u0600-\u06FF])' + re.escape(word) + r'(?![\w\u0600-\u06FF])'
-
-        if re.search(pattern, original):
+        # Banned phrase: complete phrase only, with real separators between words.
+        phrase_pattern = r"(?<![\w\u0600-\u06FF])" + r"\s+".join(re.escape(part) for part in parts) + r"(?![\w\u0600-\u06FF])"
+        if re.search(phrase_pattern, normalized_message):
             return True
 
     return False
-
 
 def is_admin(member):
     return member.guild_permissions.administrator
@@ -2108,6 +2130,14 @@ async def handle_violation(message, reason):
         pass
 
     count = add_warning(message.author, reason, old_message, "النظام التلقائي")
+    cc_record_event(
+        "violation",
+        user_id=message.author.id,
+        user_name=str(message.author),
+        channel_id=message.channel.id,
+        channel_name=getattr(message.channel, "name", "unknown"),
+        details=f"{reason} | Warning #{count} | Message: {old_message[:300]}"
+    )
     punishment = await apply_punishment(message.author, message.channel, count)
 
     embed = discord.Embed(
@@ -4070,6 +4100,10 @@ def dashboard_log_action(action, details="", admin=None, send_discord=True):
         conn.close()
     except Exception as e:
         print(f"Dashboard audit db error: {e}")
+    try:
+        cc_record_event("dashboard_action", user_id=admin_id, user_name=admin_name, details=f"{action}: {details}")
+    except Exception:
+        pass
     if send_discord and bot and getattr(bot, "loop", None) and bot.loop.is_running():
         try:
             asyncio.run_coroutine_threadsafe(send_dashboard_action_log(admin_name, admin_id, action, details), bot.loop)
@@ -4096,6 +4130,296 @@ async def send_dashboard_action_log(admin_name, admin_id, action, details):
         await channel.send(embed=embed)
     except Exception as e:
         print(f"Dashboard action log error: {e}")
+
+
+# =========================
+# COMMAND CENTER / SERVER INTELLIGENCE
+# =========================
+
+COMMAND_CENTER_EVENT_LIMIT = 5000
+
+
+def dash_escape(value, limit=500):
+    text = clean_text(str(value or ""), limit)
+    return html.escape(text)
+
+
+def cc_time(unix_time):
+    try:
+        unix_time = int(unix_time)
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(unix_time))
+    except:
+        return "Unknown"
+
+
+def cc_since_hours(hours=24):
+    return int(time.time()) - (int(hours) * 60 * 60)
+
+
+def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details=""):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS command_center_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT,
+                user_id INTEGER DEFAULT 0,
+                user_name TEXT DEFAULT '',
+                channel_id INTEGER DEFAULT 0,
+                channel_name TEXT DEFAULT '',
+                amount INTEGER DEFAULT 0,
+                details TEXT DEFAULT '',
+                created_at INTEGER
+            )
+        """)
+        cur.execute("""
+            INSERT INTO command_center_events
+            (event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            str(event_type)[:80],
+            int(user_id or 0),
+            str(user_name or "")[:120],
+            int(channel_id or 0),
+            str(channel_name or "")[:120],
+            int(amount or 0),
+            str(details or "")[:1200],
+            int(time.time())
+        ))
+
+        cur.execute("""
+            DELETE FROM command_center_events
+            WHERE id NOT IN (
+                SELECT id FROM command_center_events
+                ORDER BY id DESC
+                LIMIT ?
+            )
+        """, (COMMAND_CENTER_EVENT_LIMIT,))
+
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Command Center event error: {e}")
+
+
+def cc_count_events(event_type=None, since=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        if event_type:
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE event_type = ? AND created_at >= ?", (str(event_type), int(since)))
+        else:
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE created_at >= ?", (int(since),))
+        count = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return count
+    except:
+        return 0
+
+
+def cc_sum_amount(event_type=None, since=0, positive_only=False, negative_only=False):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        query = "SELECT COALESCE(SUM(amount), 0) FROM command_center_events WHERE created_at >= ?"
+        params = [int(since)]
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(str(event_type))
+        if positive_only:
+            query += " AND amount > 0"
+        if negative_only:
+            query += " AND amount < 0"
+        cur.execute(query, tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return total
+    except:
+        return 0
+
+
+def cc_recent_events(limit=80, event_type=None):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        if event_type:
+            cur.execute("""
+                SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
+                FROM command_center_events
+                WHERE event_type = ?
+                ORDER BY id DESC
+                LIMIT ?
+            """, (str(event_type), int(limit)))
+        else:
+            cur.execute("""
+                SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
+                FROM command_center_events
+                ORDER BY id DESC
+                LIMIT ?
+            """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_top_channels(since=0, limit=8):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT channel_name, COUNT(*)
+            FROM command_center_events
+            WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''
+            GROUP BY channel_name
+            ORDER BY COUNT(*) DESC
+            LIMIT ?
+        """, (int(since), int(limit)))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_top_users_by_event(event_type="message", since=0, limit=8):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, user_name, COUNT(*)
+            FROM command_center_events
+            WHERE event_type = ? AND created_at >= ? AND user_id != 0
+            GROUP BY user_id, user_name
+            ORDER BY COUNT(*) DESC
+            LIMIT ?
+        """, (str(event_type), int(since), int(limit)))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_money_movers(since=0, positive=True, limit=8):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        if positive:
+            cur.execute("""
+                SELECT user_id, user_name, SUM(amount) AS total
+                FROM command_center_events
+                WHERE event_type = 'money' AND amount > 0 AND created_at >= ? AND user_id != 0
+                GROUP BY user_id, user_name
+                ORDER BY total DESC
+                LIMIT ?
+            """, (int(since), int(limit)))
+        else:
+            cur.execute("""
+                SELECT user_id, user_name, SUM(amount) AS total
+                FROM command_center_events
+                WHERE event_type = 'money' AND amount < 0 AND created_at >= ? AND user_id != 0
+                GROUP BY user_id, user_name
+                ORDER BY total ASC
+                LIMIT ?
+            """, (int(since), int(limit)))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_active_warning_rows(limit=10):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, COUNT(*) AS total
+            FROM warning_history
+            WHERE status = 'active'
+            GROUP BY user_id
+            ORDER BY total DESC
+            LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_warning_reason_rows(limit=8):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT reason, COUNT(*) AS total
+            FROM warning_history
+            GROUP BY reason
+            ORDER BY total DESC
+            LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def cc_database_size():
+    try:
+        path = Path(DB_FILE)
+        if not path.exists():
+            return "0 KB"
+        size_kb = path.stat().st_size / 1024
+        if size_kb >= 1024:
+            return f"{size_kb / 1024:.2f} MB"
+        return f"{size_kb:.2f} KB"
+    except:
+        return "Unknown"
+
+
+def cc_bot_uptime_text():
+    try:
+        seconds = int(time.time() - BOT_STARTED_AT)
+        return format_seconds(seconds)
+    except:
+        return "Unknown"
+
+
+def cc_guild_snapshot():
+    guild = bot.get_guild(GUILD_ID) if bot else None
+    if not guild:
+        return {
+            "guild_ok": False,
+            "members": 0,
+            "humans": 0,
+            "bots": 0,
+            "online": 0,
+            "voice": 0,
+            "text_channels": 0,
+            "voice_channels": 0,
+        }
+
+    members = list(guild.members)
+    humans = [m for m in members if not m.bot]
+    bots = [m for m in members if m.bot]
+    online = [m for m in humans if str(m.status) != "offline"]
+    voice = [m for m in humans if getattr(m, "voice", None) and m.voice and m.voice.channel]
+
+    return {
+        "guild_ok": True,
+        "members": len(members),
+        "humans": len(humans),
+        "bots": len(bots),
+        "online": len(online),
+        "voice": len(voice),
+        "text_channels": len(guild.text_channels),
+        "voice_channels": len(guild.voice_channels),
+    }
 
 
 def dashboard_apply_saved_settings():
@@ -4184,6 +4508,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
     <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Discord OAuth Admin Dashboard</p></div></div>
     <nav class="navlist">
       <a class="navitem" href="/dashboard">🏠 Overview</a>
+      <a class="navitem" href="/dashboard/command-center">🧠 Command Center</a>
       <a class="navitem" href="/dashboard/economy">🪙 Economy</a>
       <a class="navitem" href="/dashboard/levels">📊 Levels</a>
       <a class="navitem" href="/dashboard/casino">🎰 Casino</a>
@@ -4701,6 +5026,206 @@ def dashboard_audit_page():
     return render_dashboard_page("Audit Center", body)
 
 
+
+@app.route("/dashboard/command-center", methods=["GET"])
+def dashboard_command_center_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+
+    init_db()
+
+    since_24h = cc_since_hours(24)
+    since_1h = cc_since_hours(1)
+    guild_data = cc_guild_snapshot()
+
+    bot_ping = "Offline"
+    if bot and getattr(bot, "latency", None) is not None:
+        try:
+            bot_ping = f"{round(bot.latency * 1000)} ms"
+        except:
+            bot_ping = "Unknown"
+
+    db_ok = "OK" if db_file_valid() else "CHECK"
+    memory_status = local_memory_status()
+    memory_bad = [name for name, info in memory_status.items() if not info.get("valid")]
+    memory_text = "All memory files OK" if not memory_bad else "Check: " + ", ".join(memory_bad)
+
+    total_money = db_sum_column("economy", "balance")
+    economy_users = db_table_count("economy")
+    level_users = db_table_count("levels")
+    active_warnings, cleared_warnings, active_warning_users, total_warning_users = get_warning_summary_counts()
+
+    messages_24h = cc_count_events("message", since_24h)
+    commands_24h = cc_count_events("command", since_24h)
+    violations_24h = cc_count_events("violation", since_24h)
+    joins_24h = cc_count_events("member_join", since_24h)
+    leaves_24h = cc_count_events("member_leave", since_24h)
+    money_created_24h = cc_sum_amount("money", since_24h, positive_only=True)
+    money_removed_24h = abs(cc_sum_amount("money", since_24h, negative_only=True))
+
+    messages_1h = cc_count_events("message", since_1h)
+    commands_1h = cc_count_events("command", since_1h)
+    violations_1h = cc_count_events("violation", since_1h)
+
+    top_channels_html = "".join([
+        f"<tr><td>#{dash_escape(name, 80)}</td><td><b>{count}</b> messages</td></tr>"
+        for name, count in cc_top_channels(since_24h, 8)
+    ]) or "<tr><td colspan='2'>No channel activity yet.</td></tr>"
+
+    top_users_html = "".join([
+        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> messages</td></tr>"
+        for uid, name, count in cc_top_users_by_event("message", since_24h, 8)
+    ]) or "<tr><td colspan='2'>No user activity yet.</td></tr>"
+
+    top_commands_html = "".join([
+        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> commands</td></tr>"
+        for uid, name, count in cc_top_users_by_event("command", since_24h, 8)
+    ]) or "<tr><td colspan='2'>No commands yet.</td></tr>"
+
+    money_gain_html = "".join([
+        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#22c55e'>+{int(total):,}</b></td></tr>"
+        for uid, name, total in cc_money_movers(since_24h, True, 8)
+    ]) or "<tr><td colspan='2'>No money gains tracked yet.</td></tr>"
+
+    money_loss_html = "".join([
+        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#ef4444'>{int(total):,}</b></td></tr>"
+        for uid, name, total in cc_money_movers(since_24h, False, 8)
+    ]) or "<tr><td colspan='2'>No money losses tracked yet.</td></tr>"
+
+    watchlist_html = "".join([
+        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}</td><td><span class='pill bad'>{count} active warnings</span></td></tr>"
+        for uid, count in cc_active_warning_rows(10)
+    ]) or "<tr><td colspan='2'>No active warning watchlist.</td></tr>"
+
+    warning_reasons_html = "".join([
+        f"<tr><td>{dash_escape(reason, 120)}</td><td><b>{count}</b></td></tr>"
+        for reason, count in cc_warning_reason_rows(8)
+    ]) or "<tr><td colspan='2'>No warnings yet.</td></tr>"
+
+    recent_rows = cc_recent_events(80)
+    recent_html = "".join([
+        f"""
+        <tr>
+          <td><code>{cc_time(created_at)}</code></td>
+          <td><span class='pill'>{dash_escape(event_type, 60)}</span></td>
+          <td>{dash_escape(dashboard_member_name(user_id), 100) if user_id else "<span class='muted'>System</span>"}<br><span class='muted small'>{dash_escape(user_name, 90)}</span></td>
+          <td>{dash_escape(channel_name, 90)}</td>
+          <td>{int(amount):,}</td>
+          <td>{dash_escape(details, 220)}</td>
+        </tr>
+        """
+        for event_type, user_id, user_name, channel_name, amount, details, created_at in recent_rows
+    ]) or "<tr><td colspan='6'>No live events tracked yet.</td></tr>"
+
+    body = f"""
+    {dashboard_toast_html()}
+
+    <style>
+      .cc-tabs {{display:flex;flex-wrap:wrap;gap:8px;margin:14px 0;}}
+      .cc-tabs a {{text-decoration:none;}}
+      .cc-stat {{font-size:28px;font-weight:1000;margin-top:8px;}}
+      .cc-sub {{color:var(--muted);font-size:13px;margin-top:4px;}}
+      .cc-ok {{border:1px solid rgba(34,197,94,.35);}}
+      .cc-warn {{border:1px solid rgba(245,158,11,.35);}}
+      .cc-danger {{border:1px solid rgba(239,68,68,.35);}}
+      .table td {{vertical-align:top;}}
+    </style>
+
+    <div class="hero">
+      <div class="card">
+        <div class="big">🧠 Server Command Center</div>
+        <p class="muted">مركز مراقبة مباشر للسيرفر: نشاط، أوامر، اقتصاد، تحذيرات، لوقات، وصحة النظام. بدون Server Risk Score.</p>
+        <div style="height:10px"></div>
+        <span class="pill ok">Live Monitoring</span>
+        <span class="pill">24h Window</span>
+      </div>
+      <div class="card {'cc-ok' if guild_data['guild_ok'] else 'cc-danger'}">
+        <h3>🤖 Bot Status</h3>
+        <div class="cc-stat">{'🟢 Online' if guild_data['guild_ok'] else '🔴 Offline'}</div>
+        <div class="cc-sub">Ping: {bot_ping} • Uptime: {cc_bot_uptime_text()}</div>
+      </div>
+    </div>
+
+    <div class="cc-tabs">
+      <a class="btn" href="#overview">Overview</a>
+      <a class="btn" href="#live">Live Logs</a>
+      <a class="btn" href="#economy">Economy Monitor</a>
+      <a class="btn" href="#members">Member Watchlist</a>
+      <a class="btn" href="#moderation">Moderation</a>
+      <a class="btn" href="#system">System Health</a>
+    </div>
+
+    <div id="overview" class="grid">
+      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{guild_data['humans']}</div><div class="cc-sub">Online: {guild_data['online']} • Voice: {guild_data['voice']} • Bots: {guild_data['bots']}</div></div>
+      <div class="card"><h3>💬 Messages 24h</h3><div class="cc-stat">{messages_24h:,}</div><div class="cc-sub">Last hour: {messages_1h:,}</div></div>
+      <div class="card"><h3>⌨️ Commands 24h</h3><div class="cc-stat">{commands_24h:,}</div><div class="cc-sub">Last hour: {commands_1h:,}</div></div>
+      <div class="card"><h3>⚠️ Violations 24h</h3><div class="cc-stat">{violations_24h:,}</div><div class="cc-sub">Last hour: {violations_1h:,}</div></div>
+      <div class="card"><h3>📥 Joins / Leaves</h3><div class="cc-stat">+{joins_24h} / -{leaves_24h}</div><div class="cc-sub">Last 24 hours</div></div>
+      <div class="card"><h3>🪙 Total Economy</h3><div class="cc-stat">{total_money:,}</div><div class="cc-sub">{economy_users} economy users • {level_users} level users</div></div>
+    </div>
+
+    <div style="height:16px"></div>
+
+    <div class="grid2">
+      <div class="card"><h3>🔥 Top Active Channels</h3><table class="table"><tr><th>Channel</th><th>Activity</th></tr>{top_channels_html}</table></div>
+      <div class="card"><h3>👑 Top Active Members</h3><table class="table"><tr><th>Member</th><th>Messages</th></tr>{top_users_html}</table></div>
+    </div>
+
+    <div id="economy" style="height:16px"></div>
+    <div class="grid">
+      <div class="card"><h3>📈 Money Created 24h</h3><div class="cc-stat" style="color:#22c55e">+{money_created_24h:,}</div><div class="cc-sub">{COIN_NAME}</div></div>
+      <div class="card"><h3>📉 Money Removed 24h</h3><div class="cc-stat" style="color:#ef4444">-{money_removed_24h:,}</div><div class="cc-sub">{COIN_NAME}</div></div>
+      <div class="card"><h3>🏦 Database Economy</h3><div class="cc-stat">{total_money:,}</div><div class="cc-sub">Total server money</div></div>
+    </div>
+
+    <div style="height:16px"></div>
+
+    <div class="grid2">
+      <div class="card"><h3>💸 Biggest Money Gains 24h</h3><table class="table"><tr><th>Member</th><th>Gained</th></tr>{money_gain_html}</table></div>
+      <div class="card"><h3>🧾 Biggest Money Losses 24h</h3><table class="table"><tr><th>Member</th><th>Lost</th></tr>{money_loss_html}</table></div>
+    </div>
+
+    <div id="members" style="height:16px"></div>
+    <div class="grid2">
+      <div class="card">
+        <h3>👁️ Member Watchlist</h3>
+        <p class="muted">يعرض أكثر أعضاء عليهم تحذيرات نشطة. هذا مراقبة إدارية مب عقوبة تلقائية.</p>
+        <table class="table"><tr><th>Member</th><th>Status</th></tr>{watchlist_html}</table>
+      </div>
+      <div class="card"><h3>⌨️ Top Command Users 24h</h3><table class="table"><tr><th>Member</th><th>Commands</th></tr>{top_commands_html}</table></div>
+    </div>
+
+    <div id="moderation" style="height:16px"></div>
+    <div class="grid">
+      <div class="card"><h3>⚠️ Active Warnings</h3><div class="cc-stat">{active_warnings:,}</div><div class="cc-sub">{active_warning_users} users affected</div></div>
+      <div class="card"><h3>✅ Cleared Warnings</h3><div class="cc-stat">{cleared_warnings:,}</div><div class="cc-sub">Total cleared history</div></div>
+      <div class="card"><h3>👥 Warning Users</h3><div class="cc-stat">{total_warning_users:,}</div><div class="cc-sub">All-time unique users</div></div>
+    </div>
+
+    <div style="height:16px"></div>
+    <div class="card"><h3>📌 Top Warning Reasons</h3><table class="table"><tr><th>Reason</th><th>Total</th></tr>{warning_reasons_html}</table></div>
+
+    <div id="system" style="height:16px"></div>
+    <div class="grid">
+      <div class="card {'cc-ok' if db_ok == 'OK' else 'cc-danger'}"><h3>🗄️ Database</h3><div class="cc-stat">{db_ok}</div><div class="cc-sub">Size: {cc_database_size()}</div></div>
+      <div class="card {'cc-ok' if not memory_bad else 'cc-warn'}"><h3>💾 Memory Backup Files</h3><div class="cc-stat">{'OK' if not memory_bad else 'CHECK'}</div><div class="cc-sub">{dash_escape(memory_text, 220)}</div></div>
+      <div class="card"><h3>📡 Channels</h3><div class="cc-stat">{guild_data['text_channels']} / {guild_data['voice_channels']}</div><div class="cc-sub">Text / Voice channels</div></div>
+    </div>
+
+    <div id="live" style="height:16px"></div>
+    <div class="card">
+      <h3>📡 Live Logs Feed</h3>
+      <p class="muted">آخر الأحداث المهمة من الرسائل، الأوامر، الاقتصاد، المخالفات، الدخول والخروج.</p>
+      <table class="table">
+        <tr><th>Time</th><th>Type</th><th>User</th><th>Channel</th><th>Amount</th><th>Details</th></tr>
+        {recent_html}
+      </table>
+    </div>
+    """
+
+    return render_dashboard_page("Command Center", body)
+
 @app.route("/dashboard/settings", methods=["GET"])
 def dashboard_settings_page():
     denied = dashboard_require_admin()
@@ -5114,6 +5639,15 @@ async def on_message(message):
     if not message.guild or message.guild.id != GUILD_ID:
         return
 
+    cc_record_event(
+        "message",
+        user_id=message.author.id,
+        user_name=str(message.author),
+        channel_id=message.channel.id,
+        channel_name=getattr(message.channel, "name", "unknown"),
+        details=message.content[:250]
+    )
+
     content = message.content.lower()
 
     now = time.time()
@@ -5240,6 +5774,13 @@ async def on_member_join(member):
     if member.guild.id != GUILD_ID:
         return
 
+    cc_record_event(
+        "member_join",
+        user_id=member.id,
+        user_name=str(member),
+        details="Member joined the server"
+    )
+
     created = int(member.created_at.timestamp())
 
     await send_log(
@@ -5260,6 +5801,13 @@ async def on_member_join(member):
 async def on_member_remove(member):
     if member.guild.id != GUILD_ID:
         return
+
+    cc_record_event(
+        "member_leave",
+        user_id=member.id,
+        user_name=str(member),
+        details="Member left the server"
+    )
 
     guild = member.guild
 
@@ -8068,6 +8616,25 @@ async def event_start_command(ctx, minutes: int = None, prize: str = None, *, ti
     announcement_channel = await get_channel_by_id(ctx.guild, BOT_ANNOUNCEMENTS_CHANNEL_ID)
     if announcement_channel and announcement_channel.id != ctx.channel.id:
         await announcement_channel.send(embed=embed)
+
+
+
+@bot.event
+async def on_command_completion(ctx):
+    try:
+        if not ctx.guild or ctx.guild.id != GUILD_ID:
+            return
+        command_name = ctx.command.name if ctx.command else "unknown"
+        cc_record_event(
+            "command",
+            user_id=ctx.author.id,
+            user_name=str(ctx.author),
+            channel_id=ctx.channel.id,
+            channel_name=getattr(ctx.channel, "name", "unknown"),
+            details=f"!{command_name}"
+        )
+    except Exception as e:
+        print(f"Command Center command log error: {e}")
 
 
 @bot.event
