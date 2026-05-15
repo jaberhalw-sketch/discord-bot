@@ -594,6 +594,24 @@ def init_db():
         )
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS dashboard_log_vault (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_type TEXT DEFAULT 'general',
+            title TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            color INTEGER DEFAULT 0,
+            discord_channel_id INTEGER DEFAULT 0,
+            discord_channel_name TEXT DEFAULT '',
+            discord_message_id INTEGER DEFAULT 0,
+            deleted_from_discord INTEGER DEFAULT 0,
+            deleted_by_id INTEGER DEFAULT 0,
+            deleted_by_name TEXT DEFAULT '',
+            created_at INTEGER,
+            deleted_at INTEGER DEFAULT 0
+        )
+    """)
+
     migrate_warnings_json_to_history(cur)
 
     conn.commit()
@@ -1985,6 +2003,250 @@ async def get_log_channel_by_type(guild, log_type="general"):
     return None
 
 
+
+# =========================
+# DASHBOARD LOG VAULT
+# Keeps an independent copy of every Discord log inside the dashboard.
+# If someone deletes the Discord log message, the dashboard copy stays saved.
+# =========================
+
+LOG_VAULT_LIMIT = 12000
+
+
+def log_vault_ensure_table(cur=None):
+    close_conn = False
+    conn = None
+    if cur is None:
+        conn = db_connect()
+        cur = conn.cursor()
+        close_conn = True
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS dashboard_log_vault (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            log_type TEXT DEFAULT 'general',
+            title TEXT DEFAULT '',
+            description TEXT DEFAULT '',
+            color INTEGER DEFAULT 0,
+            discord_channel_id INTEGER DEFAULT 0,
+            discord_channel_name TEXT DEFAULT '',
+            discord_message_id INTEGER DEFAULT 0,
+            deleted_from_discord INTEGER DEFAULT 0,
+            deleted_by_id INTEGER DEFAULT 0,
+            deleted_by_name TEXT DEFAULT '',
+            created_at INTEGER,
+            deleted_at INTEGER DEFAULT 0
+        )
+    """)
+
+    if close_conn and conn:
+        conn.commit()
+        conn.close()
+
+
+def log_vault_color_value(color):
+    try:
+        return int(getattr(color, "value", int(color)))
+    except Exception:
+        return 0
+
+
+def log_vault_record(log_type, title, description, color=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("""
+            INSERT INTO dashboard_log_vault
+            (log_type, title, description, color, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            str(log_type or "general")[:80],
+            str(title or "")[:220],
+            str(description or "")[:5000],
+            int(log_vault_color_value(color)),
+            int(time.time())
+        ))
+        vault_id = int(cur.lastrowid)
+        cur.execute("""
+            DELETE FROM dashboard_log_vault
+            WHERE id NOT IN (
+                SELECT id FROM dashboard_log_vault
+                ORDER BY id DESC
+                LIMIT ?
+            )
+        """, (LOG_VAULT_LIMIT,))
+        conn.commit()
+        conn.close()
+        return vault_id
+    except Exception as e:
+        print(f"Log Vault record error: {e}")
+        return None
+
+
+def log_vault_attach_discord_message(vault_id, channel_id=0, channel_name="", message_id=0):
+    if not vault_id:
+        return
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("""
+            UPDATE dashboard_log_vault
+            SET discord_channel_id = ?, discord_channel_name = ?, discord_message_id = ?
+            WHERE id = ?
+        """, (int(channel_id or 0), str(channel_name or "")[:120], int(message_id or 0), int(vault_id)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Log Vault attach error: {e}")
+
+
+def log_vault_mark_deleted(message_id, deleted_by_id=0, deleted_by_name="Unknown"):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("""
+            SELECT id, deleted_from_discord
+            FROM dashboard_log_vault
+            WHERE discord_message_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+        """, (int(message_id or 0),))
+        row = cur.fetchone()
+        if not row:
+            conn.close()
+            return False
+        if int(row[1] or 0) == 1:
+            conn.close()
+            return False
+        cur.execute("""
+            UPDATE dashboard_log_vault
+            SET deleted_from_discord = 1,
+                deleted_by_id = ?,
+                deleted_by_name = ?,
+                deleted_at = ?
+            WHERE id = ?
+        """, (int(deleted_by_id or 0), str(deleted_by_name or "Unknown")[:120], int(time.time()), int(row[0])))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Log Vault mark deleted error: {e}")
+        return False
+
+
+def log_vault_is_known_message(message_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("SELECT id FROM dashboard_log_vault WHERE discord_message_id = ? LIMIT 1", (int(message_id or 0),))
+        row = cur.fetchone()
+        conn.close()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def log_vault_is_log_channel(channel):
+    try:
+        if not channel:
+            return False
+        channel_id = int(getattr(channel, "id", 0) or 0)
+        channel_name = str(getattr(channel, "name", "") or "").lower().strip()
+        if channel_id in cc_log_channel_ids():
+            return True
+        if channel_name in cc_log_channel_names():
+            return True
+        return False
+    except Exception:
+        return False
+
+
+async def log_vault_deleted_by_from_audit(guild, bot_message_author_id=None):
+    try:
+        async for entry in guild.audit_logs(limit=8, action=discord.AuditLogAction.message_delete):
+            # Discord audit logs for message delete normally target the author whose message was deleted.
+            if bot_message_author_id and entry.target and getattr(entry.target, "id", None) != bot_message_author_id:
+                continue
+            if (discord.utils.utcnow() - entry.created_at).total_seconds() > 20:
+                continue
+            return entry.user
+    except Exception:
+        return None
+    return None
+
+
+def log_vault_recent(limit=120, log_type="all", query="", deleted_filter="all"):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        clauses = []
+        params = []
+        if log_type and log_type != "all":
+            clauses.append("log_type = ?")
+            params.append(str(log_type))
+        if deleted_filter == "deleted":
+            clauses.append("deleted_from_discord = 1")
+        elif deleted_filter == "active":
+            clauses.append("deleted_from_discord = 0")
+        if query:
+            clauses.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ?)")
+            like = f"%{query}%"
+            params.extend([like, like, like, like])
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        cur.execute(f"""
+            SELECT id, log_type, title, description, discord_channel_id, discord_channel_name,
+                   discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
+            FROM dashboard_log_vault
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+        """, tuple(params + [int(limit)]))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Log Vault recent error: {e}")
+        return []
+
+
+def log_vault_counts():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault")
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault WHERE deleted_from_discord = 1")
+        deleted = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault")
+        types = int(cur.fetchone()[0] or 0)
+        since = int(time.time()) - 86400
+        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault WHERE created_at >= ?", (since,))
+        today = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return total, deleted, types, today
+    except Exception:
+        return 0, 0, 0, 0
+
+
+def log_vault_types():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        cur.execute("SELECT log_type, COUNT(*) FROM dashboard_log_vault GROUP BY log_type ORDER BY COUNT(*) DESC")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
 async def send_log(guild, title, description, color=COLOR_GREY, log_type="general"):
     channel = await get_log_channel_by_type(guild, log_type)
 
@@ -2000,10 +2262,26 @@ async def send_log(guild, title, description, color=COLOR_GREY, log_type="genera
 
     embed.set_footer(text=f"NM System | {log_type} logs")
 
+    vault_id = log_vault_record(log_type, title, description, color)
+
     try:
-        await channel.send(embed=embed)
-    except:
-        pass
+        sent_message = await channel.send(embed=embed)
+        log_vault_attach_discord_message(
+            vault_id,
+            channel_id=getattr(channel, "id", 0),
+            channel_name=getattr(channel, "name", ""),
+            message_id=getattr(sent_message, "id", 0)
+        )
+        cc_record_event(
+            "discord_log",
+            channel_id=getattr(channel, "id", 0),
+            channel_name=getattr(channel, "name", ""),
+            details=f"{log_type} | {title}"
+        )
+    except Exception as e:
+        if vault_id:
+            log_vault_attach_discord_message(vault_id, 0, "SEND_FAILED", 0)
+        print(f"Send log error: {e}")
 
 
 async def get_audit_executor(guild, action, target_id=None):
@@ -5032,6 +5310,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <div class="navsection">Monitor</div>
       <a class="navitem" href="/dashboard"><span class="navicon">🏠</span><span>Overview</span></a>
       <a class="navitem" href="/dashboard/command-center"><span class="navicon">🧠</span><span>Command Center</span></a>
+      <a class="navitem" href="/dashboard/log-vault"><span class="navicon">🗄️</span><span>Log Vault</span></a>
       <a class="navitem" href="/dashboard/user"><span class="navicon">👤</span><span>User Lookup</span></a>
       <a class="navitem" href="/dashboard/warnings"><span class="navicon">⚠️</span><span>Warnings</span></a>
       <div class="navsection">Systems</div>
@@ -6332,6 +6611,109 @@ def dashboard_audit_page():
 
 
 
+
+@app.route("/dashboard/log-vault", methods=["GET"])
+def dashboard_log_vault_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+
+    init_db()
+    log_type = request.args.get("type", "all").strip() or "all"
+    deleted_filter = request.args.get("deleted", "all").strip() or "all"
+    query = request.args.get("q", "").strip()[:120]
+    try:
+        limit = max(25, min(300, int(request.args.get("limit", "150"))))
+    except Exception:
+        limit = 150
+
+    total, deleted_total, types_count, today = log_vault_counts()
+    type_options = '<option value="all">All log types</option>'
+    for t, count in log_vault_types():
+        selected = "selected" if str(t) == log_type else ""
+        type_options += f'<option value="{dash_escape(t, 80)}" {selected}>{dash_escape(t, 80)} ({int(count)})</option>'
+
+    deleted_options = "".join([
+        f'<option value="all" {"selected" if deleted_filter == "all" else ""}>All logs</option>',
+        f'<option value="active" {"selected" if deleted_filter == "active" else ""}>Still in Discord</option>',
+        f'<option value="deleted" {"selected" if deleted_filter == "deleted" else ""}>Deleted from Discord</option>',
+    ])
+
+    rows = log_vault_recent(limit=limit, log_type=log_type, query=query, deleted_filter=deleted_filter)
+    cards = ""
+    for row in rows:
+        vault_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
+        status = "<span class='pill ok'>Saved</span>"
+        deleted_line = ""
+        if int(deleted_flag or 0) == 1:
+            deleter = dashboard_member_name(deleted_by_id) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
+            deleted_line = f"<div class='muted small'>Deleted from Discord by: {deleter} • {cc_time(deleted_at)}</div>"
+            status = "<span class='pill bad'>Deleted in Discord</span>"
+        channel_label = f"#{dash_escape(channel_name, 80)}" if channel_name else "Unknown channel"
+        msg_link = ""
+        if channel_id and message_id:
+            msg_link = f"<a class='btn' target='_blank' href='https://discord.com/channels/{GUILD_ID}/{int(channel_id)}/{int(message_id)}'>Open Discord Log</a>"
+        cards += f"""
+        <div class="card" style="margin-bottom:12px">
+          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
+            <div>
+              <span class="pill cyan">{dash_escape(row_type, 80)}</span>
+              {status}
+              <span class="pill">{channel_label}</span>
+              <div class="muted small" style="margin-top:8px">Vault ID #{int(vault_id)} • {cc_time(created_at)} • Discord Message ID: <code>{int(message_id or 0)}</code></div>
+            </div>
+            <div>{msg_link}</div>
+          </div>
+          <div class="prodivider"></div>
+          <h3 style="margin-bottom:8px">{dash_escape(title, 180)}</h3>
+          <pre style="white-space:pre-wrap;word-break:break-word;background:rgba(2,6,23,.58);border:1px solid var(--line);border-radius:18px;padding:14px;max-height:260px;overflow:auto">{dash_escape(description, 4000)}</pre>
+          {deleted_line}
+        </div>
+        """
+    if not cards:
+        cards = "<div class='card'><h3>No logs found</h3><p class='muted'>جرب تغير الفلتر أو انتظر لين البوت يسجل لوقات جديدة.</p></div>"
+
+    body = f"""
+    {dashboard_toast_html()}
+    <div class="hero">
+      <div class="card">
+        <div class="big">🗄️ Log Vault</div>
+        <p class="muted">كل لوقات الديسكورد تنحفظ هنا داخل الداشبورد كنسخة مستقلة. حتى لو أحد حذف رسالة اللوق من الروم، النسخة تبقى هنا وتظهر كـ Deleted in Discord.</p>
+        <div style="height:10px"></div>
+        <span class="pill ok">Tamper-resistant dashboard copy</span>
+        <span class="pill">Discord logs mirror</span>
+      </div>
+      <div class="card">
+        <h3>🛡️ Protection</h3>
+        <p class="muted">إذا أحد حذف لوق من رومات اللوق، البوت يحاول يجيب اسم اللي حذفه من Audit Log ويعلّم عليه هنا.</p>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card stat"><div class="icon">📦</div><div class="num">{total:,}</div><div class="label">Saved logs</div></div>
+      <div class="card stat"><div class="icon">🗑️</div><div class="num">{deleted_total:,}</div><div class="label">Deleted from Discord</div></div>
+      <div class="card stat"><div class="icon">🧩</div><div class="num">{types_count:,}</div><div class="label">Log types</div></div>
+      <div class="card stat"><div class="icon">⏱️</div><div class="num">{today:,}</div><div class="label">Saved today</div></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="card">
+      <h3>🔎 Filters</h3>
+      <form method="get" class="formgrid">
+        <div><label>Search</label><input name="q" value="{dash_escape(query, 120)}" placeholder="title, text, channel, deleter"></div>
+        <div><label>Type</label><select name="type">{type_options}</select></div>
+        <div><label>Status</label><select name="deleted">{deleted_options}</select></div>
+        <div><label>Limit</label><input name="limit" value="{limit}"></div>
+        <div style="display:flex;align-items:end;gap:8px"><button class="btn primary" type="submit">Apply</button><a class="btn" href="/dashboard/log-vault">Reset</a></div>
+      </form>
+    </div>
+
+    <div style="height:14px"></div>
+    {cards}
+    """
+    return render_dashboard_page("Log Vault", body)
+
+
 @app.route("/dashboard/command-center", methods=["GET"])
 def dashboard_command_center_page():
     denied = dashboard_require_admin()
@@ -7047,7 +7429,25 @@ async def on_message(message):
 
 @bot.event
 async def on_message_delete(message):
-    if not message.guild or message.guild.id != GUILD_ID or message.author.bot:
+    if not message.guild or message.guild.id != GUILD_ID:
+        return
+
+    # If someone deletes a bot log message from a log room, keep the dashboard vault copy and mark who deleted it.
+    if message.author.bot:
+        if log_vault_is_log_channel(message.channel) and log_vault_is_known_message(message.id):
+            deleter = await log_vault_deleted_by_from_audit(message.guild, getattr(message.author, "id", 0))
+            deleted_by_id = getattr(deleter, "id", 0) if deleter else 0
+            deleted_by_name = str(deleter) if deleter else "Unknown"
+            changed = log_vault_mark_deleted(message.id, deleted_by_id, deleted_by_name)
+            if changed:
+                cc_record_event(
+                    "log_deleted",
+                    user_id=deleted_by_id,
+                    user_name=deleted_by_name,
+                    channel_id=message.channel.id,
+                    channel_name=getattr(message.channel, "name", "unknown"),
+                    details=f"Discord log message deleted. Message ID: {message.id}"
+                )
         return
 
     await send_log(
@@ -7064,6 +7464,28 @@ async def on_message_delete(message):
         COLOR_RED,
         log_type="message"
     )
+
+
+
+@bot.event
+async def on_raw_message_delete(payload):
+    try:
+        if getattr(payload, "guild_id", None) != GUILD_ID:
+            return
+        message_id = int(getattr(payload, "message_id", 0) or 0)
+        if not message_id or not log_vault_is_known_message(message_id):
+            return
+        # This catches uncached deleted log messages. Deleter may be unknown here; cached deletes use on_message_delete.
+        changed = log_vault_mark_deleted(message_id, 0, "Unknown / uncached delete")
+        if changed:
+            cc_record_event(
+                "log_deleted",
+                channel_id=int(getattr(payload, "channel_id", 0) or 0),
+                channel_name="unknown",
+                details=f"Uncached Discord log message deleted. Message ID: {message_id}"
+            )
+    except Exception as e:
+        print(f"Raw log delete watch error: {e}")
 
 
 @bot.event
