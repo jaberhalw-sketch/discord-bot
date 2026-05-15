@@ -4664,18 +4664,88 @@ def cc_recent_events(limit=80, event_type=None):
         return []
 
 
+
+def cc_log_channel_ids():
+    """Channels excluded from activity analytics so log rooms do not dominate Top Active Channels."""
+    ids = set()
+    try:
+        for value in (LOG_CHANNEL_IDS or {}).values():
+            if str(value).isdigit():
+                ids.add(int(value))
+    except Exception:
+        pass
+    try:
+        for value in (LOG_CHANNEL_NAMES or {}).values():
+            # names handled separately in cc_log_channel_names
+            pass
+    except Exception:
+        pass
+    return ids
+
+
+def cc_log_channel_names():
+    names = set()
+    try:
+        names.update(str(name).lower().strip() for name in (LOG_CHANNEL_NAMES or {}).values())
+    except Exception:
+        pass
+    names.update({
+        "logs", "log", "audit-log", "audit-logs", "لوق", "لوقات",
+        "nm-message-logs", "nm-member-logs", "nm-moderation-logs", "nm-role-logs",
+        "nm-channel-logs", "nm-voice-logs", "nm-server-logs", "nm-game-logs", "nm-giveaway-logs",
+    })
+    return {name for name in names if name}
+
+
+def cc_log_channel_filter_sql(prefix=""):
+    excluded_ids = sorted(cc_log_channel_ids())
+    excluded_names = sorted(cc_log_channel_names())
+    clauses = []
+    params = []
+    channel_id_col = f"{prefix}channel_id" if prefix else "channel_id"
+    channel_name_col = f"LOWER({prefix}channel_name)" if prefix else "LOWER(channel_name)"
+    if excluded_ids:
+        placeholders = ",".join(["?"] * len(excluded_ids))
+        clauses.append(f"{channel_id_col} NOT IN ({placeholders})")
+        params.extend(excluded_ids)
+    if excluded_names:
+        placeholders = ",".join(["?"] * len(excluded_names))
+        clauses.append(f"{channel_name_col} NOT IN ({placeholders})")
+        params.extend(excluded_names)
+    if not clauses:
+        return "", []
+    return " AND " + " AND ".join(clauses), params
+
+
+def cc_count_clean_messages(since=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        extra_sql, extra_params = cc_log_channel_filter_sql()
+        cur.execute(
+            "SELECT COUNT(*) FROM command_center_events WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''" + extra_sql,
+            tuple([int(since)] + extra_params)
+        )
+        count = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return count
+    except Exception:
+        return 0
+
 def cc_top_channels(since=0, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        extra_sql, extra_params = cc_log_channel_filter_sql()
         cur.execute("""
             SELECT channel_name, COUNT(*)
             FROM command_center_events
             WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''
+        """ + extra_sql + """
             GROUP BY channel_name
             ORDER BY COUNT(*) DESC
             LIMIT ?
-        """, (int(since), int(limit)))
+        """, tuple([int(since)] + extra_params + [int(limit)]))
         rows = cur.fetchall()
         conn.close()
         return rows
@@ -4879,58 +4949,64 @@ DASHBOARD_BASE_TEMPLATE = r'''
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} • {{ brand }}</title>
   <style>
-    :root{
-      --bg:#070a12;--bg2:#0b1020;--panel:rgba(18,24,38,.78);--panel2:rgba(23,31,49,.82);
-      --text:#f7fbff;--muted:#92a0b8;--line:rgba(148,163,184,.18);--blue:#5865f2;--purple:#8b5cf6;
-      --green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4;--shadow:0 24px 80px rgba(0,0,0,.42)
-    }
-    *{box-sizing:border-box} html{scroll-behavior:smooth}
-    body{margin:0;min-height:100vh;overflow-x:hidden;background:
-      radial-gradient(circle at 15% -10%,rgba(88,101,242,.35),transparent 35%),
-      radial-gradient(circle at 85% 0%,rgba(139,92,246,.22),transparent 30%),
-      linear-gradient(180deg,#090e1b 0%,#070a12 100%);font-family:Inter,ui-sans-serif,system-ui,Arial,sans-serif;color:var(--text)}
-    a{color:inherit;text-decoration:none} code{background:rgba(15,23,42,.9);border:1px solid var(--line);padding:3px 7px;border-radius:9px;color:#dbeafe}
-    .layout{display:grid;grid-template-columns:278px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px;border-right:1px solid var(--line);background:rgba(7,10,18,.68);backdrop-filter:blur(18px)}
-    .brand{display:flex;align-items:center;gap:12px;margin-bottom:24px}.logo{width:48px;height:48px;border-radius:18px;background:linear-gradient(135deg,var(--blue),var(--purple));display:grid;place-items:center;font-size:25px;box-shadow:0 18px 45px rgba(88,101,242,.25)}
-    .brand h1{font-size:20px;margin:0;letter-spacing:.2px}.brand p{margin:4px 0 0;color:var(--muted);font-size:12px}.navlist{display:grid;gap:8px}.navitem{display:flex;align-items:center;gap:10px;padding:12px 13px;border:1px solid transparent;border-radius:15px;color:#c8d2e4;font-weight:800}.navitem:hover,.navitem.active{background:rgba(88,101,242,.14);border-color:rgba(88,101,242,.26);color:#fff}.navfoot{position:absolute;bottom:20px;left:20px;right:20px;color:var(--muted);font-size:12px}
-    .main{padding:24px;max-width:1480px;width:100%;min-width:0;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;gap:14px}.headline h2{font-size:30px;margin:0}.headline p{color:var(--muted);margin:6px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(23,31,49,.92);padding:10px 14px;border-radius:14px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:900;box-shadow:0 10px 30px rgba(0,0,0,.14)}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
-    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel),rgba(13,19,33,.9));border:1px solid var(--line);border-radius:24px;padding:18px;box-shadow:var(--shadow);backdrop-filter:blur(16px);min-width:0}.card h3{margin:0 0 13px;font-size:17px}.stat{position:relative;overflow:hidden}.stat:after{content:"";position:absolute;right:-18px;top:-18px;width:90px;height:90px;border-radius:999px;background:rgba(88,101,242,.16)}.stat .icon{font-size:23px}.stat .num{font-size:32px;font-weight:1000;margin-top:10px}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.muted{color:var(--muted)}.small{font-size:12px}.toast{padding:13px 15px;border-radius:16px;border:1px solid var(--line);margin-bottom:14px;font-weight:850}.toast.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.3)}.toast.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
-    .table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px}.table td{padding:12px 10px;background:rgba(15,23,42,.55);border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.2)}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}
-    .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:20px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:800}input,select,textarea{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:14px;padding:12px;outline:none}input:focus,select:focus,textarea:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}
-    @media(max-width:1000px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.navfoot{position:static;margin-top:16px}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:24px}}
-  .switchgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.switchcard{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(255,255,255,.04)}.toggleline{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{width:52px;height:28px;border-radius:999px;background:#3b4252;position:relative;display:inline-block}.switch input{display:none}.slider{position:absolute;cursor:pointer;inset:0;border-radius:999px}.slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#22c55e}.switch input:checked+.slider:before{transform:translateX(24px)}.dangerzone{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
-</style>
+    :root{--bg:#050714;--bg2:#0a1022;--panel:rgba(14,20,37,.78);--panel2:rgba(20,29,52,.86);--glass:rgba(255,255,255,.055);--glass2:rgba(255,255,255,.085);--text:#f8fbff;--muted:#94a3b8;--line:rgba(148,163,184,.16);--line2:rgba(148,163,184,.25);--blue:#5865f2;--purple:#8b5cf6;--pink:#ec4899;--green:#22c55e;--red:#ef4444;--yellow:#f59e0b;--cyan:#06b6d4;--shadow:0 30px 90px rgba(0,0,0,.46);--soft:0 16px 40px rgba(0,0,0,.22)}
+    *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;min-height:100vh;overflow-x:hidden;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 12% -10%,rgba(88,101,242,.35),transparent 34%),radial-gradient(circle at 92% 0%,rgba(139,92,246,.28),transparent 32%),radial-gradient(circle at 50% 110%,rgba(6,182,212,.12),transparent 28%),linear-gradient(180deg,#091021 0%,#050714 100%)}
+    body:before{content:"";position:fixed;inset:0;pointer-events:none;background-image:linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(to bottom,rgba(0,0,0,.8),transparent 80%)}
+    a{color:inherit;text-decoration:none} code{background:rgba(2,6,23,.9);border:1px solid var(--line);padding:3px 7px;border-radius:9px;color:#dbeafe;word-break:break-word}
+    .layout{display:grid;grid-template-columns:318px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px 18px;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(7,10,18,.92),rgba(7,10,18,.72));backdrop-filter:blur(22px);overflow-y:auto;overflow-x:hidden}.sidebar::-webkit-scrollbar{width:8px}.sidebar::-webkit-scrollbar-thumb{background:rgba(148,163,184,.2);border-radius:999px}
+    .brand{display:flex;align-items:center;gap:13px;padding:10px 7px 20px;margin-bottom:4px}.logo{width:58px;height:58px;border-radius:22px;background:linear-gradient(135deg,#5865f2,#8b5cf6 58%,#ec4899);display:grid;place-items:center;font-size:29px;box-shadow:0 24px 55px rgba(88,101,242,.32);position:relative}.logo:after{content:"";position:absolute;inset:-1px;border-radius:23px;border:1px solid rgba(255,255,255,.22)}.brand h1{font-size:23px;margin:0;letter-spacing:-.35px}.brand p{margin:5px 0 0;color:var(--muted);font-size:12px}
+    .navsection{margin:14px 0 8px;padding:0 8px;color:#64748b;font-size:10px;letter-spacing:.15em;text-transform:uppercase;font-weight:1000}.navlist{display:grid;gap:7px}.navitem{display:flex;align-items:center;gap:11px;padding:12px 13px;border:1px solid transparent;border-radius:17px;color:#cbd5e1;font-weight:900;letter-spacing:-.1px;position:relative;transition:.18s ease}.navicon{width:28px;height:28px;border-radius:11px;display:grid;place-items:center;background:rgba(255,255,255,.06);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}.navitem:hover{background:rgba(255,255,255,.06);border-color:var(--line);transform:translateX(2px)}.navitem.active{background:linear-gradient(135deg,rgba(88,101,242,.26),rgba(139,92,246,.18));border-color:rgba(139,92,246,.38);color:#fff;box-shadow:0 12px 30px rgba(88,101,242,.12)}.navitem.active:before{content:"";position:absolute;left:-18px;top:12px;bottom:12px;width:4px;border-radius:999px;background:linear-gradient(180deg,#8b5cf6,#06b6d4)}.ownerlock{margin-left:auto;font-size:11px;color:#fbbf24}.navfoot{margin-top:22px;padding:14px;border:1px solid var(--line);border-radius:22px;background:rgba(15,23,42,.52);box-shadow:var(--soft)}.userbox{display:flex;gap:10px;align-items:center;margin-bottom:11px}.userdot{width:36px;height:36px;border-radius:14px;background:linear-gradient(135deg,#312e81,#8b5cf6);display:grid;place-items:center}.userbox b{display:block}.userbox span{font-size:12px;color:var(--muted)}
+    .main{padding:26px;max-width:1540px;width:100%;min-width:0;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;gap:14px}.headline h2{font-size:34px;line-height:1.05;margin:0;letter-spacing:-.85px}.headline p{color:var(--muted);margin:8px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(20,29,52,.82);padding:10px 14px;border-radius:15px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:950;box-shadow:0 10px 30px rgba(0,0,0,.16);transition:.16s ease}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
+    .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.card{background:linear-gradient(180deg,var(--panel),rgba(10,16,31,.92));border:1px solid var(--line);border-radius:26px;padding:19px;box-shadow:var(--shadow);backdrop-filter:blur(18px);min-width:0;overflow:hidden}.card h3{margin:0 0 13px;font-size:18px;letter-spacing:-.25px}.stat{position:relative;overflow:hidden}.stat:after{content:"";position:absolute;right:-20px;top:-20px;width:100px;height:100px;border-radius:999px;background:linear-gradient(135deg,rgba(88,101,242,.18),rgba(6,182,212,.08))}.stat .icon{font-size:24px}.stat .num{font-size:34px;font-weight:1000;margin-top:10px;letter-spacing:-.8px}.stat .label{color:var(--muted);font-size:13px;margin-top:4px}.muted{color:var(--muted)}.small{font-size:12px}.toast{padding:13px 15px;border-radius:17px;border:1px solid var(--line);margin-bottom:14px;font-weight:900}.toast.ok{background:rgba(34,197,94,.12);border-color:rgba(34,197,94,.3)}.toast.bad{background:rgba(239,68,68,.12);border-color:rgba(239,68,68,.3)}
+    .tablewrap{width:100%;overflow-x:auto}.table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px;white-space:nowrap}.table td{padding:12px 10px;background:rgba(15,23,42,.56);border-top:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:top}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.22);white-space:nowrap}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}.pill.cyan{background:rgba(6,182,212,.14);color:#cffafe;border-color:rgba(6,182,212,.25)}
+    .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:22px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:900}input,select,textarea{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:15px;padding:12px;outline:none}input:focus,select:focus,textarea:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1.4px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}.prodivider{height:1px;background:linear-gradient(90deg,transparent,var(--line2),transparent);margin:14px 0}
+    .switchgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.switchcard{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(255,255,255,.04)}.toggleline{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{width:52px;height:28px;border-radius:999px;background:#3b4252;position:relative;display:inline-block}.switch input{display:none}.slider{position:absolute;cursor:pointer;inset:0;border-radius:999px}.slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#22c55e}.switch input:checked+.slider:before{transform:translateX(24px)}.dangerzone{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
+    @media(max-width:1100px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:26px}.hero .big{font-size:32px}.navfoot{margin-bottom:0}}
+  </style>
 </head>
 <body>
 <div class="layout">
   <aside class="sidebar">
-    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Discord OAuth Admin Dashboard</p></div></div>
+    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Command-grade admin dashboard</p></div></div>
     <nav class="navlist">
-      <a class="navitem" href="/dashboard">🏠 Overview</a>
-      <a class="navitem" href="/dashboard/command-center">🧠 Command Center</a>
-      <a class="navitem" href="/dashboard/economy">🪙 Economy</a>
-      <a class="navitem" href="/dashboard/levels">📊 Levels</a>
-      <a class="navitem" href="/dashboard/casino">🎰 Casino</a>
-      <a class="navitem" href="/dashboard/shop">🛒 Shop</a>
-      <a class="navitem" href="/dashboard/events">🎉 Events</a>
-      <a class="navitem" href="/dashboard/user">👤 User Lookup</a>
-      <a class="navitem" href="/dashboard/warnings">⚠️ Warnings</a>
-      <a class="navitem" href="/dashboard/admin-access">🔐 Admin Access</a>
-      <a class="navitem" href="/dashboard/memory">💾 Memory</a>
-      <a class="navitem" href="/dashboard/control">🛡️ Control Center</a>
-      <a class="navitem" href="/dashboard/audit">🕵️ Audit Center</a>
-      <a class="navitem" href="/dashboard/settings">⚙️ Settings</a>
-      <a class="navitem" href="/oauth_debug">🧪 OAuth Debug</a>
+      <div class="navsection">Monitor</div>
+      <a class="navitem" href="/dashboard"><span class="navicon">🏠</span><span>Overview</span></a>
+      <a class="navitem" href="/dashboard/command-center"><span class="navicon">🧠</span><span>Command Center</span></a>
+      <a class="navitem" href="/dashboard/user"><span class="navicon">👤</span><span>User Lookup</span></a>
+      <a class="navitem" href="/dashboard/warnings"><span class="navicon">⚠️</span><span>Warnings</span></a>
+      <div class="navsection">Systems</div>
+      <a class="navitem" href="/dashboard/economy"><span class="navicon">🪙</span><span>Economy</span></a>
+      <a class="navitem" href="/dashboard/levels"><span class="navicon">📊</span><span>Levels</span></a>
+      <a class="navitem" href="/dashboard/casino"><span class="navicon">🎰</span><span>Casino</span></a>
+      <a class="navitem" href="/dashboard/shop"><span class="navicon">🛒</span><span>Shop</span></a>
+      <a class="navitem" href="/dashboard/events"><span class="navicon">🎉</span><span>Events</span></a>
+      <a class="navitem" href="/dashboard/memory"><span class="navicon">💾</span><span>Memory</span></a>
+      <div class="navsection">Owner Tools</div>
+      {% if access_level == 'owner' %}
+      <a class="navitem" href="/dashboard/admin-access"><span class="navicon">🔐</span><span>Admin Access</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/control"><span class="navicon">🛡️</span><span>Control Center</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/audit"><span class="navicon">🕵️</span><span>Audit Center</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/settings"><span class="navicon">⚙️</span><span>Settings</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/oauth_debug"><span class="navicon">🧪</span><span>OAuth Debug</span><span class="ownerlock">Owner</span></a>
+      {% else %}
+      <div class="card" style="padding:12px;border-radius:18px;background:rgba(245,158,11,.08);box-shadow:none"><span class="pill gold">Owner tools hidden</span><p class="muted small" style="margin:8px 0 0">Admin Limited يشوف المراقبة والإدارة الأساسية فقط.</p></div>
+      {% endif %}
     </nav>
-    <div class="navfoot">{% if user %}<div class="pill">👤 {{ user.get('username') }}</div><div style="height:8px"></div><a class="btn" href="/logout">Logout</a>{% else %}<a class="btn primary" href="/login">Login with Discord</a>{% endif %}</div>
+    <div class="navfoot">
+      {% if user %}
+      <div class="userbox"><div class="userdot">👤</div><div><b>{{ user.get('username') }}</b><span>{{ role_badge|safe }}</span></div></div>
+      <a class="btn" href="/logout">Logout</a>
+      {% else %}
+      <a class="btn primary" href="/login">Login with Discord</a>
+      {% endif %}
+    </div>
   </aside>
   <main class="main">
     <div class="topbar"><div class="headline"><h2>{{ title }}</h2><p>Live admin dashboard for monitoring, economy, warnings, access and system health.</p></div><div class="actions"><a class="btn" href="/">Status</a>{% if user %}<a class="btn primary" href="/dashboard">Dashboard</a>{% else %}<a class="btn primary" href="/login">Login</a>{% endif %}</div></div>
     {{ body|safe }}
-    <div class="footer">{{ brand }} • Protected by Discord OAuth</div>
+    <div class="footer">{{ brand }} • Protected by Discord OAuth • {{ role_badge|safe }}</div>
   </main>
 </div>
-
 <script>
   (() => {
     const path = window.location.pathname;
@@ -4945,8 +5021,20 @@ DASHBOARD_BASE_TEMPLATE = r'''
 '''
 
 
+
 def render_dashboard_page(title, body, status=200):
-    return render_template_string(DASHBOARD_BASE_TEMPLATE, title=title, brand=BOT_BRAND, user=session.get("discord_user"), body=body), status
+    user = session.get("discord_user")
+    access_level = dashboard_current_access_level() if user else "none"
+    role_badge = dashboard_role_badge_html() if user else ""
+    return render_template_string(
+        DASHBOARD_BASE_TEMPLATE,
+        title=title,
+        brand=BOT_BRAND,
+        user=user,
+        body=body,
+        access_level=access_level,
+        role_badge=role_badge,
+    ), status
 
 
 @app.route("/")
@@ -6213,7 +6301,7 @@ def dashboard_command_center_page():
     level_users = db_table_count("levels")
     active_warnings, cleared_warnings, active_warning_users, total_warning_users = get_warning_summary_counts()
 
-    messages_24h = cc_count_events("message", since_24h)
+    messages_24h = cc_count_clean_messages(since_24h)
     commands_24h = cc_count_events("command", since_24h)
     violations_24h = cc_count_events("violation", since_24h)
     joins_24h = cc_count_events("member_join", since_24h)
@@ -6221,7 +6309,7 @@ def dashboard_command_center_page():
     money_created_24h = cc_sum_amount("money", since_24h, positive_only=True)
     money_removed_24h = abs(cc_sum_amount("money", since_24h, negative_only=True))
 
-    messages_1h = cc_count_events("message", since_1h)
+    messages_1h = cc_count_clean_messages(since_1h)
     commands_1h = cc_count_events("command", since_1h)
     violations_1h = cc_count_events("violation", since_1h)
 
