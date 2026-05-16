@@ -491,6 +491,28 @@ def init_db():
 
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS money_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            user_name TEXT DEFAULT '',
+            amount INTEGER DEFAULT 0,
+            new_balance INTEGER DEFAULT 0,
+            source_type TEXT DEFAULT 'system',
+            source_label TEXT DEFAULT '',
+            admin_id INTEGER DEFAULT 0,
+            admin_name TEXT DEFAULT '',
+            batch_id TEXT DEFAULT '',
+            details TEXT DEFAULT '',
+            created_at INTEGER
+        )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_money_audit_user ON money_audit(user_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_money_audit_source ON money_audit(source_type)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_money_audit_created ON money_audit(created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_money_audit_batch ON money_audit(batch_id)")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS warning_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -721,7 +743,7 @@ def get_balance(user_id):
     return balance
 
 
-def add_money(user_id, amount):
+def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id=""):
     balance, last_daily = get_money_data(user_id)
     balance += int(amount)
 
@@ -736,16 +758,12 @@ def add_money(user_id, amount):
     )
     conn.commit()
     conn.close()
-    cc_record_event(
-        "money",
-        user_id=user_id,
-        amount=int(amount),
-        details=f"Money added. New balance: {balance}"
-    )
+    cc_record_event("money", user_id=user_id, amount=int(amount), details=details or f"Money added. New balance: {balance}")
+    money_audit_record(user_id=user_id, amount=int(amount), new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Money added. New balance: {balance}", batch_id=batch_id)
     return balance
 
 
-def remove_money(user_id, amount):
+def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id=""):
     amount = int(amount)
     balance, last_daily = get_money_data(user_id)
 
@@ -765,18 +783,15 @@ def remove_money(user_id, amount):
     )
     conn.commit()
     conn.close()
-    cc_record_event(
-        "money",
-        user_id=user_id,
-        amount=-int(amount),
-        details=f"Money removed. New balance: {balance}"
-    )
+    cc_record_event("money", user_id=user_id, amount=-int(amount), details=details or f"Money removed. New balance: {balance}")
+    money_audit_record(user_id=user_id, amount=-int(amount), new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Money removed. New balance: {balance}", batch_id=batch_id)
     return True, balance
 
 
-def set_balance(user_id, amount):
-    get_money_data(user_id)
+def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id=""):
+    old_balance = get_balance(user_id)
     amount = max(0, int(amount))
+    delta = int(amount) - int(old_balance)
 
     conn = db_connect()
     cur = conn.cursor()
@@ -786,12 +801,8 @@ def set_balance(user_id, amount):
     )
     conn.commit()
     conn.close()
-    cc_record_event(
-        "money_set",
-        user_id=user_id,
-        amount=int(amount),
-        details=f"Balance set to: {amount}"
-    )
+    cc_record_event("money_set", user_id=user_id, amount=int(delta), details=details or f"Balance set to: {amount}. Delta: {delta}")
+    money_audit_record(user_id=user_id, amount=int(delta), new_balance=amount, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Balance set from {old_balance} to {amount}. Delta: {delta}", batch_id=batch_id)
     return amount
 
 
@@ -808,26 +819,28 @@ async def get_all_human_members(guild):
     return [member for member in guild.members if not member.bot]
 
 
-async def bulk_add_money_to_all(guild, amount):
+async def bulk_add_money_to_all(guild, amount, source_type="dashboard_bulk_add", admin_id=0, admin_name=""):
     amount = int(amount)
     if amount <= 0:
         return {"count": 0, "total_added": 0, "members": []}
 
     members = await get_all_human_members(guild)
     touched = []
+    batch_id = f"{source_type}:{int(time.time())}:{random.randint(1000, 9999)}"
 
     for member in members:
-        balance = add_money(member.id, amount)
+        balance = add_money(member.id, amount, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Bulk economy add by {admin_name or admin_id}. Amount each: {amount}", batch_id=batch_id)
         touched.append((member.id, balance))
 
     return {
         "count": len(touched),
         "total_added": len(touched) * amount,
         "members": touched,
+        "batch_id": batch_id,
     }
 
 
-async def bulk_remove_money_from_all(guild, amount):
+async def bulk_remove_money_from_all(guild, amount, source_type="dashboard_bulk_remove", admin_id=0, admin_name=""):
     amount = int(amount)
     if amount <= 0:
         return {"count": 0, "total_removed": 0, "members": []}
@@ -835,12 +848,14 @@ async def bulk_remove_money_from_all(guild, amount):
     members = await get_all_human_members(guild)
     touched = []
     total_removed = 0
+    batch_id = f"{source_type}:{int(time.time())}:{random.randint(1000, 9999)}"
 
     for member in members:
         current_balance = get_balance(member.id)
         removed = min(current_balance, amount)
         new_balance = max(0, current_balance - amount)
-        set_balance(member.id, new_balance)
+        if removed > 0:
+            set_balance(member.id, new_balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Bulk economy remove by {admin_name or admin_id}. Requested: {amount}. Removed: {removed}", batch_id=batch_id)
         total_removed += removed
         touched.append((member.id, removed, new_balance))
 
@@ -848,6 +863,7 @@ async def bulk_remove_money_from_all(guild, amount):
         "count": len(touched),
         "total_removed": total_removed,
         "members": touched,
+        "batch_id": batch_id,
     }
 
 
@@ -904,6 +920,7 @@ def claim_daily(user_id, level):
             amount=reward,
             details=f"Salary claimed. New balance: {new_balance}"
         )
+        money_audit_record(user_id=user_id, amount=reward, new_balance=new_balance, source_type="salary", details=f"Hourly salary claimed. Level: {level}. New balance: {new_balance}")
         return True, 0, new_balance, reward
     except Exception as e:
         try:
@@ -956,6 +973,8 @@ def claim_booster_weekly(user_id):
     )
     conn.commit()
     conn.close()
+
+    money_audit_record(user_id=user_id, amount=reward, new_balance=balance, source_type="booster_salary", details=f"Booster weekly reward claimed. New balance: {balance}")
 
     return True, 0, balance, reward
 
@@ -4423,6 +4442,212 @@ def fmt_coin(value):
     return f"🪙 {fmt_num(value)} {COIN_NAME}"
 
 
+def money_audit_user_name(user_id):
+    try:
+        guild = bot.get_guild(GUILD_ID) if bot else None
+        member = guild.get_member(int(user_id)) if guild else None
+        if member:
+            return str(member)
+    except:
+        pass
+    return str(user_id or "Unknown")
+
+
+def money_audit_source_label(source_type):
+    labels = {
+        "dashboard_admin_add": "Dashboard admin grant",
+        "discord_admin_add": "Discord admin grant",
+        "dashboard_bulk_add": "Dashboard give everyone",
+        "discord_bulk_add": "Discord give everyone",
+        "dashboard_admin_remove": "Dashboard admin remove",
+        "discord_admin_remove": "Discord admin remove",
+        "dashboard_bulk_remove": "Dashboard take everyone",
+        "discord_bulk_remove": "Discord take everyone",
+        "dashboard_set": "Dashboard set balance",
+        "discord_reset": "Discord reset balance",
+        "salary": "Salary",
+        "booster_salary": "Booster reward",
+        "transfer_in": "Transfer received",
+        "transfer_out": "Transfer sent",
+        "system_earned": "Earned / system reward",
+        "system_spend": "Spend / loss",
+    }
+    return labels.get(str(source_type or "system"), str(source_type or "system"))
+
+
+def money_audit_record(user_id, amount, new_balance=0, source_type="system", admin_id=0, admin_name="", details="", batch_id="", user_name=""):
+    try:
+        user_id = int(user_id or 0)
+        amount = int(amount or 0)
+        new_balance = int(new_balance or 0)
+        source_type = str(source_type or "system")[:80]
+        source_label = money_audit_source_label(source_type)[:120]
+        if not user_name:
+            user_name = money_audit_user_name(user_id)
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS money_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT DEFAULT '',
+                amount INTEGER DEFAULT 0,
+                new_balance INTEGER DEFAULT 0,
+                source_type TEXT DEFAULT 'system',
+                source_label TEXT DEFAULT '',
+                admin_id INTEGER DEFAULT 0,
+                admin_name TEXT DEFAULT '',
+                batch_id TEXT DEFAULT '',
+                details TEXT DEFAULT '',
+                created_at INTEGER
+            )
+        """)
+        cur.execute("""
+            INSERT INTO money_audit
+            (user_id, user_name, amount, new_balance, source_type, source_label, admin_id, admin_name, batch_id, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user_id,
+            str(user_name or "")[:140],
+            amount,
+            new_balance,
+            source_type,
+            source_label,
+            int(admin_id or 0),
+            str(admin_name or "")[:140],
+            str(batch_id or "")[:140],
+            str(details or "")[:1200],
+            int(time.time())
+        ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Money audit record error: {e}")
+
+
+def money_audit_member_summary(user_id):
+    try:
+        user_id = int(user_id)
+        conn = db_connect()
+        cur = conn.cursor()
+        admin_sources = ("dashboard_admin_add", "discord_admin_add", "dashboard_bulk_add", "discord_bulk_add", "dashboard_set")
+        earned_exclude = admin_sources + ("dashboard_admin_remove", "discord_admin_remove", "dashboard_bulk_remove", "discord_bulk_remove", "discord_reset")
+        cur.execute(f"""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM money_audit
+            WHERE user_id = ? AND amount > 0 AND source_type IN ({','.join(['?']*len(admin_sources))})
+        """, (user_id, *admin_sources))
+        admin_received = int(cur.fetchone()[0] or 0)
+        cur.execute(f"""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM money_audit
+            WHERE user_id = ? AND amount > 0 AND source_type NOT IN ({','.join(['?']*len(earned_exclude))})
+        """, (user_id, *earned_exclude))
+        earned_received = int(cur.fetchone()[0] or 0)
+        cur.execute("SELECT COALESCE(SUM(amount), 0) FROM money_audit WHERE user_id = ? AND amount < 0", (user_id,))
+        removed_or_spent = abs(int(cur.fetchone()[0] or 0))
+        cur.execute("SELECT COUNT(*) FROM money_audit WHERE user_id = ?", (user_id,))
+        entries = int(cur.fetchone()[0] or 0)
+        conn.close()
+        balance = get_balance(user_id)
+        tracked_positive = admin_received + earned_received
+        untracked_or_old = balance - tracked_positive
+        return {"balance": balance, "admin_received": admin_received, "earned_received": earned_received, "removed_or_spent": removed_or_spent, "entries": entries, "untracked_or_old": untracked_or_old}
+    except Exception as e:
+        print(f"Money audit summary error: {e}")
+        bal = get_balance(user_id)
+        return {"balance": bal, "admin_received": 0, "earned_received": 0, "removed_or_spent": 0, "entries": 0, "untracked_or_old": bal}
+
+
+def money_audit_global_stats():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        admin_sources = ("dashboard_admin_add", "discord_admin_add", "dashboard_bulk_add", "discord_bulk_add", "dashboard_set")
+        cur.execute(f"""
+            SELECT COUNT(DISTINCT user_id), COALESCE(SUM(amount), 0), COUNT(*)
+            FROM money_audit
+            WHERE amount > 0 AND source_type IN ({','.join(['?']*len(admin_sources))})
+        """, admin_sources)
+        people, total, entries = cur.fetchone()
+        cur.execute("SELECT COUNT(DISTINCT batch_id) FROM money_audit WHERE batch_id != '' AND amount > 0")
+        batches = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return int(people or 0), int(total or 0), int(entries or 0), batches
+    except Exception as e:
+        print(f"Money audit stats error: {e}")
+        return 0, 0, 0, 0
+
+
+def money_audit_recent_rows(limit=80, user_id=None, admin_only=False, batch_id=""):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        query = """
+            SELECT id, user_id, user_name, amount, new_balance, source_type, source_label, admin_id, admin_name, batch_id, details, created_at
+            FROM money_audit
+        """
+        clauses = []
+        params = []
+        if user_id:
+            clauses.append("user_id = ?")
+            params.append(int(user_id))
+        if batch_id:
+            clauses.append("batch_id = ?")
+            params.append(str(batch_id))
+        if admin_only:
+            clauses.append("source_type IN ('dashboard_admin_add','discord_admin_add','dashboard_bulk_add','discord_bulk_add','dashboard_set','dashboard_admin_remove','discord_admin_remove','dashboard_bulk_remove','discord_bulk_remove','discord_reset')")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        cur.execute(query, tuple(params))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Money audit recent rows error: {e}")
+        return []
+
+
+def money_audit_top_admin_received(limit=10):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, user_name, COALESCE(SUM(amount),0) AS total, COUNT(*) AS entries
+            FROM money_audit
+            WHERE amount > 0 AND source_type IN ('dashboard_admin_add','discord_admin_add','dashboard_bulk_add','discord_bulk_add','dashboard_set')
+            GROUP BY user_id, user_name
+            ORDER BY total DESC
+            LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
+def money_audit_bulk_batches(limit=10):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT batch_id, source_label, admin_name, COUNT(*) AS people, COALESCE(SUM(amount),0) AS total, MAX(created_at) AS last_time
+            FROM money_audit
+            WHERE batch_id != ''
+            GROUP BY batch_id, source_label, admin_name
+            ORDER BY MAX(id) DESC
+            LIMIT ?
+        """, (int(limit),))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except:
+        return []
+
+
 def parse_int_field(value, default=0, minimum=None):
     try:
         raw = str(value).replace(",", "").strip()
@@ -5416,6 +5641,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/warnings"><span class="navicon">⚠️</span><span>Warnings</span></a>
       <div class="navsection">Systems</div>
       <a class="navitem" href="/dashboard/economy"><span class="navicon">🪙</span><span>Economy</span></a>
+      {% if access_level == 'owner' %}<a class="navitem" href="/dashboard/money-audit"><span class="navicon">🏦</span><span>Money Audit</span><span class="ownerlock">Owner</span></a>{% endif %}
       <a class="navitem" href="/dashboard/levels"><span class="navicon">📊</span><span>Levels</span></a>
       <a class="navitem" href="/dashboard/casino"><span class="navicon">🎰</span><span>Casino</span></a>
       <a class="navitem" href="/dashboard/shop"><span class="navicon">🛒</span><span>Shop</span></a>
@@ -5629,6 +5855,113 @@ def dashboard_economy_page():
     return render_dashboard_page("Economy", body)
 
 
+
+
+@app.route('/dashboard/money-audit', methods=['GET'])
+def dashboard_money_audit_page():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    init_db()
+    user_id_raw = (request.args.get('user_id') or '').strip()
+    batch_id = (request.args.get('batch_id') or '').strip()
+    admin_only = (request.args.get('admin_only') or '1') == '1'
+    user_id = int(user_id_raw) if user_id_raw.isdigit() else None
+
+    people_count, admin_total, admin_entries, batch_count = money_audit_global_stats()
+    rows = money_audit_recent_rows(120, user_id=user_id, admin_only=admin_only, batch_id=batch_id)
+    top_rows = money_audit_top_admin_received(12)
+    batches = money_audit_bulk_batches(10)
+
+    selected_summary_html = ''
+    if user_id:
+        summary = money_audit_member_summary(user_id)
+        selected_summary_html = f'''
+        <div class="grid3">
+          <div class="card"><h3>👤 Selected Member</h3><p>{dashboard_member_name(user_id)}</p><p class="muted small"><code>{user_id}</code></p></div>
+          <div class="card"><h3>🧾 Admin Money Received</h3><div class="cc-stat" style="color:#fbbf24">{fmt_coin(summary['admin_received'])}</div><p class="muted small">فلوس وصلت له من Owner/Admin أو Give Everyone.</p></div>
+          <div class="card"><h3>⛏️ Earned / System Money</h3><div class="cc-stat" style="color:#22c55e">{fmt_coin(summary['earned_received'])}</div><p class="muted small">راتب، قمار، جوائز، تحويلات أو مصادر غير إدارية مسجلة.</p></div>
+        </div>
+        <div style="height:12px"></div>
+        <div class="grid3">
+          <div class="card"><h3>💼 Current Balance</h3><div class="cc-stat">{fmt_coin(summary['balance'])}</div></div>
+          <div class="card"><h3>📉 Removed / Spent Logged</h3><div class="cc-stat" style="color:#ef4444">{fmt_coin(summary['removed_or_spent'])}</div></div>
+          <div class="card"><h3>🕰️ Old / Untracked</h3><div class="cc-stat">{fmt_coin(summary['untracked_or_old'])}</div><p class="muted small">رصيد موجود من قبل نظام التتبع أو فرق بسبب خسائر/صرف.</p></div>
+        </div>
+        <div style="height:14px"></div>
+        '''
+
+    top_html = ''.join([
+        f"<tr><td>{dashboard_member_name(uid)}<br><span class='muted small'><code>{uid}</code> • {dash_escape(name, 80)}</span></td><td>{fmt_coin(total)}</td><td>{entries}</td><td><a class='btn' href='/dashboard/money-audit?user_id={uid}&admin_only=0'>Open</a></td></tr>"
+        for uid, name, total, entries in top_rows
+    ]) or "<tr><td colspan='4'>No admin money grants tracked yet.</td></tr>"
+
+    batch_html = ''.join([
+        f"<tr><td><code>{dash_escape(bid, 60)}</code><br><span class='muted small'>{dash_escape(label, 80)}</span></td><td>{dash_escape(admin_name, 80)}</td><td>{people}</td><td>{fmt_coin(total)}</td><td>{cc_time(ts)}</td><td><a class='btn' href='/dashboard/money-audit?batch_id={urllib.parse.quote(str(bid))}&admin_only=0'>Recipients</a></td></tr>"
+        for bid, label, admin_name, people, total, ts in batches
+    ]) or "<tr><td colspan='6'>No bulk actions tracked yet.</td></tr>"
+
+    rows_html = ''.join([
+        f'''
+        <tr>
+          <td><code>#{rid}</code><br><span class="muted small">{cc_time(created_at)}</span></td>
+          <td>{dashboard_member_name(uid)}<br><span class="muted small"><code>{uid}</code> • {dash_escape(user_name, 90)}</span></td>
+          <td><span class="pill {'ok' if amount > 0 else 'bad'}">{amount:+,}</span><br><span class="muted small">Balance: {fmt_coin(new_balance)}</span></td>
+          <td>{dash_escape(label, 100)}<br><span class="muted small"><code>{dash_escape(source, 80)}</code></span></td>
+          <td>{dashboard_member_name(admin_id) if admin_id else '<span class="muted">System/User</span>'}<br><span class="muted small">{dash_escape(admin_name, 90)}</span></td>
+          <td>{dash_escape(details, 220)}{('<br><span class="muted small">Batch: <code>'+dash_escape(batch, 90)+'</code></span>') if batch else ''}</td>
+        </tr>
+        '''
+        for rid, uid, user_name, amount, new_balance, source, label, admin_id, admin_name, batch, details, created_at in rows
+    ]) or "<tr><td colspan='6'>No money logs found.</td></tr>"
+
+    body = f'''
+    {dashboard_toast_html()}
+    <style>
+      .cc-stat {{font-size:28px;font-weight:1000;margin-top:8px}}
+      .audit-filter {{display:grid;grid-template-columns:1fr 1fr auto auto;gap:10px;align-items:end}}
+      @media(max-width:900px){{.audit-filter{{grid-template-columns:1fr}}}}
+    </style>
+    <div class="hero">
+      <div class="card">
+        <div class="big">🏦 Money Audit</div>
+        <p class="muted">Owner-only money tracker. يحفظ كل فلوس وصلت من الإدارة، Give Everyone، والفلوس اللي جت من مصادر عادية مثل الراتب والقمار والتحويلات.</p>
+        <span class="pill gold">Owner Only</span>
+        <span class="pill">Admin grants are never hidden</span>
+      </div>
+      <div class="card">
+        <h3>📊 Admin Money Summary</h3>
+        <div class="cc-stat">{fmt_coin(admin_total)}</div>
+        <p class="muted small">{people_count} members received admin money • {admin_entries} entries • {batch_count} bulk batches</p>
+      </div>
+    </div>
+
+    <form class="card audit-filter" method="get" action="/dashboard/money-audit">
+      <div><label>User ID</label><input name="user_id" value="{dash_escape(user_id_raw, 40)}" placeholder="اختياري: اكتب User ID"></div>
+      <div><label>Bulk Batch ID</label><input name="batch_id" value="{dash_escape(batch_id, 100)}" placeholder="اختياري"></div>
+      <div><label>Mode</label><select name="admin_only"><option value="1" {'selected' if admin_only else ''}>Admin money only</option><option value="0" {'' if admin_only else 'selected'}>All money logs</option></select></div>
+      <div><button class="btn primary">Filter</button></div>
+    </form>
+
+    <div style="height:14px"></div>
+    {selected_summary_html}
+
+    <div class="grid2">
+      <div class="card"><h3>👑 Top Members By Admin Money</h3><div class="tablewrap"><table class="table"><tr><th>Member</th><th>Admin received</th><th>Entries</th><th>Open</th></tr>{top_html}</table></div></div>
+      <div class="card"><h3>🌍 Latest Give Everyone Batches</h3><div class="tablewrap"><table class="table"><tr><th>Batch</th><th>Admin</th><th>People</th><th>Total</th><th>Time</th><th>View</th></tr>{batch_html}</table></div></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="card">
+      <h3>🧾 Money Logs</h3>
+      <p class="muted small">أي إعطاء من الداشبورد أو Discord admin command يتسجل هنا. لو استخدمت Give Everyone يطلع كل شخص وصله المبلغ داخل نفس الـ batch.</p>
+      <div class="tablewrap"><table class="table"><tr><th>ID / Time</th><th>Member</th><th>Amount</th><th>Source</th><th>Admin</th><th>Details</th></tr>{rows_html}</table></div>
+    </div>
+    '''
+    return render_dashboard_page('Money Audit', body)
+
+
 @app.route("/dashboard/levels", methods=["GET"])
 def dashboard_levels_page():
     denied = dashboard_require_admin()
@@ -5773,7 +6106,7 @@ def dashboard_user_page():
             ]) or "<tr><td colspan='6'>No warning history</td></tr>"
             roles = ", ".join(profile['roles'][:18]) if profile['roles'] else "No roles / not cached"
             profile_html = f'''
-            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Active Warnings:</b> {len(warns)} • <b>Total History:</b> {len(history)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form><hr><form method="post" action="/dashboard/warnings/clear"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Clear Reason</label><input name="reason" value="Cleared from user profile"><div style="height:10px"></div><button class="btn red">Clear Active Warnings</button></form></div></div>
+            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Admin Received:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['admin_received'])}</p><p><b>Earned / System:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['earned_received'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Active Warnings:</b> {len(warns)} • <b>Total History:</b> {len(history)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form><hr><form method="post" action="/dashboard/warnings/clear"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Clear Reason</label><input name="reason" value="Cleared from user profile"><div style="height:10px"></div><button class="btn red">Clear Active Warnings</button></form></div></div>
             <div style="height:14px"></div><div class="card"><h3>⚠️ Warning History</h3><table class="table"><tr><th>Status</th><th>Time</th><th>Reason</th><th>Message</th><th>By</th><th>Cleared By</th></tr>{warn_rows}</table><p class="muted small">يعرض آخر 20 إنذار، وحتى الإنذارات المتصفرة مستقبلاً.</p></div>
             '''
         except Exception as e:
@@ -7205,27 +7538,32 @@ def dashboard_economy_action():
                 if not guild:
                     msg = "Guild is not loaded yet. Try again after the bot is fully online."
                 elif action == "bulk_add":
-                    fut = asyncio.run_coroutine_threadsafe(bulk_add_money_to_all(guild, amount), bot.loop)
+                    admin_user = session.get("discord_user") or {}
+                    fut = asyncio.run_coroutine_threadsafe(bulk_add_money_to_all(guild, amount, source_type="dashboard_bulk_add", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner")), bot.loop)
                     result = fut.result(timeout=90)
                     msg = f"Added {fmt_num(amount)} {COIN_NAME} to {fmt_num(result['count'])} members. Total added: {fmt_num(result['total_added'])}."
                     dashboard_log_action("Economy: bulk add all", msg, session.get("discord_user"))
                 else:
-                    fut = asyncio.run_coroutine_threadsafe(bulk_remove_money_from_all(guild, amount), bot.loop)
+                    admin_user = session.get("discord_user") or {}
+                    fut = asyncio.run_coroutine_threadsafe(bulk_remove_money_from_all(guild, amount, source_type="dashboard_bulk_remove", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner")), bot.loop)
                     result = fut.result(timeout=90)
                     msg = f"Took up to {fmt_num(amount)} {COIN_NAME} from {fmt_num(result['count'])} members. Total removed: {fmt_num(result['total_removed'])}."
                     dashboard_log_action("Economy: bulk remove all", msg, session.get("discord_user"))
         else:
             user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
             if action == "add":
-                balance = add_money(user_id, amount)
+                admin_user = session.get("discord_user") or {}
+                balance = add_money(user_id, amount, source_type="dashboard_admin_add", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual add money")
                 msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
                 dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
             elif action == "remove":
-                ok, balance = remove_money(user_id, amount)
+                admin_user = session.get("discord_user") or {}
+                ok, balance = remove_money(user_id, amount, source_type="dashboard_admin_remove", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual remove money")
                 msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
                 dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {COIN_NAME} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
             elif action == "set":
-                balance = set_balance(user_id, amount)
+                admin_user = session.get("discord_user") or {}
+                balance = set_balance(user_id, amount, source_type="dashboard_set", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual set balance")
                 msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
                 dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}", session.get("discord_user"))
             else:
@@ -8848,13 +9186,13 @@ async def transfer_money(ctx, member: discord.Member = None, amount: int = None)
         await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
         return
 
-    success, new_sender_balance = remove_money(ctx.author.id, amount)
+    success, new_sender_balance = remove_money(ctx.author.id, amount, source_type="transfer_out", details=f"Transfer to {member.id}")
 
     if not success:
         await ctx.send("❌ رصيدك ما يكفي.")
         return
 
-    new_receiver_balance = add_money(member.id, amount)
+    new_receiver_balance = add_money(member.id, amount, source_type="transfer_in", details=f"Transfer from {ctx.author.id}")
 
     embed = discord.Embed(
         title="✅ Transfer Complete",
@@ -8915,7 +9253,7 @@ async def admin_add_money(ctx, member: discord.Member = None, amount: int = None
         await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
         return
 
-    balance_amount = add_money(member.id, amount)
+    balance_amount = add_money(member.id, amount, source_type="discord_admin_add", admin_id=ctx.author.id, admin_name=str(ctx.author), details=f"Discord admin add money by {ctx.author}")
     embed = discord.Embed(title="✅ Admin Economy", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
     embed.description = f"تم إعطاء {member.mention} **{amount:,} {COIN_NAME}**."
     embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {COIN_NAME}", inline=False)
@@ -8937,7 +9275,7 @@ async def admin_remove_money(ctx, member: discord.Member = None, amount: int = N
         await ctx.send("❌ المبلغ لازم يكون أكبر من صفر.")
         return
 
-    success, balance_amount = remove_money(member.id, amount)
+    success, balance_amount = remove_money(member.id, amount, source_type="discord_admin_remove", admin_id=ctx.author.id, admin_name=str(ctx.author), details=f"Discord admin remove money by {ctx.author}")
 
     if not success:
         await ctx.send("❌ رصيد العضو ما يكفي للسحب.")
@@ -8960,7 +9298,7 @@ async def admin_reset_money(ctx, member: discord.Member = None):
         await ctx.send("استخدم: `!تصفيرفلوس @شخص`")
         return
 
-    set_balance(member.id, 0)
+    set_balance(member.id, 0, source_type="discord_reset", admin_id=ctx.author.id, admin_name=str(ctx.author), details=f"Discord admin reset balance by {ctx.author}")
     embed = discord.Embed(
         title="🧹 Balance Reset",
         description=f"تم تصفير رصيد {member.mention}.",
@@ -8992,7 +9330,7 @@ async def admin_add_money_all(ctx, amount: int = None, confirm: str = None):
         await ctx.send(embed=embed)
         return
 
-    result = await bulk_add_money_to_all(ctx.guild, amount)
+    result = await bulk_add_money_to_all(ctx.guild, amount, source_type="discord_bulk_add", admin_id=ctx.author.id, admin_name=str(ctx.author))
     embed = discord.Embed(
         title="🌍 تم إعطاء الكل فلوس",
         description=f"تم إعطاء **{amount:,} {COIN_NAME}** لكل عضو غير بوت.",
@@ -9027,7 +9365,7 @@ async def admin_remove_money_all(ctx, amount: int = None, confirm: str = None):
         await ctx.send(embed=embed)
         return
 
-    result = await bulk_remove_money_from_all(ctx.guild, amount)
+    result = await bulk_remove_money_from_all(ctx.guild, amount, source_type="discord_bulk_remove", admin_id=ctx.author.id, admin_name=str(ctx.author))
     embed = discord.Embed(
         title="🌍 تم السحب من الكل",
         description=f"تم سحب حتى **{amount:,} {COIN_NAME}** من كل عضو غير بوت.",
@@ -10534,4 +10872,3 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
-    
