@@ -6287,6 +6287,67 @@ def dashboard_apply_saved_settings():
 
 dashboard_apply_saved_settings()
 
+# =========================
+# GLOBAL BOT STATS / PUBLIC COUNTERS
+# =========================
+
+def dashboard_global_bot_stats():
+    """Safe bot-wide counters for dashboard/public status pages."""
+    try:
+        guilds = list(bot.guilds) if bot else []
+    except Exception:
+        guilds = []
+
+    total_guilds = len(guilds)
+    total_members = 0
+    total_humans = 0
+    total_bots = 0
+    total_online = 0
+    total_text = 0
+    total_voice = 0
+
+    for guild in guilds:
+        try:
+            members = list(guild.members)
+            total_members += len(members)
+            total_humans += len([m for m in members if not m.bot])
+            total_bots += len([m for m in members if m.bot])
+            total_online += len([m for m in members if not m.bot and str(m.status) != "offline"])
+            total_text += len(guild.text_channels)
+            total_voice += len(guild.voice_channels)
+        except Exception:
+            pass
+
+    return {
+        "guilds": total_guilds,
+        "members": total_members,
+        "humans": total_humans,
+        "bots": total_bots,
+        "online": total_online,
+        "text_channels": total_text,
+        "voice_channels": total_voice,
+    }
+
+
+def dashboard_global_stats_html(compact=False):
+    stats = dashboard_global_bot_stats()
+    if compact:
+        return f"""
+        <div class="globalstats compact">
+          <div><b>{stats['guilds']:,}</b><span>Servers</span></div>
+          <div><b>{stats['humans']:,}</b><span>Users</span></div>
+        </div>
+        """
+    return f"""
+    <div class="grid">
+      <div class="card stat"><div class="icon">🌍</div><div class="num">{stats['guilds']:,}</div><div class="label">Servers using the bot</div></div>
+      <div class="card stat"><div class="icon">👥</div><div class="num">{stats['humans']:,}</div><div class="label">Human users across all servers</div></div>
+      <div class="card stat"><div class="icon">🟢</div><div class="num">{stats['online']:,}</div><div class="label">Online users currently cached</div></div>
+      <div class="card stat"><div class="icon">📡</div><div class="num">{stats['text_channels']:,} / {stats['voice_channels']:,}</div><div class="label">Text / Voice channels</div></div>
+    </div>
+    """
+
+
 
 DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
@@ -6308,6 +6369,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
     .tablewrap{width:100%;overflow-x:auto}.table{width:100%;border-collapse:separate;border-spacing:0 8px}.table th{color:var(--muted);font-size:11px;text-transform:uppercase;text-align:left;padding:0 10px;white-space:nowrap}.table td{padding:12px 10px;background:rgba(15,23,42,.56);border-top:1px solid var(--line);border-bottom:1px solid var(--line);vertical-align:top}.table td:first-child{border-left:1px solid var(--line);border-radius:14px 0 0 14px}.table td:last-child{border-right:1px solid var(--line);border-radius:0 14px 14px 0}.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border-radius:999px;background:rgba(88,101,242,.15);color:#dbeafe;font-size:12px;font-weight:950;border:1px solid rgba(88,101,242,.22);white-space:nowrap}.pill.ok{background:rgba(34,197,94,.16);color:#dcfce7;border-color:rgba(34,197,94,.25)}.pill.bad{background:rgba(239,68,68,.16);color:#fee2e2;border-color:rgba(239,68,68,.25)}.pill.gold{background:rgba(245,158,11,.16);color:#fef3c7;border-color:rgba(245,158,11,.25)}.pill.cyan{background:rgba(6,182,212,.14);color:#cffafe;border-color:rgba(6,182,212,.25)}
     .formgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.formbox{background:rgba(15,23,42,.62);border:1px solid var(--line);border-radius:22px;padding:15px}label{display:block;color:var(--muted);font-size:12px;margin:10px 0 6px;font-weight:900}input,select,textarea{width:100%;background:rgba(2,6,23,.78);color:var(--text);border:1px solid var(--line);border-radius:15px;padding:12px;outline:none}input:focus,select:focus,textarea:focus{border-color:rgba(88,101,242,.75);box-shadow:0 0 0 3px rgba(88,101,242,.12)}.hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.hero .big{font-size:44px;font-weight:1000;letter-spacing:-1.4px}.danger{border-color:rgba(239,68,68,.38)}.footer{color:var(--muted);text-align:center;font-size:12px;margin-top:18px}.prodivider{height:1px;background:linear-gradient(90deg,transparent,var(--line2),transparent);margin:14px 0}
     .switchgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}.switchcard{padding:14px;border:1px solid rgba(255,255,255,.10);border-radius:16px;background:rgba(255,255,255,.04)}.toggleline{display:flex;align-items:center;justify-content:space-between;gap:10px}.switch{width:52px;height:28px;border-radius:999px;background:#3b4252;position:relative;display:inline-block}.switch input{display:none}.slider{position:absolute;cursor:pointer;inset:0;border-radius:999px}.slider:before{content:"";position:absolute;height:22px;width:22px;left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s}.switch input:checked+.slider{background:#22c55e}.switch input:checked+.slider:before{transform:translateX(24px)}.dangerzone{border-color:rgba(239,68,68,.55);background:rgba(239,68,68,.08)}
+
+    .globalstats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045)}.globalstats div{padding:8px;border-radius:14px;background:rgba(15,23,42,.45);text-align:center}.globalstats b{display:block;font-size:22px;letter-spacing:-.4px}.globalstats span{display:block;color:var(--muted);font-size:11px;font-weight:900;text-transform:uppercase;margin-top:2px}.globalstats.compact{grid-template-columns:1fr 1fr}
     @media(max-width:1100px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:26px}.hero .big{font-size:32px}.navfoot{margin-bottom:0}}
   </style>
 </head>
@@ -6315,6 +6378,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
 <div class="layout">
   <aside class="sidebar">
     <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Command-grade admin dashboard</p></div></div>
+    {{ global_stats_compact|safe }}
     <nav class="navlist">
       <div class="navsection">Monitor</div>
       <a class="navitem" href="/dashboard"><span class="navicon">🏠</span><span>Overview</span></a>
@@ -6334,6 +6398,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/memory"><span class="navicon">💾</span><span>Memory</span></a>
       <div class="navsection">Owner Tools</div>
       {% if access_level == 'owner' %}
+      <a class="navitem" href="/dashboard/owner-console"><span class="navicon">👑</span><span>Owner Console</span><span class="ownerlock">Owner</span></a>
       <a class="navitem" href="/dashboard/admin-access"><span class="navicon">🔐</span><span>Admin Access</span><span class="ownerlock">Owner</span></a>
       <a class="navitem" href="/dashboard/control"><span class="navicon">🛡️</span><span>Control Center</span><span class="ownerlock">Owner</span></a>
       <a class="navitem" href="/dashboard/audit"><span class="navicon">🕵️</span><span>Audit Center</span><span class="ownerlock">Owner</span></a>
@@ -6385,16 +6450,19 @@ def render_dashboard_page(title, body, status=200):
         body=body,
         access_level=access_level,
         role_badge=role_badge,
+        global_stats_compact=dashboard_global_stats_html(compact=True),
     ), status
 
 
 @app.route("/")
 def home():
-    body = '''
+    body = f'''
     <div class="hero">
-      <div class="card"><div class="big">✅ System Online</div><p class="muted">البوت شغال والداشبورد جاهز للإدارة. سجل دخولك بـ Discord OAuth.</p><div style="height:12px"></div><a class="btn primary" href="/login">Login with Discord</a></div>
-      <div class="card"><h3>🔐 Security</h3><p class="muted">Access is limited to server owner, Administrator permission, or configured admin roles.</p><span class="pill ok">OAuth Protected</span></div>
+      <div class="card"><div class="big">✅ System Online</div><p class="muted">البوت شغال والداشبورد جاهز للإدارة. هذه إحصائيات شبكة البوت مثل البوتات الكبيرة.</p><div style="height:12px"></div><a class="btn primary" href="/login">Login with Discord</a></div>
+      <div class="card"><h3>🌍 Bot Network</h3><p class="muted">عدد السيرفرات والأعضاء يتحدث من اتصال البوت الحالي.</p><span class="pill ok">Live Count</span></div>
     </div>
+    <div style="height:14px"></div>
+    {dashboard_global_stats_html()}
     '''
     return render_dashboard_page("Online", body)
 
