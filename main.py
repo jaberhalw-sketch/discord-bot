@@ -92,7 +92,7 @@ MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
 MEMORY_BACKUP_HISTORY_LIMIT = 100
 MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE, DASHBOARD_SETTINGS_FILE]
 
-COIN_NAME = "Retard coin"
+COIN_NAME = "NM Coin"
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
@@ -104,7 +104,7 @@ GAMBLING_CHANNEL_ID = 1504165660341571684
 GAMBLE_COOLDOWN_SECONDS = 2
 ECONOMY_EMOJI = "🪙"
 LEVEL_EMOJI = "📊"
-BOT_BRAND = "Retards System"
+BOT_BRAND = "NM System"
 
 # =========================
 # CUSTOMIZABLE MODULE SETTINGS
@@ -2108,7 +2108,7 @@ def build_memory_report_text():
 
     lines = []
     lines.append("```txt")
-    lines.append("RETARDS SYSTEM MEMORY REPORT")
+    lines.append("NM SYSTEM MEMORY REPORT")
     lines.append("----------------------------")
     lines.append(f"Level users      : {level_users}")
     lines.append(f"Economy users    : {economy_users}")
@@ -2305,7 +2305,7 @@ async def restore_memory_from_backup(guild, force=False):
 
 def build_economy_guide_embed(auto=False):
     """Premium-looking economy guide embed focused on the new slash commands."""
-    title = "🪙 Retards System Guide"
+    title = "🪙 NM System Guide"
     description = (
         f"**الدليل الرسمي للأوامر الجديدة في {BOT_BRAND}.**\n"
         "استخدم أوامر `/` لأنها أوضح، أسرع، وتشتغل بشكل أفضل مع النسخة العالمية.\n"
@@ -2313,7 +2313,7 @@ def build_economy_guide_embed(auto=False):
     )
 
     if auto:
-        title = "🪙 Retards System • Quick Guide"
+        title = "🪙 NM System • Quick Guide"
         description = (
             "تذكير سريع بالأوامر الجديدة.\n"
             "استخدم أوامر `/` بدل أوامر `!` القديمة.\n"
@@ -3777,7 +3777,7 @@ async def auction_loop():
 
 def build_market_embed(member=None):
     embed = discord.Embed(
-        title="🛒 Retards Market",
+        title="🛒 NM Market",
         description=(
             "متجر واضح بالأزرار — اختر اللي تبيه من تحت.\n"
             "العقارات **محدودة**؛ إذا خلصت لازم تشتري من لاعب أو تدخل مزاد."
@@ -6784,7 +6784,7 @@ def dashboard_home():
     memory_ok = sum(1 for m in memory if m['badge'] == 'OK')
     body = f'''
     {dashboard_toast_html()}
-    <div class="hero"><div class="card"><div class="big">Retards System</div><p class="muted">Control economy, levels, memory backups, casino and server utilities from one protected dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
+    <div class="hero"><div class="card"><div class="big">NM System</div><p class="muted">Control servers, economy, levels, memory backups, casino and protection from one powerful dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
     <div class="grid">
       <div class="card stat"><div class="icon">🪙</div><div class="num">{fmt_num(economy_users)}</div><div class="label">Economy users</div></div>
       <div class="card stat"><div class="icon">💰</div><div class="num">{fmt_num(total_coins)}</div><div class="label">Total {COIN_NAME}</div></div>
@@ -9390,7 +9390,7 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="Retard coin Economy | !مساعدة"
+            name="7 Servers | /setup_status"
         )
     )
 
@@ -13005,7 +13005,7 @@ async def create_or_repair_guild_log_channels(guild):
     created_category = False
 
     if not category or not isinstance(category, discord.CategoryChannel):
-        category = discord.utils.get(guild.categories, name="Retards System Logs")
+        category = discord.utils.get(guild.categories, name="NM System Logs")
 
     if not category:
         overwrites = {
@@ -13013,9 +13013,9 @@ async def create_or_repair_guild_log_channels(guild):
             guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, embed_links=True, read_message_history=True),
         }
         category = await guild.create_category(
-            "Retards System Logs",
+            "NM System Logs",
             overwrites=overwrites,
-            reason="Retards System setup logs category"
+            reason="NM System setup logs category"
         )
         created_category = True
 
@@ -13029,7 +13029,7 @@ async def create_or_repair_guild_log_channels(guild):
             found.append(channel_name)
             if channel.category_id != category.id:
                 try:
-                    await channel.edit(category=category, reason="Retards System setup repair log channel category")
+                    await channel.edit(category=category, reason="NM System setup repair log channel category")
                     moved.append(channel_name)
                 except Exception:
                     pass
@@ -13042,7 +13042,7 @@ async def create_or_repair_guild_log_channels(guild):
                 name=channel_name,
                 category=category,
                 overwrites=overwrites,
-                reason="Retards System setup create log channel"
+                reason="NM System setup create log channel"
             )
             created.append(channel_name)
 
