@@ -11731,6 +11731,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v4_boot_balance_sync()
     nm_v4_boot_normalize_brand_coin()
     nm_pg_boot()
     nm_auto_restore_bundled_memory("on_ready")
@@ -17434,6 +17435,256 @@ def nm_v4_boot_normalize_brand_coin():
             print("✅ NM V4 brand/coin normalized.")
     except Exception as e:
         print(f"NM V4 brand/coin normalize failed: {e}")
+
+
+
+# =========================
+# NM V4 DASHBOARD <-> DISCORD BALANCE SYNC FIX
+# الداشبورد والديسكورد لازم يقرأون نفس الرصيد من PostgreSQL.
+# إذا الرصيد القديم موجود على guild_id=0 أو في أي سيرفر ثاني، ينقله للسيرفر الحالي تلقائيًا.
+# =========================
+
+def nm_v4_effective_guild_id_from_source(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or GUILD_ID
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v4_pg_best_balance_any_guild(user_id):
+    """Find the user's best/legacy balance anywhere in Postgres."""
+    try:
+        if not NM_V4_POSTGRES_ENABLED:
+            return 0, 0
+        with nm_pg_conn() as conn:
+            row = conn.execute("""
+                SELECT guild_id, balance
+                FROM economy
+                WHERE user_id = %s
+                ORDER BY
+                    CASE WHEN guild_id = 0 THEN 0 ELSE 1 END ASC,
+                    balance DESC
+                LIMIT 1
+            """, (int(user_id),)).fetchone()
+            if row:
+                return int(row["guild_id"] or 0), int(row["balance"] or 0)
+    except Exception as e:
+        print(f"NM balance sync best lookup failed: {e}")
+    return 0, 0
+
+def nm_v4_sync_user_balance_to_guild(guild_id, user_id):
+    """
+    Ensure this guild has the visible dashboard balance.
+    Priority:
+    1) current guild balance if > 0
+    2) legacy guild_id=0 balance
+    3) best balance from any guild
+    """
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    if not NM_V4_POSTGRES_ENABLED or not user_id:
+        return 0
+
+    try:
+        with nm_pg_conn() as conn:
+            current = conn.execute(
+                "SELECT balance FROM economy WHERE guild_id=%s AND user_id=%s",
+                (guild_id, user_id)
+            ).fetchone()
+            current_balance = int(current["balance"] or 0) if current else 0
+
+            if current_balance > 0:
+                return current_balance
+
+            legacy = conn.execute(
+                "SELECT balance FROM economy WHERE guild_id=0 AND user_id=%s",
+                (user_id,)
+            ).fetchone()
+            legacy_balance = int(legacy["balance"] or 0) if legacy else 0
+
+            best = conn.execute("""
+                SELECT balance FROM economy
+                WHERE user_id=%s
+                ORDER BY balance DESC
+                LIMIT 1
+            """, (user_id,)).fetchone()
+            best_balance = int(best["balance"] or 0) if best else 0
+
+            chosen = max(current_balance, legacy_balance, best_balance)
+
+            conn.execute("""
+                INSERT INTO economy (guild_id, user_id, balance, updated_at)
+                VALUES (%s,%s,%s,NOW())
+                ON CONFLICT (guild_id,user_id)
+                DO UPDATE SET balance = GREATEST(economy.balance, EXCLUDED.balance), updated_at=NOW()
+            """, (guild_id, user_id, chosen))
+            conn.commit()
+            return chosen
+    except Exception as e:
+        print(f"NM balance sync to guild failed: {e}")
+        return 0
+
+def nm_v4_get_synced_balance(guild_id, user_id):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    if NM_V4_POSTGRES_ENABLED:
+        return nm_v4_sync_user_balance_to_guild(guild_id, user_id)
+
+    # fallback old sqlite functions
+    try:
+        if "_old_v3_get_balance" in globals() and callable(_old_v3_get_balance):
+            return int(_old_v3_get_balance(guild_id, user_id) or 0)
+    except Exception:
+        pass
+    try:
+        return int(get_balance(user_id) or 0)
+    except Exception:
+        return 0
+
+def nm_v4_add_synced_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    amount = int(amount or 0)
+
+    if not NM_V4_POSTGRES_ENABLED:
+        try:
+            if "_old_v3_add_money" in globals() and callable(_old_v3_add_money):
+                return _old_v3_add_money(guild_id, user_id, amount, source_type=source_type, details=details, actor_id=actor_id)
+        except Exception:
+            pass
+        try:
+            return add_money(user_id, amount)
+        except Exception:
+            return 0
+
+    # Make sure old dashboard balance is brought into the current guild before modifying.
+    nm_v4_sync_user_balance_to_guild(guild_id, user_id)
+
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO economy (guild_id,user_id,balance)
+                VALUES (%s,%s,0)
+                ON CONFLICT DO NOTHING
+            """, (guild_id, user_id))
+
+            if amount > 0 and str(source_type) in ("admin","admin_give","give_all","dashboard_admin"):
+                conn.execute("""
+                    UPDATE economy
+                    SET balance=balance+%s, admin_given=admin_given+%s, updated_at=NOW()
+                    WHERE guild_id=%s AND user_id=%s
+                """, (amount, amount, guild_id, user_id))
+            elif amount > 0:
+                conn.execute("""
+                    UPDATE economy
+                    SET balance=balance+%s, earned_money=earned_money+%s, updated_at=NOW()
+                    WHERE guild_id=%s AND user_id=%s
+                """, (amount, amount, guild_id, user_id))
+            else:
+                conn.execute("""
+                    UPDATE economy
+                    SET balance=balance+%s, updated_at=NOW()
+                    WHERE guild_id=%s AND user_id=%s
+                """, (amount, guild_id, user_id))
+
+            row = conn.execute(
+                "SELECT balance FROM economy WHERE guild_id=%s AND user_id=%s",
+                (guild_id, user_id)
+            ).fetchone()
+            bal = int(row["balance"] or 0)
+
+            conn.execute("""
+                INSERT INTO money_audit
+                (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (guild_id, user_id, amount, bal, str(source_type), str(details), int(actor_id or 0), int(time.time())))
+
+            conn.commit()
+            return bal
+    except Exception as e:
+        print(f"NM synced add money failed: {e}")
+        return nm_v4_get_synced_balance(guild_id, user_id)
+
+# Override every economy reader/writer the Discord commands may use.
+def v3_get_balance(guild_id, user_id):
+    return nm_v4_get_synced_balance(guild_id, user_id)
+
+def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
+    return nm_v4_add_synced_money(guild_id, user_id, amount, source_type, details, actor_id)
+
+def get_balance(user_id, guild_id=None):
+    return nm_v4_get_synced_balance(guild_id or nm_v4_effective_guild_id_from_source(), user_id)
+
+def add_money(user_id, amount, guild_id=None):
+    return nm_v4_add_synced_money(guild_id or nm_v4_effective_guild_id_from_source(), user_id, amount, "legacy_add_money", "Legacy add_money synced")
+
+def nm_legacy_balance(guild_id, user_id):
+    return nm_v4_get_synced_balance(guild_id, user_id)
+
+def nm_legacy_add_money(guild_id, user_id, amount):
+    return nm_v4_add_synced_money(guild_id, user_id, amount, "legacy", "Legacy economy synced")
+
+def nm_v4_sync_all_legacy_balances_to_guild(guild_id):
+    """Manual/dashboard sync: copy every guild_id=0 economy row into selected guild if selected row is empty/lower."""
+    if not NM_V4_POSTGRES_ENABLED:
+        return 0
+    guild_id = int(guild_id or 0)
+    moved = 0
+    try:
+        with nm_pg_conn() as conn:
+            rows = conn.execute("SELECT user_id, balance FROM economy WHERE guild_id=0 AND balance > 0").fetchall()
+            for r in rows:
+                conn.execute("""
+                    INSERT INTO economy (guild_id,user_id,balance,updated_at)
+                    VALUES (%s,%s,%s,NOW())
+                    ON CONFLICT (guild_id,user_id)
+                    DO UPDATE SET balance=GREATEST(economy.balance, EXCLUDED.balance), updated_at=NOW()
+                """, (guild_id, int(r["user_id"]), int(r["balance"] or 0)))
+                moved += 1
+            conn.commit()
+    except Exception as e:
+        print(f"NM sync all legacy balances failed: {e}")
+    return moved
+
+@app.route("/dashboard/sync-balances")
+def nm_v4_sync_balances_route():
+    gid = nm_v4_effective_guild_id_from_source()
+    moved = nm_v4_sync_all_legacy_balances_to_guild(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Balance Sync Done</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Synced users from legacy/global balance: <b>{int(moved)}</b></p>
+      <p>Now test <code>!رصيدي</code> in Discord.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+def nm_v4_boot_balance_sync():
+    try:
+        if NM_V4_POSTGRES_ENABLED:
+            main_gid = int(globals().get("GUILD_ID", 0) or 0)
+            if main_gid:
+                moved = nm_v4_sync_all_legacy_balances_to_guild(main_gid)
+                print(f"✅ NM V4 balance sync checked. legacy->main moved/checked: {moved}")
+    except Exception as e:
+        print(f"NM V4 boot balance sync failed: {e}")
+
 
 
 nm_pg_boot()
