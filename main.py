@@ -1,3 +1,4 @@
+import threading
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -11743,6 +11744,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_economy_hardening_boot()
     nm_v5_access_scope_boot()
     nm_v5_final_audit_boot()
     nm_v5_richest_sync_boot()
@@ -23745,6 +23747,856 @@ def nm_v5_access_scope_boot():
         print("✅ NM V5 per-server dashboard access scope active")
     except Exception:
         pass
+
+
+
+# =====================================================================
+# NM V5 ECONOMY HARDENING FINAL
+# Fixes anything that can break the economy:
+# - One atomic ledger for all money changes.
+# - No negative balances.
+# - Casino bet is debited before result; loss keeps debit; win pays; push refunds.
+# - Safe commands for luck/double/slot/flip/blackjack aliases.
+# - Transfer is atomic.
+# - Salary cooldown persists.
+# - Richest/top uses same ledger.
+# - Coin display uses per-guild saved coin.
+# - Financial audit dashboard detects suspicious movements.
+# =====================================================================
+
+NM_V5_ECO_TEST_GUILD_ID = 1441183924129890427
+
+try:
+    NM_V5_ECO_LOCK
+except NameError:
+    NM_V5_ECO_LOCK = threading.RLock()
+
+def nm_v5_eco_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        if "nm_v5_find_runtime_guild_id" in globals():
+            gid = int(nm_v5_find_runtime_guild_id())
+            if gid:
+                return gid
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or NM_V5_ECO_TEST_GUILD_ID
+        )
+    except Exception:
+        return NM_V5_ECO_TEST_GUILD_ID
+
+def nm_v5_eco_coin(guild_id=None):
+    gid = int(guild_id or nm_v5_eco_gid())
+    try:
+        return str(nm_coin_name(gid) or "NM Coin")
+    except Exception:
+        try:
+            return str(nm_v5_get_coin_name(gid) or "NM Coin")
+        except Exception:
+            return "NM Coin"
+
+def nm_v5_eco_money(amount, guild_id=None, bold=True):
+    txt = f"{int(amount or 0):,} {nm_v5_eco_coin(guild_id)}"
+    return f"**{txt}**" if bold else txt
+
+def nm_v5_eco_delta(amount, guild_id=None):
+    v = int(amount or 0)
+    sign = "+" if v >= 0 else ""
+    return f"**{sign}{v:,} {nm_v5_eco_coin(guild_id)}**"
+
+# override common format helpers used by old embeds
+def coin_line(amount, bold=True, guild_id=None):
+    return nm_v5_eco_money(amount, guild_id, bold)
+
+def money_delta(amount, guild_id=None):
+    return nm_v5_eco_delta(amount, guild_id)
+
+def nm_v5_eco_db_path():
+    p = Path("/data/nm_system.db")
+    if p.exists():
+        return p
+    return Path("nm_system.db")
+
+def nm_v5_eco_conn():
+    conn = sqlite3.connect(str(nm_v5_eco_db_path()), timeout=30, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        pass
+    return conn
+
+def nm_v5_eco_init():
+    with NM_V5_ECO_LOCK:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_economy (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                balance INTEGER DEFAULT 0,
+                last_daily INTEGER DEFAULT 0,
+                last_boost_weekly INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS money_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
+                user_id INTEGER DEFAULT 0,
+                amount INTEGER DEFAULT 0,
+                new_balance INTEGER DEFAULT 0,
+                source_type TEXT DEFAULT '',
+                details TEXT DEFAULT '',
+                actor_id INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_economy_locks (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                lock_key TEXT NOT NULL,
+                expires_at INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, lock_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_salary_cooldowns (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                last_salary INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_casino_rounds (
+                round_id TEXT PRIMARY KEY,
+                guild_id INTEGER DEFAULT 0,
+                user_id INTEGER DEFAULT 0,
+                game TEXT DEFAULT '',
+                bet INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'open',
+                created_at INTEGER DEFAULT 0,
+                finished_at INTEGER DEFAULT 0,
+                result_amount INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+def nm_v5_eco_audit(cur, guild_id, user_id, amount, new_balance, source_type, details="", actor_id=0):
+    cur.execute("""
+        INSERT INTO money_audit (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (int(guild_id), int(user_id), int(amount), int(new_balance), str(source_type), str(details), int(actor_id or 0), int(time.time())))
+
+def nm_v5_eco_get_balance(guild_id, user_id):
+    nm_v5_eco_init()
+    gid, uid = int(guild_id or 0), int(user_id or 0)
+    with NM_V5_ECO_LOCK:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+
+        # first selected guild
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        row = cur.fetchone()
+        selected = int(row["balance"] or 0) if row else 0
+
+        # legacy sources; used only if selected is zero/lower
+        best = selected
+        for table in ("guild_economy", "economy"):
+            try:
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+                if not cur.fetchone():
+                    continue
+                cur.execute(f"PRAGMA table_info({table})")
+                cols = [r[1] for r in cur.fetchall()]
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute(f"SELECT MAX(balance) AS b FROM {table} WHERE user_id=?", (uid,))
+                    r = cur.fetchone()
+                    best = max(best, int((r["b"] if r else 0) or 0))
+                elif table == "economy" and "user_id" in cols and "balance" in cols:
+                    cur.execute("SELECT balance FROM economy WHERE user_id=?", (uid,))
+                    r = cur.fetchone()
+                    best = max(best, int((r["balance"] if r else 0) or 0))
+            except Exception:
+                pass
+
+        if best < 0:
+            best = 0
+
+        # mirror best to selected guild
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+        cur.execute("UPDATE guild_economy SET balance=MAX(COALESCE(balance,0), ?) WHERE guild_id=? AND user_id=?", (best, gid, uid))
+        conn.commit()
+        conn.close()
+        return int(best)
+
+def nm_v5_eco_set_balance(guild_id, user_id, new_balance, source_type="set_balance", details="", actor_id=0):
+    nm_v5_eco_init()
+    gid, uid = int(guild_id or 0), int(user_id or 0)
+    new_balance = max(0, int(new_balance or 0))
+    with NM_V5_ECO_LOCK:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old = int((cur.fetchone() or {"balance": 0})["balance"] or 0)
+        delta = new_balance - old
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_balance, gid, uid))
+        nm_v5_eco_audit(cur, gid, uid, delta, new_balance, source_type, details, actor_id)
+        conn.commit()
+        conn.close()
+    try:
+        if "nm_v5_top_write_balance" in globals():
+            nm_v5_top_write_balance(gid, uid, new_balance)
+    except Exception:
+        pass
+    return new_balance
+
+def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="change", details="", actor_id=0, allow_negative=False):
+    nm_v5_eco_init()
+    gid, uid, amount = int(guild_id or 0), int(user_id or 0), int(amount or 0)
+    with NM_V5_ECO_LOCK:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old = int((cur.fetchone() or {"balance": 0})["balance"] or 0)
+        new = old + amount
+        if new < 0 and not allow_negative:
+            conn.rollback()
+            conn.close()
+            return False, old
+        new = max(0, new)
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
+        nm_v5_eco_audit(cur, gid, uid, amount, new, source_type, details, actor_id)
+        conn.commit()
+        conn.close()
+    try:
+        if "nm_v5_top_write_balance" in globals():
+            nm_v5_top_write_balance(gid, uid, new)
+    except Exception:
+        pass
+    return True, int(new)
+
+def nm_v5_eco_debit(guild_id, user_id, amount, source_type="debit", details="", actor_id=0):
+    amount = abs(int(amount or 0))
+    return nm_v5_eco_change_balance(guild_id, user_id, -amount, source_type, details, actor_id)
+
+def nm_v5_eco_credit(guild_id, user_id, amount, source_type="credit", details="", actor_id=0):
+    amount = int(amount or 0)
+    return nm_v5_eco_change_balance(guild_id, user_id, amount, source_type, details, actor_id)
+
+def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, details="transfer"):
+    nm_v5_eco_init()
+    gid, src, dst, amount = int(guild_id or 0), int(from_user_id or 0), int(to_user_id or 0), abs(int(amount or 0))
+    if amount <= 0 or src == dst:
+        return False, nm_v5_eco_get_balance(gid, src), nm_v5_eco_get_balance(gid, dst)
+    with NM_V5_ECO_LOCK:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        for uid in (src, dst):
+            cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, src))
+        src_bal = int(cur.fetchone()["balance"] or 0)
+        if src_bal < amount:
+            conn.rollback()
+            conn.close()
+            return False, src_bal, nm_v5_eco_get_balance(gid, dst)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, dst))
+        dst_bal = int(cur.fetchone()["balance"] or 0)
+        new_src = src_bal - amount
+        new_dst = dst_bal + amount
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_src, gid, src))
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_dst, gid, dst))
+        nm_v5_eco_audit(cur, gid, src, -amount, new_src, "transfer_out", details, dst)
+        nm_v5_eco_audit(cur, gid, dst, amount, new_dst, "transfer_in", details, src)
+        conn.commit()
+        conn.close()
+    return True, new_src, new_dst
+
+def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome, multiplier=2.0, details=""):
+    """
+    outcome:
+      win  -> debit bet, credit bet*multiplier
+      lose -> debit bet only
+      push -> debit bet, credit bet
+    Returns dict.
+    """
+    gid, uid, bet = int(guild_id or 0), int(user_id or 0), abs(int(bet or 0))
+    if bet <= 0:
+        return {"ok": False, "reason": "invalid_bet", "balance": nm_v5_eco_get_balance(gid, uid), "delta": 0}
+
+    ok, bal_after_debit = nm_v5_eco_debit(gid, uid, bet, f"casino_{game}_bet", f"{game} bet locked before result")
+    if not ok:
+        return {"ok": False, "reason": "insufficient", "balance": bal_after_debit, "delta": 0}
+
+    if outcome == "win":
+        payout = int(round(bet * float(multiplier)))
+        ok2, bal = nm_v5_eco_credit(gid, uid, payout, f"casino_{game}_win", details or f"{game} win payout")
+        return {"ok": True, "outcome": "win", "balance": bal, "delta": payout - bet, "payout": payout}
+    if outcome == "push":
+        ok2, bal = nm_v5_eco_credit(gid, uid, bet, f"casino_{game}_push", details or f"{game} push refund")
+        return {"ok": True, "outcome": "push", "balance": bal, "delta": 0, "payout": bet}
+
+    return {"ok": True, "outcome": "lose", "balance": bal_after_debit, "delta": -bet, "payout": 0}
+
+# Public money API overrides
+def v3_get_balance(guild_id, user_id):
+    return nm_v5_eco_get_balance(guild_id, user_id)
+
+def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
+    ok, bal = nm_v5_eco_credit(guild_id, user_id, amount, source_type, details, actor_id)
+    return bal
+
+def v3_remove_money(guild_id, user_id, amount, source_type="removed", details="", actor_id=0):
+    return nm_v5_eco_debit(guild_id, user_id, amount, source_type, details, actor_id)
+
+def get_balance(user_id, guild_id=None):
+    return nm_v5_eco_get_balance(guild_id or nm_v5_eco_gid(), user_id)
+
+def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    ok, bal = nm_v5_eco_credit(guild_id or nm_v5_eco_gid(), user_id, amount, source_type, details, admin_id)
+    return bal
+
+def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v5_eco_debit(guild_id or nm_v5_eco_gid(), user_id, amount, source_type, details, admin_id)
+
+def nm_legacy_balance(guild_id, user_id):
+    return nm_v5_eco_get_balance(guild_id, user_id)
+
+def nm_legacy_add_money(guild_id, user_id, amount):
+    ok, bal = nm_v5_eco_credit(guild_id, user_id, amount, "legacy_add", "legacy add")
+    return bal
+
+# salary cooldown
+def nm_v5_salary_can_claim(guild_id, user_id, cooldown_seconds=24*60*60):
+    nm_v5_eco_init()
+    gid, uid = int(guild_id), int(user_id)
+    rows = nm_v5_db_query_salary(gid, uid)
+    last = int(rows[0]["last_salary"] or 0) if rows else 0
+    now = int(time.time())
+    remaining = cooldown_seconds - (now - last)
+    return remaining <= 0, max(0, remaining), last
+
+def nm_v5_db_query_salary(gid, uid):
+    try:
+        conn = nm_v5_eco_conn()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT last_salary FROM nm_salary_cooldowns WHERE guild_id=? AND user_id=?", (int(gid), int(uid)))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+def nm_v5_salary_mark(guild_id, user_id):
+    nm_v5_eco_init()
+    conn = nm_v5_eco_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO nm_salary_cooldowns (guild_id,user_id,last_salary)
+        VALUES (?,?,?)
+        ON CONFLICT(guild_id,user_id) DO UPDATE SET last_salary=excluded.last_salary
+    """, (int(guild_id), int(user_id), int(time.time())))
+    conn.commit()
+    conn.close()
+
+# bet parsing/checking
+def nm_v5_parse_bet(amount):
+    try:
+        if "parse_bet_amount" in globals():
+            v = parse_bet_amount(amount)
+            if v is not None:
+                return int(v)
+    except Exception:
+        pass
+    try:
+        s = str(amount).lower().strip().replace(",", "")
+        mult = 1
+        if s.endswith("k"):
+            mult, s = 1000, s[:-1]
+        elif s.endswith("m"):
+            mult, s = 1000000, s[:-1]
+        return int(float(s) * mult)
+    except Exception:
+        return None
+
+async def nm_v5_bet_or_reply(ctx, amount):
+    if not getattr(ctx, "guild", None):
+        return None
+    try:
+        if "require_gambling_channel" in globals():
+            ok = await require_gambling_channel(ctx)
+            if not ok:
+                return None
+    except Exception:
+        pass
+    bet = nm_v5_parse_bet(amount)
+    if bet is None or bet <= 0:
+        await ctx.send("❌ مبلغ الرهان غير صحيح. مثال: `!حظ 500` أو `!bj 10k`")
+        return None
+    bal = nm_v5_eco_get_balance(ctx.guild.id, ctx.author.id)
+    if bal < bet:
+        await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(bal, ctx.guild.id)}")
+        return None
+    return int(bet)
+
+def nm_v5_game_embed(member, guild_id, title, status, color, bet, delta, balance, details=""):
+    embed = discord.Embed(title=title, description=status, color=color, timestamp=discord.utils.utcnow())
+    try:
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    except Exception:
+        pass
+    embed.add_field(name="🎯 الرهان", value=nm_v5_eco_money(bet, guild_id), inline=True)
+    embed.add_field(name="💸 النتيجة", value=nm_v5_eco_delta(delta, guild_id), inline=True)
+    embed.add_field(name="💼 الرصيد", value=nm_v5_eco_money(balance, guild_id), inline=False)
+    if details:
+        embed.add_field(name="📌 التفاصيل", value=details, inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Safe Economy Ledger")
+    return embed
+
+async def nm_v5_luck_cmd(ctx, amount=None):
+    bet = await nm_v5_bet_or_reply(ctx, amount)
+    if bet is None:
+        return
+    gid = int(ctx.guild.id)
+    win = random.random() < 0.45
+    result = nm_v5_eco_game_result(gid, ctx.author.id, "luck", bet, "win" if win else "lose", 2.0, "Luck game")
+    if not result["ok"]:
+        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
+    embed = nm_v5_game_embed(ctx.author, gid, "🍀 حظ", "✅ فزت!" if win else "❌ خسرت.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"])
+    await ctx.send(embed=embed)
+
+async def nm_v5_double_cmd(ctx, amount=None):
+    bet = await nm_v5_bet_or_reply(ctx, amount)
+    if bet is None:
+        return
+    gid = int(ctx.guild.id)
+    win = random.random() < 0.48
+    result = nm_v5_eco_game_result(gid, ctx.author.id, "double", bet, "win" if win else "lose", 2.0, "Double game")
+    if not result["ok"]:
+        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
+    embed = nm_v5_game_embed(ctx.author, gid, "🎲 دبل", "✅ دبلت الرهان!" if win else "❌ راحت عليك.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"])
+    await ctx.send(embed=embed)
+
+async def nm_v5_flip_cmd(ctx, amount=None, choice=None):
+    bet = await nm_v5_bet_or_reply(ctx, amount)
+    if bet is None:
+        return
+    gid = int(ctx.guild.id)
+    win = random.random() < 0.50
+    face = random.choice(["وجه", "كتابة"])
+    result = nm_v5_eco_game_result(gid, ctx.author.id, "flip", bet, "win" if win else "lose", 2.0, "Coin flip game")
+    if not result["ok"]:
+        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
+    embed = nm_v5_game_embed(ctx.author, gid, "🪙 وجه", "✅ فزت!" if win else "❌ خسرت.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"], f"طلعت: **{face}**")
+    await ctx.send(embed=embed)
+
+async def nm_v5_slot_cmd(ctx, amount=None):
+    bet = await nm_v5_bet_or_reply(ctx, amount)
+    if bet is None:
+        return
+    gid = int(ctx.guild.id)
+    icons = ["🍒", "🍋", "🍇", "💎", "7️⃣"]
+    roll = [random.choice(icons), random.choice(icons), random.choice(icons)]
+    if roll[0] == roll[1] == roll[2]:
+        outcome, mult, status, color = "win", 5.0, "🔥 جاكبوت! ثلاث رموز.", NM_V5_COLOR_GREEN
+    elif len(set(roll)) == 2:
+        outcome, mult, status, color = "win", 1.5, "✅ رمزين متشابهين، فزت ربح صغير.", NM_V5_COLOR_GREEN
+    else:
+        outcome, mult, status, color = "lose", 0.0, "❌ ولا رمز، خسرت.", NM_V5_COLOR_RED
+    result = nm_v5_eco_game_result(gid, ctx.author.id, "slot", bet, outcome, mult, "Slot machine")
+    if not result["ok"]:
+        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
+    embed = nm_v5_game_embed(ctx.author, gid, "🎰 سلوت", status, color, bet, result["delta"], result["balance"], " | ".join(roll))
+    await ctx.send(embed=embed)
+
+# Blackjack safe implementation
+def nm_v5_card():
+    return (random.choice(["A","2","3","4","5","6","7","8","9","10","J","Q","K"]), random.choice(["♠","♥","♦","♣"]))
+
+def nm_v5_hand_value(cards):
+    total, aces = 0, 0
+    for rank, suit in cards:
+        if rank in ("J","Q","K"):
+            total += 10
+        elif rank == "A":
+            total += 11
+            aces += 1
+        else:
+            total += int(rank)
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+    return total
+
+def nm_v5_cards_text(cards, hide=False):
+    if hide and len(cards) > 1:
+        cards = [cards[0], ("?", "?")]
+    return " ".join(f"`{r}{s}`" for r, s in cards)
+
+def nm_v5_blackjack_embed(member, gid, bet, player, dealer, status, color, finished=False, delta=None, balance=None, hide_dealer=True):
+    embed = discord.Embed(title=f"🎴 Blackjack • {nm_v5_eco_coin(gid)}", description=status, color=color, timestamp=discord.utils.utcnow())
+    try:
+        embed.set_author(name=member.display_name, icon_url=member.display_avatar.url)
+    except Exception:
+        pass
+    embed.add_field(name="🎯 الرهان", value=nm_v5_eco_money(bet, gid), inline=True)
+    if delta is not None:
+        embed.add_field(name="💸 النتيجة", value=nm_v5_eco_delta(delta, gid), inline=True)
+    if balance is not None:
+        embed.add_field(name="💼 الرصيد", value=nm_v5_eco_money(balance, gid), inline=False)
+    embed.add_field(name=f"🧍 يدك — {nm_v5_hand_value(player)}", value=nm_v5_cards_text(player), inline=False)
+    embed.add_field(name=f"🤵 الديلر — {'?' if hide_dealer and not finished else nm_v5_hand_value(dealer)}", value=nm_v5_cards_text(dealer, hide_dealer and not finished), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Safe Blackjack Ledger")
+    return embed
+
+class NMV5BlackjackSafeView(discord.ui.View):
+    def __init__(self, gid, uid, bet, player, dealer):
+        super().__init__(timeout=90)
+        self.gid, self.uid, self.bet = int(gid), int(uid), int(bet)
+        self.player, self.dealer = player, dealer
+        self.finished = False
+
+    async def interaction_check(self, interaction):
+        if int(interaction.user.id) != self.uid:
+            await interaction.response.send_message("❌ هذي الطاولة مو لك.", ephemeral=True)
+            return False
+        return True
+
+    def off(self):
+        for x in self.children:
+            x.disabled = True
+
+    async def finish(self, interaction, status, color, delta, balance):
+        self.finished = True
+        self.off()
+        await interaction.response.edit_message(embed=nm_v5_blackjack_embed(interaction.user, self.gid, self.bet, self.player, self.dealer, status, color, True, delta, balance, False), view=self)
+        self.stop()
+
+    @discord.ui.button(label="Hit", emoji="🃏", style=discord.ButtonStyle.green)
+    async def hit_btn(self, interaction, button):
+        if self.finished:
+            return
+        self.player.append(nm_v5_card())
+        if nm_v5_hand_value(self.player) > 21:
+            bal = nm_v5_eco_get_balance(self.gid, self.uid)
+            return await self.finish(interaction, "❌ **BUST** — تعديت 21 وخسرت.", NM_V5_COLOR_RED, -self.bet, bal)
+        await interaction.response.edit_message(embed=nm_v5_blackjack_embed(interaction.user, self.gid, self.bet, self.player, self.dealer, "🃏 سحبت كرت. Hit أو Stand؟", NM_V5_COLOR_BLUE, False, None, None, True), view=self)
+
+    @discord.ui.button(label="Stand", emoji="✋", style=discord.ButtonStyle.secondary)
+    async def stand_btn(self, interaction, button):
+        if self.finished:
+            return
+        while nm_v5_hand_value(self.dealer) < 17:
+            self.dealer.append(nm_v5_card())
+        p, d = nm_v5_hand_value(self.player), nm_v5_hand_value(self.dealer)
+        if d > 21 or p > d:
+            ok, bal = nm_v5_eco_credit(self.gid, self.uid, self.bet * 2, "casino_blackjack_win", "Blackjack payout")
+            return await self.finish(interaction, "✅ **WIN** — فزت.", NM_V5_COLOR_GREEN, self.bet, bal)
+        if p < d:
+            bal = nm_v5_eco_get_balance(self.gid, self.uid)
+            return await self.finish(interaction, "❌ **LOSE** — الديلر فاز.", NM_V5_COLOR_RED, -self.bet, bal)
+        ok, bal = nm_v5_eco_credit(self.gid, self.uid, self.bet, "casino_blackjack_push", "Blackjack push refund")
+        return await self.finish(interaction, "🟨 **PUSH** — تعادل ورجع الرهان.", NM_V5_COLOR_YELLOW, 0, bal)
+
+async def nm_v5_blackjack_cmd(ctx, amount=None):
+    bet = await nm_v5_bet_or_reply(ctx, amount)
+    if bet is None:
+        return
+    gid = int(ctx.guild.id)
+    ok, bal = nm_v5_eco_debit(gid, ctx.author.id, bet, "casino_blackjack_bet", "Blackjack bet locked before cards")
+    if not ok:
+        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(bal, gid)}")
+    player, dealer = [nm_v5_card(), nm_v5_card()], [nm_v5_card(), nm_v5_card()]
+    if nm_v5_hand_value(player) == 21 or nm_v5_hand_value(dealer) == 21:
+        p21, d21 = nm_v5_hand_value(player) == 21, nm_v5_hand_value(dealer) == 21
+        if p21 and d21:
+            ok, bal = nm_v5_eco_credit(gid, ctx.author.id, bet, "casino_blackjack_push", "Natural push refund")
+            return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🟨 **PUSH** — الاثنين بلاك جاك.", NM_V5_COLOR_YELLOW, True, 0, bal, False))
+        if p21:
+            profit = int(bet * 1.5)
+            ok, bal = nm_v5_eco_credit(gid, ctx.author.id, bet + profit, "casino_blackjack_natural", "Natural blackjack payout")
+            return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🔥 **BLACKJACK** — فزت.", NM_V5_COLOR_GREEN, True, profit, bal, False))
+        bal = nm_v5_eco_get_balance(gid, ctx.author.id)
+        return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "❌ **DEALER BLACKJACK** — خسرت.", NM_V5_COLOR_RED, True, -bet, bal, False))
+    view = NMV5BlackjackSafeView(gid, ctx.author.id, bet, player, dealer)
+    await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🎴 الرهان انخصم مسبقًا. اختر Hit أو Stand.", NM_V5_COLOR_PURPLE, False, None, bal, True), view=view)
+
+# Override all known casino prefix commands without duplicate registration
+for _name, _fn in {
+    "حظ": nm_v5_luck_cmd,
+    "luck": nm_v5_luck_cmd,
+    "دبل": nm_v5_double_cmd,
+    "double": nm_v5_double_cmd,
+    "سلوت": nm_v5_slot_cmd,
+    "slot": nm_v5_slot_cmd,
+    "وجه": nm_v5_flip_cmd,
+    "flip": nm_v5_flip_cmd,
+    "bj": nm_v5_blackjack_cmd,
+    "blackjack": nm_v5_blackjack_cmd,
+    "بلاكجاك": nm_v5_blackjack_cmd,
+}.items():
+    try:
+        _cmd = bot.get_command(_name)
+        if _cmd:
+            _cmd.callback = _fn
+            print(f"✅ NM V5 casino safe ledger override: {_name}")
+    except Exception as e:
+        try: print(f"NM V5 casino override failed {_name}: {e}")
+        except Exception: pass
+
+# Dashboard replace hardcoded NM Coin if old HTML still says it
+@app.after_request
+def nm_v5_eco_replace_coin_html(response):
+    try:
+        if str(request.path).startswith("/dashboard") and response.content_type and "text/html" in response.content_type:
+            coin = nm_v5_eco_coin(nm_v5_eco_gid())
+            if coin and coin != "NM Coin":
+                body = response.get_data(as_text=True).replace("NM Coin", coin)
+                response.set_data(body)
+    except Exception:
+        pass
+    return response
+
+# Top money unified from ledger
+def nm_v5_eco_top_money(guild_id=None, limit=10):
+    nm_v5_eco_init()
+    gid = int(guild_id or nm_v5_eco_gid())
+    conn = nm_v5_eco_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, MAX(balance) AS balance
+        FROM guild_economy
+        WHERE guild_id IN (?,0)
+        GROUP BY user_id
+        HAVING MAX(balance) > 0
+        ORDER BY MAX(balance) DESC
+        LIMIT ?
+    """, (gid, int(limit)))
+    rows = [(int(r["user_id"]), int(r["balance"] or 0)) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def v3_get_top_money(guild_id, limit=10):
+    return nm_v5_eco_top_money(guild_id, limit)
+
+def get_top_money(limit=10, guild_id=None):
+    return nm_v5_eco_top_money(guild_id, limit)
+
+def dashboard_money_rows(limit=10):
+    gid = nm_v5_eco_gid()
+    out = []
+    for i, (uid, bal) in enumerate(nm_v5_eco_top_money(gid, limit), 1):
+        try:
+            name = dashboard_member_name(uid)
+        except Exception:
+            name = f"User {uid}"
+        out.append({"rank": i, "user_id": uid, "name": name, "balance": bal})
+    return out
+
+def dashboard_total_coins():
+    return sum(b for _, b in nm_v5_eco_top_money(nm_v5_eco_gid(), 100000))
+
+async def nm_legacy_top(message):
+    gid = int(message.guild.id)
+    rows = nm_v5_eco_top_money(gid, 10)
+    if not rows:
+        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
+    lines = []
+    for i, (uid, bal) in enumerate(rows, 1):
+        mem = message.guild.get_member(uid)
+        who = mem.mention if mem else f"`{uid}`"
+        medal = ["🥇","🥈","🥉"][i-1] if i <= 3 else f"`#{i}`"
+        lines.append(f"{medal} {who} — 🪙 {nm_v5_eco_money(bal, gid)}")
+    embed = discord.Embed(title="🏆 أغنى الأعضاء", description="\n".join(lines), color=NM_V5_COLOR_YELLOW, timestamp=discord.utils.utcnow())
+    embed.set_footer(text=f"{BOT_BRAND} • Safe Leaderboard")
+    await message.channel.send(embed=embed)
+
+# Financial Audit Pro
+@app.route("/dashboard/financial-audit-pro")
+def nm_v5_financial_audit_pro_page_final():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_v5_eco_gid()
+    coin = nm_v5_eco_coin(gid)
+    rows = []
+    try:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT * FROM money_audit
+            WHERE guild_id IN (?,0)
+            ORDER BY id DESC
+            LIMIT 1000
+        """, (gid,))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        try: nm_v5_log_runtime_error("financial_audit", e)
+        except Exception: pass
+    created = sum(max(0, int(r.get("amount") or 0)) for r in rows)
+    removed = sum(abs(min(0, int(r.get("amount") or 0))) for r in rows)
+    casino_in = sum(max(0, int(r.get("amount") or 0)) for r in rows if "casino" in str(r.get("source_type","")).lower())
+    casino_out = sum(abs(min(0, int(r.get("amount") or 0))) for r in rows if "casino" in str(r.get("source_type","")).lower())
+    suspicious = [r for r in rows if abs(int(r.get("amount") or 0)) >= 1000000]
+    tr = []
+    for r in rows[:150]:
+        amt = int(r.get("amount") or 0)
+        cls = "pos" if amt >= 0 else "neg"
+        try: uname = dashboard_member_name(int(r.get("user_id") or 0))
+        except Exception: uname = f"User {int(r.get('user_id') or 0)}"
+        tr.append(f"<tr><td>{dash_escape(r.get('created_at',''),80)}</td><td>{dash_escape(uname,100)}<br><code>{int(r.get('user_id') or 0)}</code></td><td class='{cls}'>{amt:,} {dash_escape(coin,60)}</td><td>{int(r.get('new_balance') or 0):,}</td><td>{dash_escape(r.get('source_type',''),120)}</td><td>{dash_escape(r.get('details',''),220)}</td></tr>")
+    sus = "".join([f"<li>{int(r.get('amount') or 0):,} {dash_escape(coin,60)} — <code>{int(r.get('user_id') or 0)}</code> — {dash_escape(r.get('source_type',''),80)}</li>" for r in suspicious[:30]]) or "<li>No suspicious large movements.</li>"
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>
+        .grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}} .card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}}
+        .num{{font-size:26px;font-weight:1000}} .muted{{color:#94a3b8}} .pos{{color:#86efac;font-weight:900}} .neg{{color:#fca5a5;font-weight:900}}
+        table{{width:100%;border-collapse:collapse;background:#0b1224;border-radius:18px;overflow:hidden}} th,td{{border-bottom:1px solid #1e293b;padding:12px;text-align:left;vertical-align:top}} th{{color:#94a3b8}} a{{color:#8b5cf6}}
+        @media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}
+      </style>
+      <h1>💰 Financial Audit Pro</h1>
+      <p class="muted">كل حركة مالية تمر من هنا. إذا فيه لعبة ما تخصم أو تضيف غلط بتبان.</p>
+      <p><a href="/dashboard?guild_id={int(gid)}">Dashboard</a> • <a href="/dashboard/casino-self-test?guild_id={int(gid)}">Casino Self-Test</a></p>
+      <div class="grid">
+        <div class="card"><div class="muted">Created</div><div class="num pos">{created:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Removed</div><div class="num neg">{removed:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Net</div><div class="num">{created-removed:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Rows</div><div class="num">{len(rows)}</div></div>
+      </div>
+      <div class="grid">
+        <div class="card"><div class="muted">Casino Paid</div><div class="num pos">{casino_in:,}</div></div>
+        <div class="card"><div class="muted">Casino Took</div><div class="num neg">{casino_out:,}</div></div>
+      </div>
+      <div class="card"><h2>🚨 Suspicious Large Movements</h2><ul>{sus}</ul></div>
+      <div class="card"><h2>Latest Money Audit</h2><table><tr><th>Time</th><th>User</th><th>Amount</th><th>New Balance</th><th>Source</th><th>Details</th></tr>{''.join(tr)}</table></div>
+    </div>
+    """
+
+# Real Estate Monitor
+@app.route("/dashboard/real-estate-monitor")
+def nm_v5_real_estate_monitor_page_final():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_v5_eco_gid()
+    coin = nm_v5_eco_coin(gid)
+    props = []
+    auctions = []
+    try:
+        conn = nm_v5_eco_conn()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='real_estate_properties'")
+        if cur.fetchone():
+            cur.execute("SELECT * FROM real_estate_properties ORDER BY id DESC LIMIT 500")
+            props = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='real_estate_auctions'")
+        if cur.fetchone():
+            cur.execute("SELECT * FROM real_estate_auctions ORDER BY id DESC LIMIT 200")
+            auctions = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        try: nm_v5_log_runtime_error("real_estate_monitor", e)
+        except Exception: pass
+    owned = [p for p in props if int(p.get("owner_id") or 0) > 0]
+    empty = [p for p in props if int(p.get("owner_id") or 0) <= 0]
+    total_value = sum(int(p.get("price") or p.get("value") or 0) for p in props)
+    rent_total = sum(int(p.get("rent") or p.get("rent_amount") or 0) for p in props)
+    pr = []
+    for p in props[:120]:
+        oid = int(p.get("owner_id") or 0)
+        try: owner = dashboard_member_name(oid) if oid else "No owner"
+        except Exception: owner = f"User {oid}" if oid else "No owner"
+        pr.append(f"<tr><td>{dash_escape(p.get('name') or p.get('property_name') or p.get('id'),120)}</td><td>{dash_escape(owner,100)}<br><code>{oid}</code></td><td>{int(p.get('price') or p.get('value') or 0):,} {dash_escape(coin,60)}</td><td>{int(p.get('rent') or p.get('rent_amount') or 0):,} {dash_escape(coin,60)}</td><td>{dash_escape(str(p.get('status') or p.get('type') or ''),100)}</td></tr>")
+    ar = []
+    for a in auctions[:80]:
+        ar.append(f"<tr><td>{dash_escape(a.get('property_id') or a.get('id'),80)}</td><td>{int(a.get('current_bid') or a.get('bid') or 0):,} {dash_escape(coin,60)}</td><td>{dash_escape(str(a.get('status') or ''),80)}</td><td>{dash_escape(str(a.get('ends_at') or a.get('end_time') or ''),100)}</td></tr>")
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}}.card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}}.num{{font-size:26px;font-weight:1000}}.muted{{color:#94a3b8}}table{{width:100%;border-collapse:collapse;background:#0b1224;border-radius:18px;overflow:hidden}}th,td{{border-bottom:1px solid #1e293b;padding:12px;text-align:left;vertical-align:top}}th{{color:#94a3b8}}a{{color:#8b5cf6}}</style>
+      <h1>🏘️ Real Estate Monitor</h1>
+      <p class="muted">مراقبة العقارات، الملاك، الأسعار، الإيجارات، والمزادات.</p>
+      <div class="grid"><div class="card"><div class="muted">Properties</div><div class="num">{len(props)}</div></div><div class="card"><div class="muted">Owned</div><div class="num">{len(owned)}</div></div><div class="card"><div class="muted">Empty</div><div class="num">{len(empty)}</div></div><div class="card"><div class="muted">Auctions</div><div class="num">{len(auctions)}</div></div></div>
+      <div class="grid"><div class="card"><div class="muted">Total Value</div><div class="num">{total_value:,}</div><div>{dash_escape(coin,60)}</div></div><div class="card"><div class="muted">Rent Potential</div><div class="num">{rent_total:,}</div><div>{dash_escape(coin,60)}</div></div></div>
+      <div class="card"><h2>Properties</h2><table><tr><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Status</th></tr>{''.join(pr) or '<tr><td colspan="5">No properties found.</td></tr>'}</table></div>
+      <div class="card"><h2>Auctions</h2><table><tr><th>Property</th><th>Bid</th><th>Status</th><th>Ends</th></tr>{''.join(ar) or '<tr><td colspan="4">No auctions found.</td></tr>'}</table></div>
+    </div>
+    """
+
+@app.route("/dashboard/casino-self-test")
+def nm_v5_casino_self_test():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = int(request.args.get("guild_id") or NM_V5_ECO_TEST_GUILD_ID)
+    test_uid = 999999991445
+    coin = nm_v5_eco_coin(gid)
+    before = nm_v5_eco_set_balance(gid, test_uid, 10000, "selftest_set", "casino self test starting balance")
+    results = []
+    def add(name, ok, detail):
+        results.append((name, ok, detail))
+    # lose should subtract
+    r = nm_v5_eco_game_result(gid, test_uid, "selftest_luck", 1000, "lose", 2)
+    add("Luck Lose Deduct", r["balance"] == 9000 and r["delta"] == -1000, f"balance={r['balance']} delta={r['delta']}")
+    # win should net +bet
+    r = nm_v5_eco_game_result(gid, test_uid, "selftest_double", 1000, "win", 2)
+    add("Double Win Pays", r["balance"] == 10000 and r["delta"] == 1000, f"balance={r['balance']} delta={r['delta']}")
+    # push should unchanged
+    r = nm_v5_eco_game_result(gid, test_uid, "selftest_push", 1000, "push", 2)
+    add("Push Refund", r["balance"] == 10000 and r["delta"] == 0, f"balance={r['balance']} delta={r['delta']}")
+    # insufficient should fail unchanged
+    r = nm_v5_eco_game_result(gid, test_uid, "selftest_big", 999999999, "lose", 2)
+    add("Insufficient Blocks", r["ok"] is False and r["balance"] == 10000, f"ok={r['ok']} balance={r['balance']}")
+    # cleanup test user to zero
+    nm_v5_eco_set_balance(gid, test_uid, 0, "selftest_cleanup", "casino self test cleanup")
+    rows = "".join([f"<div class='row {'ok' if ok else 'bad'}'><b>{'✅' if ok else '❌'} {dash_escape(name,80)}</b><span>{dash_escape(detail,200)}</span></div>" for name, ok, detail in results])
+    score = sum(1 for _, ok, _ in results)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>.card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}}.row{{display:flex;justify-content:space-between;background:#0b1224;border:1px solid #26345c;border-radius:14px;padding:12px;margin:8px 0}}.ok{{border-color:#14532d}}.bad{{border-color:#7f1d1d}}a{{color:#8b5cf6}}</style>
+      <h1>🎰 Casino Self-Test</h1>
+      <p>Guild: <b>{gid}</b> • Coin: <b>{dash_escape(coin,60)}</b></p>
+      <h2>Score: {score}/{len(results)}</h2>
+      <div class="card">{rows}</div>
+      <p><a href="/dashboard/financial-audit-pro?guild_id={gid}">Financial Audit Pro</a> • <a href="/dashboard?guild_id={gid}">Dashboard</a></p>
+    </div>
+    """
+
+def nm_v5_economy_hardening_boot():
+    try:
+        nm_v5_eco_init()
+        print("✅ NM V5 economy hardening active: atomic ledger + all casino games guarded")
+    except Exception as e:
+        try: print(f"NM V5 economy hardening boot failed: {e}")
+        except Exception: pass
 
 
 keep_alive()
