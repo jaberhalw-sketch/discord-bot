@@ -11970,7 +11970,7 @@ async def slash_salary(interaction: discord.Interaction):
 
 @bot.tree.command(name="راتب", description="استلام الراتب")
 async def slash_salary_ar(interaction: discord.Interaction):
-    await slash_salary(interaction)
+    await slash_salary.callback(interaction)
 
 
 @bot.tree.command(name="transfer", description="Transfer coins to another member")
@@ -11998,7 +11998,7 @@ async def slash_transfer(interaction: discord.Interaction, member: discord.Membe
 @bot.tree.command(name="تحويل", description="تحويل فلوس لعضو")
 @app_commands.describe(member="العضو", amount="المبلغ")
 async def slash_transfer_ar(interaction: discord.Interaction, member: discord.Member, amount: int):
-    await slash_transfer(interaction, member, amount)
+    await slash_transfer.callback(interaction, member, amount)
 
 
 @bot.tree.command(name="top", description="Show top richest members")
@@ -12019,7 +12019,7 @@ async def slash_top(interaction: discord.Interaction):
 
 @bot.tree.command(name="اغنى", description="عرض أغنى أعضاء السيرفر")
 async def slash_top_ar(interaction: discord.Interaction):
-    await slash_top(interaction)
+    await slash_top.callback(interaction)
 
 
 @bot.tree.command(name="rank", description="Show your level and XP")
@@ -12042,7 +12042,7 @@ async def slash_rank(interaction: discord.Interaction, member: discord.Member = 
 @bot.tree.command(name="لفلي", description="عرض لفلك و XP")
 @app_commands.describe(member="عضو اختياري")
 async def slash_rank_ar(interaction: discord.Interaction, member: discord.Member = None):
-    await slash_rank(interaction, member)
+    await slash_rank.callback(interaction, member)
 
 
 @bot.tree.command(name="levels", description="Show top level members")
@@ -12063,7 +12063,7 @@ async def slash_levels(interaction: discord.Interaction):
 
 @bot.tree.command(name="ترتيب", description="ترتيب اللفلات")
 async def slash_levels_ar(interaction: discord.Interaction):
-    await slash_levels(interaction)
+    await slash_levels.callback(interaction)
 
 
 async def v3_gamble_check(interaction, amount):
@@ -12105,7 +12105,7 @@ async def slash_luck(interaction: discord.Interaction, amount: int):
 @bot.tree.command(name="حظ", description="رهان حظ 50/50")
 @app_commands.describe(amount="المبلغ")
 async def slash_luck_ar(interaction: discord.Interaction, amount: int):
-    await slash_luck(interaction, amount)
+    await slash_luck.callback(interaction, amount)
 
 
 @bot.tree.command(name="double", description="High risk double-or-nothing gamble")
@@ -12129,7 +12129,7 @@ async def slash_double(interaction: discord.Interaction, amount: int):
 @bot.tree.command(name="دبل", description="رهان دبل")
 @app_commands.describe(amount="المبلغ")
 async def slash_double_ar(interaction: discord.Interaction, amount: int):
-    await slash_double(interaction, amount)
+    await slash_double.callback(interaction, amount)
 
 
 @bot.tree.command(name="slot", description="Play slot machine")
@@ -12164,7 +12164,7 @@ async def slash_slot(interaction: discord.Interaction, amount: int):
 @bot.tree.command(name="سلوت", description="لعبة السلوت")
 @app_commands.describe(amount="المبلغ")
 async def slash_slot_ar(interaction: discord.Interaction, amount: int):
-    await slash_slot(interaction, amount)
+    await slash_slot.callback(interaction, amount)
 
 
 @bot.tree.command(name="flip", description="Coin flip gamble")
@@ -12197,7 +12197,7 @@ async def slash_flip(interaction: discord.Interaction, amount: int, choice: str)
 @bot.tree.command(name="وجه", description="ملك أو كتابة")
 @app_commands.describe(amount="المبلغ", choice="ملك أو كتابة")
 async def slash_flip_ar(interaction: discord.Interaction, amount: int, choice: str):
-    await slash_flip(interaction, amount, choice)
+    await slash_flip.callback(interaction, amount, choice)
 
 
 @bot.tree.command(name="blackjack", description="Simple blackjack against the dealer")
@@ -12233,7 +12233,7 @@ async def slash_blackjack(interaction: discord.Interaction, amount: int):
 @bot.tree.command(name="بلاكجاك", description="بلاكجاك ضد الديلر")
 @app_commands.describe(amount="المبلغ")
 async def slash_blackjack_ar(interaction: discord.Interaction, amount: int):
-    await slash_blackjack(interaction, amount)
+    await slash_blackjack.callback(interaction, amount)
 
 
 @bot.tree.command(name="shop", description="Show the server shop")
@@ -12245,7 +12245,7 @@ async def slash_shop(interaction: discord.Interaction):
 
 @bot.tree.command(name="متجر", description="عرض المتجر")
 async def slash_shop_ar(interaction: discord.Interaction):
-    await slash_shop(interaction)
+    await slash_shop.callback(interaction)
 
 
 @bot.tree.command(name="buy", description="Buy a shop item")
@@ -12255,7 +12255,7 @@ async def slash_buy(interaction: discord.Interaction, item: str):
         return
     item_key = str(item or "").lower().strip()
     if item_key in ["lootbox", "box", "صندوق"]:
-        await slash_lootbox(interaction)
+        await slash_lootbox.callback(interaction)
         return
     if item_key not in ["vip", "فيب", "viprole"]:
         await interaction.response.send_message("❌ منتج غير معروف. استخدم `/shop`.", ephemeral=True)
@@ -12283,7 +12283,7 @@ async def slash_buy(interaction: discord.Interaction, item: str):
 @bot.tree.command(name="شراء", description="شراء منتج من المتجر")
 @app_commands.describe(item="vip أو صندوق")
 async def slash_buy_ar(interaction: discord.Interaction, item: str):
-    await slash_buy(interaction, item)
+    await slash_buy.callback(interaction, item)
 
 
 @bot.tree.command(name="lootbox", description="Open a lootbox")
@@ -12323,7 +12323,7 @@ async def slash_lootbox(interaction: discord.Interaction):
 
 @bot.tree.command(name="صندوق", description="فتح صندوق حظ")
 async def slash_lootbox_ar(interaction: discord.Interaction):
-    await slash_lootbox(interaction)
+    await slash_lootbox.callback(interaction)
 
 
 @bot.tree.command(name="economy", description="Show the economy guide")
@@ -12335,7 +12335,7 @@ async def slash_economy_guide(interaction: discord.Interaction):
 
 @bot.tree.command(name="شرح", description="شرح الاقتصاد والأوامر")
 async def slash_economy_guide_ar(interaction: discord.Interaction):
-    await slash_economy_guide(interaction)
+    await slash_economy_guide.callback(interaction)
 
 
 @bot.tree.command(name="setup_status", description="Show this server setup status")
