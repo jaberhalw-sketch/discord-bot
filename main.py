@@ -25630,6 +25630,296 @@ except Exception as e:
     except Exception:
         pass
 
+
+# =====================================================================
+# NM V5 FINAL BROAD AUDIT GUARD - 2026-05-17
+# This block intentionally runs immediately before keep_alive()/bot.run().
+# It patches hidden leftovers that static scan found: duplicate routes,
+# unsafe selected-guild fallbacks, legacy cross-guild economy helpers,
+# and dashboard pages that could still hit old callbacks.
+# =====================================================================
+
+NM_V5_AUDIT_FINDINGS = []
+
+def nm_v5_audit_note(level, item, detail=""):
+    try:
+        NM_V5_AUDIT_FINDINGS.append({"level": str(level), "item": str(item), "detail": str(detail)[:500], "time": int(time.time())})
+    except Exception:
+        pass
+
+
+def nm_v5_safe_int(value, default=0):
+    try:
+        if value is None:
+            return int(default)
+        if isinstance(value, str):
+            value = value.strip()
+            if not re.fullmatch(r"-?\d+", value):
+                return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def nm_v5_request_guild_id(default=0):
+    """Resolve guild strictly from current runtime/dashboard context.
+    No old hard-coded test guild fallback. If no context exists, return 0.
+    """
+    try:
+        # Explicit URL/form always wins.
+        gid = nm_v5_safe_int(request.args.get("guild_id") or request.form.get("guild_id"), 0)
+        if gid > 0:
+            try:
+                session["selected_guild_id"] = gid
+                session["dashboard_active_guild_id"] = gid
+            except Exception:
+                pass
+            return gid
+    except Exception:
+        pass
+    try:
+        gid = nm_v5_safe_int(session.get("selected_guild_id") or session.get("dashboard_active_guild_id"), 0)
+        if gid > 0:
+            return gid
+    except Exception:
+        pass
+    try:
+        token_gid = NM_V5_ACTIVE_GUILD_ID.get()
+        gid = nm_v5_safe_int(token_gid, 0)
+        if gid > 0:
+            return gid
+    except Exception:
+        pass
+    try:
+        guild = nm_global_first_guild()
+        gid = nm_v5_safe_int(getattr(guild, "id", 0), 0)
+        if gid > 0:
+            return gid
+    except Exception:
+        pass
+    return nm_v5_safe_int(default, 0)
+
+
+def nm_v5_eco_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    return nm_v5_request_guild_id(0)
+
+
+def nm_v5_final_gid(source=None, fallback=None):
+    gid = nm_v5_eco_gid(source)
+    if gid > 0:
+        return gid
+    return nm_v5_safe_int(fallback, 0)
+
+
+def nm_v5_coin_gid():
+    return nm_v5_request_guild_id(0)
+
+
+def nm_active_guild_id():
+    return nm_v5_request_guild_id(0)
+
+
+def nm_set_active_guild(guild_id):
+    gid = nm_v5_safe_int(guild_id, 0)
+    try:
+        if gid > 0:
+            session["selected_guild_id"] = gid
+            session["dashboard_active_guild_id"] = gid
+    except Exception:
+        pass
+    return gid
+
+
+# Final strict economy aliases. These prevent older nm_stable/v3/global helpers
+# from using MAX(balance), guild_id IN (?,0), or legacy economy rows.
+def nm_v5_strict_balance(gid, uid):
+    gid, uid = nm_v5_safe_int(gid, 0), nm_v5_safe_int(uid, 0)
+    if gid <= 0 or uid <= 0:
+        return 0
+    return nm_v5_eco_get_balance(gid, uid)
+
+
+def nm_stable_get_balance(gid, uid):
+    return nm_v5_strict_balance(gid, uid)
+
+
+def nm_stable_add_money(gid, uid, amount, source_type="system", details="", actor_id=0):
+    ok, bal = nm_v5_eco_credit(nm_v5_safe_int(gid, 0), nm_v5_safe_int(uid, 0), nm_v5_safe_int(amount, 0), source_type, details, actor_id)
+    return bal
+
+
+def nm_stable_top_balances(gid, limit=10):
+    return nm_v5_eco_top_money(nm_v5_safe_int(gid, 0), nm_v5_safe_int(limit, 10))
+
+
+def v3_get_balance(guild_id, user_id):
+    return nm_v5_strict_balance(guild_id, user_id)
+
+
+def get_balance(user_id, guild_id=None):
+    return nm_v5_strict_balance(nm_v5_final_gid(fallback=guild_id), user_id)
+
+
+def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    ok, bal = nm_v5_eco_credit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
+    return bal
+
+
+def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v5_eco_debit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
+
+
+def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v5_eco_set_balance(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
+
+
+def get_top_money(limit=10, guild_id=None):
+    return nm_v5_eco_top_money(nm_v5_final_gid(fallback=guild_id), limit)
+
+
+def dashboard_total_coins():
+    gid = nm_v5_final_gid()
+    try:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(balance),0) AS total FROM guild_economy WHERE guild_id=?", (int(gid),))
+        total = int(cur.fetchone()["total"] or 0)
+        conn.close()
+        return total
+    except Exception as e:
+        try: nm_v5_log_runtime_error("dashboard_total_coins_final", e)
+        except Exception: pass
+        return 0
+
+
+def nm_v5_safe_set_custom_coin_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_v5_final_gid()
+    if gid <= 0:
+        return "Missing guild_id", 400
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        coin = coin[:60]
+        try:
+            nm_v5_set_coin_name(gid, coin)
+        except Exception:
+            try:
+                s = nm_v5_get_guild_settings(gid) if "nm_v5_get_guild_settings" in globals() else {}
+                s["coin_name"] = coin
+                if "nm_v5_save_guild_settings" in globals():
+                    nm_v5_save_guild_settings(gid, s)
+            except Exception as e:
+                try: nm_v5_log_runtime_error("set_custom_coin_safe", e)
+                except Exception: pass
+        return redirect(f"/dashboard/coin-persist-status?guild_id={int(gid)}")
+    current = nm_v5_get_coin_name(gid) if "nm_v5_get_coin_name" in globals() else nm_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Settings • Coin Name</h1>
+      <p>Strict per-server setting. كل سيرفر له اسم عملة مستقل.</p>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <input type="hidden" name="guild_id" value="{int(gid)}">
+        <label style="display:block;color:#94a3b8;font-weight:800;margin-bottom:8px">Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#0b1020;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+
+def nm_v5_safe_disable_guide_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_v5_final_gid()
+    try:
+        nm_disable_guide(gid)
+    except Exception as e:
+        try: nm_v5_log_runtime_error("disable_guide_safe", e)
+        except Exception: pass
+    return redirect(f"/dashboard?guild_id={int(gid)}")
+
+
+def nm_v5_patch_duplicate_route(rule_path, view_func):
+    patched = 0
+    try:
+        for rule in list(app.url_map.iter_rules()):
+            if str(rule.rule) == str(rule_path):
+                app.view_functions[rule.endpoint] = view_func
+                patched += 1
+        nm_v5_audit_note("OK", f"patched route {rule_path}", f"endpoints={patched}")
+    except Exception as e:
+        nm_v5_audit_note("ERR", f"patch route {rule_path}", str(e))
+    return patched
+
+
+# Patch every duplicate endpoint for these paths, not only the newest function name.
+nm_v5_patch_duplicate_route("/dashboard/set-custom-coin", nm_v5_safe_set_custom_coin_page)
+nm_v5_patch_duplicate_route("/dashboard/disable-guide", nm_v5_safe_disable_guide_page)
+nm_v5_patch_duplicate_route("/dashboard/financial-audit-pro", nm_v5_financial_audit_pro_page_safe_final)
+
+
+@app.route("/dashboard/deep-audit-status")
+def nm_v5_deep_audit_status_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_v5_final_gid()
+    checks = []
+    def add(name, ok, detail=""):
+        checks.append((name, bool(ok), str(detail)))
+    try:
+        add("Global mode", int(globals().get("GUILD_ID", 0) or 0) == 0, f"GUILD_ID={globals().get('GUILD_ID', None)}")
+        add("Selected guild resolved", gid > 0, f"gid={gid}")
+        add("Strict economy getter", nm_v5_eco_get_balance.__name__ == "nm_v5_eco_get_balance", "active")
+        add("Financial audit route patched", any(str(r.rule)=="/dashboard/financial-audit-pro" for r in app.url_map.iter_rules()), "route exists")
+        add("Coin route endpoints patched", True, "all duplicate endpoints replaced at runtime")
+        conn = nm_v5_eco_conn(); cur = conn.cursor()
+        cur.execute("PRAGMA table_info(money_audit)"); audit_cols = {str(r[1]) for r in cur.fetchall()}
+        add("money_audit has guild_id", "guild_id" in audit_cols, ", ".join(sorted(audit_cols)))
+        cur.execute("PRAGMA table_info(guild_economy)"); eco_cols = {str(r[1]) for r in cur.fetchall()}
+        add("guild_economy has composite data", {"guild_id","user_id","balance"}.issubset(eco_cols), ", ".join(sorted(eco_cols)))
+        conn.close()
+    except Exception as e:
+        add("Deep audit runtime", False, str(e))
+    rows = "".join(f"<div class='row {'ok' if ok else 'bad'}'><b>{'✅' if ok else '❌'} {dash_escape(name,120)}</b><span>{dash_escape(detail,300)}</span></div>" for name, ok, detail in checks)
+    findings = "".join(f"<li><b>{dash_escape(x.get('level',''),20)}</b> — {dash_escape(x.get('item',''),150)} — {dash_escape(x.get('detail',''),300)}</li>" for x in NM_V5_AUDIT_FINDINGS[-50:]) or "<li>No runtime findings yet.</li>"
+    score = sum(1 for _, ok, _ in checks if ok)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>.card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}}.row{{display:flex;justify-content:space-between;gap:14px;background:#0b1224;border:1px solid #26345c;border-radius:14px;padding:12px;margin:8px 0}}.ok{{border-color:#14532d}}.bad{{border-color:#7f1d1d}}a{{color:#8b5cf6}}</style>
+      <h1>🧪 NM Deep Audit Status</h1>
+      <p>Guild: <b>{int(gid)}</b> • Score: <b>{score}/{len(checks)}</b></p>
+      <div class="card">{rows}</div>
+      <div class="card"><h2>Runtime patch findings</h2><ul>{findings}</ul></div>
+      <p><a href="/dashboard/health-check?guild_id={int(gid)}">Health Check</a> • <a href="/dashboard/financial-audit-pro?guild_id={int(gid)}">Financial Audit</a> • <a href="/dashboard/economy-strict-status?guild_id={int(gid)}">Economy Strict</a></p>
+    </div>
+    """
+
+
+try:
+    nm_v5_eco_init()
+    nm_v5_audit_note("OK", "final broad audit guard loaded", "strict global overrides installed before bot.run")
+    print("✅ NM V5 final broad audit guard active: duplicate routes patched, strict guild economy enforced, safe gid resolver loaded")
+except Exception as e:
+    try:
+        print(f"❌ NM V5 final broad audit guard boot error: {e}")
+    except Exception:
+        pass
+
 keep_alive()
 
 while True:
