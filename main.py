@@ -1833,7 +1833,7 @@ async def validate_gamble(ctx, amount_text):
     if amount is None:
         embed = discord.Embed(
             title="🎰 مبلغ غير صحيح",
-            description="اكتب مبلغ واضح مثل: `!حظ 500` أو `!حظ 10k` أو `!حظ 1m`",
+            description="اكتب مبلغ واضح مثل: `/حظ 500` أو `/حظ 10k` أو `/حظ 1m`",
             color=COLOR_ORANGE,
             timestamp=discord.utils.utcnow()
         )
@@ -2304,18 +2304,20 @@ async def restore_memory_from_backup(guild, force=False):
 
 
 def build_economy_guide_embed(auto=False):
-    """Premium-looking economy guide embed used for manual and automatic guide messages."""
-    title = "🪙 Retards Economy"
+    """Premium-looking economy guide embed focused on the new slash commands."""
+    title = "🪙 Retards System Guide"
     description = (
-        f"**دليل مختصر ومرتب لنظام {BOT_BRAND}.**\n"
-        f"الأوامر الأساسية في <#{COMMANDS_CHANNEL_ID}>، وألعاب الكازينو في <#{GAMBLING_CHANNEL_ID}>."
+        f"**الدليل الرسمي للأوامر الجديدة في {BOT_BRAND}.**\n"
+        "استخدم أوامر `/` لأنها أوضح، أسرع، وتشتغل بشكل أفضل مع النسخة العالمية.\n"
+        f"الأوامر العامة في <#{COMMANDS_CHANNEL_ID}>، والكازينو في <#{GAMBLING_CHANNEL_ID}>."
     )
 
     if auto:
-        title = "🪙 Retards Economy • Quick Guide"
+        title = "🪙 Retards System • Quick Guide"
         description = (
-            "تذكير سريع للي ما يعرف النظام.\n"
-            f"الأوامر الأساسية هنا <#{COMMANDS_CHANNEL_ID}>، والقمار فقط في <#{GAMBLING_CHANNEL_ID}>."
+            "تذكير سريع بالأوامر الجديدة.\n"
+            "استخدم أوامر `/` بدل أوامر `!` القديمة.\n"
+            f"الأوامر العامة: <#{COMMANDS_CHANNEL_ID}> • الكازينو: <#{GAMBLING_CHANNEL_ID}>"
         )
 
     embed = discord.Embed(
@@ -2326,11 +2328,11 @@ def build_economy_guide_embed(auto=False):
     )
 
     embed.add_field(
-        name="💼 المحفظة",
+        name="💼 المحفظة والفلوس",
         value=(
-            f"`!رصيدي` عرض رصيدك\n"
-            f"`!رصيد @user` عرض رصيد عضو\n"
-            f"`!اغنى` توب أغنى الأعضاء\n"
+            "`/رصيدي` أو `/balance` — عرض رصيدك\n"
+            "`/اغنى` أو `/top` — توب أغنى الأعضاء\n"
+            "`/تحويل user amount` أو `/transfer` — تحويل فلوس لعضو\n"
             f"**العملة:** {COIN_NAME}"
         ),
         inline=False
@@ -2339,7 +2341,7 @@ def build_economy_guide_embed(auto=False):
     embed.add_field(
         name="⏱️ الراتب",
         value=(
-            f"`!راتب` تستلم راتبك كل **{format_seconds(HOURLY_REWARD_COOLDOWN_SECONDS)}**\n"
+            f"`/راتب` أو `/salary` — تستلم راتبك كل **{format_seconds(HOURLY_REWARD_COOLDOWN_SECONDS)}**\n"
             "كل ما ارتفع لفلك، تزيد مكافأتك."
         ),
         inline=True
@@ -2348,31 +2350,21 @@ def build_economy_guide_embed(auto=False):
     embed.add_field(
         name="📊 اللفل",
         value=(
-            "`!لفلي` عرض لفلك و XP\n"
-            "`!لفل @user` عرض لفل عضو\n"
-            "`!ترتيب` توب اللفلات"
+            "`/لفلي` أو `/rank` — عرض لفلك و XP\n"
+            "`/ترتيب` أو `/levels` — توب اللفلات"
         ),
         inline=True
-    )
-
-    embed.add_field(
-        name="🔁 التحويلات",
-        value=(
-            "`!تحويل @user 500` تحويل فلوس لعضو ثاني\n"
-            "كل التحويلات محفوظة في النظام للمراجعة."
-        ),
-        inline=False
     )
 
     embed.add_field(
         name="🎰 الكازينو",
         value=(
             f"يشتغل فقط في <#{GAMBLING_CHANNEL_ID}>\n"
-            "`!حظ 500` لعبة حظ 50/50\n"
-            "`!دبل 500` دبل أو خسارة\n"
-            "`!سلوت 500` سلوت وجوائز عشوائية\n"
-            "`!وجه 500 ملك` وجه/كتابة\n"
-            "`!بلاكجاك 500` بلاك جاك بالأزرار"
+            "`/حظ amount` أو `/luck` — 50/50\n"
+            "`/دبل amount` أو `/double` — مخاطرة أعلى\n"
+            "`/سلوت amount` أو `/slot` — سلوت وجوائز\n"
+            "`/وجه amount choice` أو `/flip` — ملك/كتابة\n"
+            "`/بلاكجاك amount` أو `/blackjack` — ضد الديلر"
         ),
         inline=False
     )
@@ -2380,36 +2372,33 @@ def build_economy_guide_embed(auto=False):
     embed.add_field(
         name="🛒 المتجر والجوائز",
         value=(
-            "`!متجر` فتح المتجر بالأزرار\n"
-            "`!صندوق` شراء صندوق حظ\n"
+            "`/متجر` أو `/shop` — عرض المتجر\n"
+            "`/شراء item` أو `/buy` — شراء منتج\n"
+            "`/صندوق` أو `/lootbox` — فتح صندوق حظ\n"
             "الـ VIP وجوائز الفعاليات مربوطة بالنظام."
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="🏠 العقارات",
-        value=(
-            "`!عقارات` عرض العقارات\n"
-            "`!عقاراتي` عقاراتك\n"
-            "`!سوق_العقارات` السوق\n"
-            "`!مزادات` المزادات النشطة"
-        ),
-        inline=True
-    )
-
-    embed.add_field(
-        name="🛡️ أدوات الإدارة",
-        value=(
-            "`!اعطاءفلوس @user 1000`\n"
-            "`!سحبفلوس @user 500`\n"
-            "`!تصفيرفلوس @user`\n"
-            "كل عمليات الداشبورد محفوظة في Audit Center."
         ),
         inline=False
     )
 
-    embed.set_footer(text=f"{BOT_BRAND} • Economy • Levels • Casino")
+    embed.add_field(
+        name="🌍 إعداد السيرفر",
+        value=(
+            "`/setup_status` — يعرض حالة إعداد السيرفر الحالي\n"
+            "كل سيرفر له روماته وإعداداته الخاصة من الداشبورد."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="📌 ملاحظة مهمة",
+        value=(
+            "أوامر `!` القديمة باقية مؤقتًا لسيرفرك الأساسي، لكن الشرح الرسمي من الآن يعتمد أوامر `/`.\n"
+            "إذا ما ظهر لك أمر `/` سو Refresh للديسكورد أو استخدم `!syncslash` للـ Owner."
+        ),
+        inline=False
+    )
+
+    embed.set_footer(text=f"{BOT_BRAND} • Slash Commands • Global V3")
     return embed
 
 def economy_guide_last_sent_key():
@@ -6877,7 +6866,7 @@ def dashboard_casino_page():
       <div class="card stat"><div class="icon">🎴</div><div class="num">BJ</div><div class="label">Blackjack enabled</div></div>
     </div>
     <div style="height:14px"></div>
-    <div class="card"><h3>🎲 Casino Games</h3><table class="table"><tr><th>Command</th><th>Game</th><th>Rules</th></tr><tr><td><code>!حظ amount</code></td><td>Lucky Roll</td><td>50/50 double or lose</td></tr><tr><td><code>!دبل amount</code></td><td>Double Risk</td><td>45% win, 55% lose</td></tr><tr><td><code>!سلوت amount</code></td><td>Slot Machine</td><td>2 match = x2, 3 match = x5</td></tr><tr><td><code>!وجه amount ملك/كتابة</code></td><td>Coin Flip</td><td>Guess the side</td></tr><tr><td><code>!بلاكجاك amount</code></td><td>Blackjack</td><td>Hit / Stand buttons</td></tr></table></div>
+    <div class="card"><h3>🎲 Casino Games</h3><table class="table"><tr><th>Command</th><th>Game</th><th>Rules</th></tr><tr><td><code>/حظ amount</code></td><td>Lucky Roll</td><td>50/50 double or lose</td></tr><tr><td><code>/دبل amount</code></td><td>Double Risk</td><td>45% win, 55% lose</td></tr><tr><td><code>/سلوت amount</code></td><td>Slot Machine</td><td>2 match = x2, 3 match = x5</td></tr><tr><td><code>/وجه amount choice</code></td><td>Coin Flip</td><td>Guess the side</td></tr><tr><td><code>/بلاكجاك amount</code></td><td>Blackjack</td><td>Hit / Stand buttons</td></tr></table></div>
     <div style="height:14px"></div>
     <div class="card"><h3>🚧 Next Upgrade</h3><p class="muted">نقدر نضيف Casino History Table يخزن كل قمار: اللاعب، اللعبة، الرهان، الربح/الخسارة، الوقت. بعدها الصفحة هذي تعرض أكبر فوز وأكبر خسارة وأقوى مقامرين.</p></div>
     '''
@@ -6906,7 +6895,7 @@ def dashboard_shop_page():
       <div class="card stat"><div class="icon">📍</div><div class="num">Room</div><div class="label"><code>{SHOP_CHANNEL_ID}</code></div></div>
     </div>
     <div style="height:14px"></div>
-    <div class="card"><h3>🛍️ Commands</h3><table class="table"><tr><th>Command</th><th>Use</th></tr><tr><td><code>!متجر</code></td><td>Shows the shop</td></tr><tr><td><code>!شراء vip</code></td><td>Buy VIP role for {SHOP_VIP_DAYS} days</td></tr><tr><td><code>!شراء صندوق</code> / <code>!صندوق</code></td><td>Open lootbox</td></tr></table></div>
+    <div class="card"><h3>🛍️ Commands</h3><table class="table"><tr><th>Command</th><th>Use</th></tr><tr><td><code>/متجر</code></td><td>Shows the shop</td></tr><tr><td><code>/شراء vip</code></td><td>Buy VIP role for {SHOP_VIP_DAYS} days</td></tr><tr><td><code>/شراء صندوق</code> / <code>/صندوق</code></td><td>Open lootbox</td></tr></table></div>
     <div style="height:14px"></div>
     <div class="card"><h3>🧾 Latest Purchases</h3><table class="table"><tr><th>User</th><th>Item</th><th>Price</th><th>Unix Time</th></tr>{rows}</table></div>
     """
@@ -9596,69 +9585,35 @@ async def help_cmd(ctx):
     embed = discord.Embed(title="📖 أوامر NM System", color=COLOR_PURPLE)
 
     embed.description = """
-**إنشاء وإعداد**
-`!انشاء` - ينشئ رومات اللوقات فقط
-`!اعداد` - يجهز الشروحات ولوحة الرولات بدون إنشاء رتب جديدة
+**الأوامر الجديدة /**
+`/شرح` - الدليل الرسمي
+`/ping` - فحص البوت
+`/setup_status` - حالة إعداد السيرفر
 
-**عامة**
-`!بنق`
-`!هلا`
-`!معلومات @شخص`
-`!طقطق @شخص`
-`!تقييم الشي`
+**Economy**
+`/رصيدي` أو `/balance`
+`/راتب` أو `/salary`
+`/تحويل user amount` أو `/transfer`
+`/اغنى` أو `/top`
 
-**الحماية**
-`!حماية`
-`!حماية تشغيل`
-`!حماية ايقاف`
-`!اعدادات`
-`!تحذير @شخص السبب`
-`!تحذيرات @شخص`
-`!تصفير @شخص`
+**Levels**
+`/لفلي` أو `/rank`
+`/ترتيب` أو `/levels`
 
-**Community**
-`!اقتراح اقتراحك`
-`!لعب Valorant 5 ملاحظة`
-`!سحب Nitro 1h 1`
-`!رولات`
+**Casino**
+`/حظ amount` أو `/luck`
+`/دبل amount` أو `/double`
+`/سلوت amount` أو `/slot`
+`/وجه amount choice` أو `/flip`
+`/بلاكجاك amount` أو `/blackjack`
 
-**رسائل الخاص**
-❌ أوامر الخاص معطّلة مؤقتًا بسبب Quarantine من Discord.
-استخدم `!اعلان نص الإعلان` بدل إرسال الخاص.
+**Shop**
+`/متجر` أو `/shop`
+`/شراء item` أو `/buy`
+`/صندوق` أو `/lootbox`
 
-**Level - في روم commands فقط**
-`!لفلي`
-`!لفل @شخص`
-`!ترتيب`
-
-**Economy - في روم commands فقط**
-`!اقتصاد` - شرح النظام
-`!رصيدي`
-`!رصيد @شخص`
-`!راتب`
-`!بوست` أو `!اسبوعي`
-`!تحويل @شخص 500`
-`!اغنى`
-
-**Gambling - في روم القمار فقط**
-`!شرح_القمار`
-`!حظ 500`
-`!دبل 500`
-`!سلوت 500`
-`!وجه 500 ملك`
-`!وجه 500 كتابة`
-
-**Economy Admin**
-`!اعطاءفلوس @شخص 1000`
-`!سحبفلوس @شخص 500`
-`!تصفيرفلوس @شخص`
-
-**إدارة**
-`!مسح 10`
-`!قفل`
-`!فتح`
-`!لوحة`
-`!اعلان نص الإعلان`
+**ملاحظة**
+أوامر `!` القديمة ما زالت موجودة مؤقتًا لسيرفرك الأساسي، لكن الشرح الرسمي والتطوير الجديد يعتمد على أوامر `/`.
 """
 
     await ctx.send(embed=embed)
@@ -10188,7 +10143,7 @@ async def my_balance(ctx):
     embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
     embed.add_field(name="🏅 اللفل", value=f"**{level}**", inline=True)
     embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
-    embed.add_field(name="⚡ أوامر سريعة", value="`!راتب` • `!تحويل @شخص مبلغ` • `!اغنى`", inline=False)
+    embed.add_field(name="⚡ أوامر سريعة", value="`/راتب` • `/تحويل user amount` • `/اغنى`", inline=False)
     embed.set_footer(text=f"{BOT_BRAND} • Economy System")
     await ctx.send(embed=embed)
 
@@ -10246,7 +10201,7 @@ async def salary(ctx):
         )
         embed.set_author(name=f"{ctx.author.display_name} • Salary", icon_url=ctx.author.display_avatar.url)
         embed.add_field(name="💼 محفظتك الآن", value=coin_line(balance_amount), inline=False)
-        embed.add_field(name="💡 الأمر", value="استخدم `!راتب` كل ساعة.", inline=False)
+        embed.add_field(name="💡 الأمر", value="استخدم `/راتب` كل ساعة.", inline=False)
         embed.set_footer(text=f"{BOT_BRAND} • Salary System")
         await ctx.send(embed=embed)
         return
@@ -10272,7 +10227,7 @@ async def transfer_money(ctx, member: discord.Member = None, amount: int = None)
         return
 
     if member is None or amount is None:
-        await ctx.send("استخدم: `!تحويل @شخص 500`")
+        await ctx.send("استخدم: `/تحويل user 500`")
         return
 
     if member.bot:
@@ -10726,32 +10681,32 @@ async def gambling_help(ctx):
     )
     embed.add_field(
         name="🎲 Lucky Roll",
-        value="`!حظ 500` — 50% فوز / 50% خسارة",
+        value="`/حظ amount` أو `/luck amount` — 50% فوز / 50% خسارة",
         inline=False
     )
     embed.add_field(
         name="💎 Double Risk",
-        value="`!دبل 500` — 45% فوز / 55% خسارة",
+        value="`/دبل amount` أو `/double amount` — 45% فوز / 55% خسارة",
         inline=False
     )
     embed.add_field(
         name="🎰 Slot Machine",
-        value="`!سلوت 500` — 3 نفس بعض = x5، رمزين = x2",
+        value="`/سلوت amount` أو `/slot amount` — 3 نفس بعض = x5، رمزين = x2",
         inline=False
     )
     embed.add_field(
         name="🪙 Coin Flip",
-        value="`!وجه 500 ملك` أو `!وجه 500 كتابة`",
+        value="`/وجه amount choice` أو `/flip amount choice` — choice: ملك/كتابة",
         inline=False
     )
     embed.add_field(
         name="🎴 Blackjack",
-        value="`!بلاكجاك 500` أو `!blackjack 500` — العب ضد الديلر، Hit أو Stand. Blackjack يدفع x1.5",
+        value="`/بلاكجاك amount` أو `/blackjack amount` — ضد الديلر. Blackjack يدفع x1.5",
         inline=False
     )
     embed.add_field(
         name="💡 اختصارات المبلغ",
-        value="`10k` = 10,000 • `1m` = 1,000,000 • مثال: `!حظ 25k`",
+        value="`10k` = 10,000 • `1m` = 1,000,000 • مثال: `/حظ 25k`",
         inline=False
     )
     embed.set_footer(text=f"{BOT_BRAND} • Casino")
@@ -10896,7 +10851,7 @@ async def gamble_flip(ctx, amount=None, choice=None):
     if not choice:
         if not await require_gambling_channel(ctx):
             return
-        await ctx.send("استخدم: `!وجه 500 ملك` أو `!وجه 500 كتابة`")
+        await ctx.send("استخدم: `/وجه amount choice` أو `/flip amount choice` — choice: ملك/كتابة")
         return
 
     bet = await validate_gamble(ctx, amount)
@@ -11245,7 +11200,7 @@ async def panel(ctx):
     embed.add_field(name="⚙️ إعداد النظام", value="`!اعداد`", inline=True)
     embed.add_field(name="👤 معلومات عضو", value="`!معلومات @user`", inline=True)
     embed.add_field(name="🛡️ الحماية", value="`!حماية`", inline=True)
-    embed.add_field(name="📊 اللفل", value="`!ترتيب`", inline=True)
+    embed.add_field(name="📊 اللفل", value="`/ترتيب`", inline=True)
     embed.add_field(name="🎮 لعب", value="`!لعب Valorant 5`", inline=True)
     embed.add_field(name="💡 اقتراح", value="`!اقتراح فكرتك`", inline=True)
     embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
@@ -11456,7 +11411,7 @@ async def setup_posts(ctx):
 
         commands_embed = discord.Embed(
             title="🤖 NM System Commands",
-            description="هذي أهم أوامر البوت:",
+            description="هذي أهم أوامر البوت الجديدة `/`، والأوامر القديمة `!` باقية مؤقتًا:",
             color=COLOR_GREY,
             timestamp=discord.utils.utcnow()
         )
@@ -11467,7 +11422,7 @@ async def setup_posts(ctx):
         commands_embed.add_field(name="🎮 اللعب", value="`!لعب Valorant 5`", inline=True)
         commands_embed.add_field(name="🎭 الرولات", value="`!رولات`", inline=True)
         commands_embed.add_field(name="📩 الخاص", value="`!dmtest`\n`!dmrole`\n`!dmall`", inline=True)
-        commands_embed.add_field(name="📊 اللفل", value="`!لفلي`\n`!ترتيب`", inline=True)
+        commands_embed.add_field(name="📊 اللفل", value="`!لفلي`\n`/ترتيب`", inline=True)
 
         commands_embed.set_footer(text="NM System | Setup Completed")
 
@@ -11610,7 +11565,7 @@ def build_shop_embed(member=None):
         value=(
             f"السعر: {coin_line(SHOP_VIP_PRICE)}\n"
             f"المدة: **{SHOP_VIP_DAYS} أيام**\n"
-            f"الأمر: `!شراء vip`\n"
+            f"الأمر: `/شراء vip`\n"
             f"الرول: <@&{VIP_ROLE_ID}>"
         ),
         inline=False
@@ -11620,7 +11575,7 @@ def build_shop_embed(member=None):
         value=(
             f"السعر: {coin_line(LOOTBOX_PRICE)}\n"
             "جوائز عشوائية: Coins / VIP مؤقت / Winner Role مؤقت\n"
-            "الأمر: `!صندوق` أو `!شراء صندوق`"
+            "الأمر: `/صندوق` أو `/شراء صندوق`"
         ),
         inline=False
     )
@@ -11683,7 +11638,7 @@ async def buy_command(ctx, item: str = None):
         await lootbox_command(ctx)
         return
 
-    await ctx.send(embed=discord.Embed(title="❌ منتج غير معروف", description="استخدم `!متجر` عشان تشوف المنتجات.", color=COLOR_RED), delete_after=8)
+    await ctx.send(embed=discord.Embed(title="❌ منتج غير معروف", description="استخدم `/متجر` عشان تشوف المنتجات.", color=COLOR_RED), delete_after=8)
 
 
 @bot.command(name="صندوق", aliases=["lootbox", "box"])
@@ -12206,7 +12161,7 @@ async def slash_blackjack(interaction: discord.Interaction, amount: int):
     amount = await v3_gamble_check(interaction, amount)
     if amount is None:
         return
-    # Lightweight slash blackjack resolver. Button blackjack remains on !بلاكجاك for the main guild.
+    # Lightweight slash blackjack resolver. Button blackjack also exists on /بلاكجاك for the main guild.
     v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Blackjack bet")
     player = random.randint(16, 21)
     dealer = random.randint(16, 21)
