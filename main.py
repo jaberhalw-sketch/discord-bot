@@ -7846,6 +7846,71 @@ def dashboard_server_rail_html():
     return "<aside class='serverrail'>" + "".join(items) + "</aside>"
 
 
+
+# =========================
+# NM SAFE GUILD BANNER FIX
+# يمنع كراش guild_banner في صفحات الداشبورد
+# =========================
+
+def nm_safe_guild_banner(guild=None, title=None, subtitle=None, icon="⚙️", extra_html=""):
+    try:
+        if guild is None:
+            if "nm_runtime_guild" in globals():
+                guild = nm_runtime_guild()
+            elif "nm_absolute_selected_guild" in globals():
+                guild = nm_absolute_selected_guild()
+            elif bot:
+                gid = None
+                try:
+                    path = str(getattr(request, "path", "") or "")
+                    m = re.search(r"/dashboard/guild/(\d+)", path)
+                    if m:
+                        gid = int(m.group(1))
+                except Exception:
+                    pass
+                if not gid:
+                    try:
+                        gid = int(request.args.get("guild_id") or session.get("selected_guild_id") or GUILD_ID)
+                    except Exception:
+                        gid = GUILD_ID
+                guild = bot.get_guild(int(gid))
+
+        guild_name = title or (getattr(guild, "name", None) if guild else "Selected Server")
+        guild_id = getattr(guild, "id", None) if guild else None
+        icon_url = ""
+        try:
+            if guild and getattr(guild, "icon", None):
+                icon_url = guild.icon.url
+        except Exception:
+            icon_url = ""
+
+        if icon_url:
+            avatar = f"<img src='{dash_escape(icon_url, 300)}' style='width:62px;height:62px;border-radius:22px;object-fit:cover;border:1px solid var(--line);'>"
+        else:
+            avatar = f"<div style='width:62px;height:62px;border-radius:22px;background:rgba(139,92,246,.18);display:grid;place-items:center;font-size:30px;border:1px solid var(--line);'>{icon}</div>"
+
+        sub = subtitle or (f"Guild ID: <code>{int(guild_id)}</code>" if guild_id else "No guild selected")
+        return f"""
+        <div class="card" style="margin-bottom:16px">
+          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+            {avatar}
+            <div style="min-width:0">
+              <h1 style="margin:0 0 6px">{dash_escape(str(guild_name), 120)}</h1>
+              <div class="muted">{sub}</div>
+              {extra_html or ""}
+            </div>
+          </div>
+        </div>
+        """
+    except Exception as e:
+        return f"""
+        <div class="card" style="margin-bottom:16px">
+          <h2>Selected Server</h2>
+          <p class="muted">Guild banner unavailable.</p>
+        </div>
+        """
+
+
 @app.route('/dashboard/select-guild/<int:guild_id>')
 def dashboard_select_guild(guild_id):
     denied = dashboard_require_admin()
@@ -8764,6 +8829,7 @@ def dashboard_guild_selector_page():
 
 @app.route("/dashboard/guild/<int:guild_id>/setup", methods=["GET", "POST"])
 def dashboard_guild_setup_page(guild_id):
+    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_login()
     if denied:
         return denied
@@ -8864,6 +8930,7 @@ def dashboard_guild_protection_redirect(guild_id):
 
 @app.route("/dashboard/economy", methods=["GET"])
 def dashboard_economy_page():
+    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -8905,6 +8972,7 @@ def dashboard_economy_page():
 
 @app.route('/dashboard/money-audit', methods=['GET'])
 def dashboard_money_audit_page():
+    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_owner()
     if denied:
         return denied
@@ -9010,6 +9078,7 @@ def dashboard_money_audit_page():
 
 @app.route("/dashboard/levels", methods=["GET"])
 def dashboard_levels_page():
+    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -9089,7 +9158,7 @@ def dashboard_events_page():
     status = "ON" if EVENTS_ENABLED else "OFF"
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner}
+    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
     <div class="grid">
       <div class="card stat"><div class="icon">🎉</div><div class="num">{status}</div><div class="label">Events Status</div></div>
       <div class="card stat"><div class="icon">🏆</div><div class="num">{short_money(DEFAULT_EVENT_PRIZE)}</div><div class="label">Default Prize</div></div>
@@ -9265,7 +9334,7 @@ def dashboard_warnings_page():
 
     body = f'''
     {dashboard_toast_html()}
-    {guild_banner}
+    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
 
     <style>
       .warning-tabs {{
@@ -10267,7 +10336,7 @@ def dashboard_control_page():
     emergency_button_text = "Disable Emergency" if control.get("emergency_lockdown") else "Enable Emergency Lockdown"
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner}
+    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
     <div class="hero"><div class="card"><div class="big">🛡️ Admin Control Center</div><p class="muted">اقفل وافتح أي أمر أو نظام كامل بدون تعديل الكود. التغييرات فورية وتحفظ بعد الريستارت.</p></div><div class="card {emergency_class}"><h3>🚨 Emergency Mode</h3><p class="muted">يقفل الاقتصاد والقمار واللفل والتحويلات وأغلب أوامر الأعضاء، ويترك الأدوات الإدارية الأساسية.</p><form method="post" action="/dashboard/control/emergency"><input type="hidden" name="enabled" value="{emergency_enabled_value}"><button class="btn {emergency_button_class}">{emergency_button_text}</button></form></div></div>
     <form method="post" action="/dashboard/control/save">
       <div class="card"><h3>🧩 System Toggles</h3><div class="switchgrid">{system_cards}</div></div>
@@ -10773,7 +10842,7 @@ def dashboard_log_vault_page():
 
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner}
+    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
     <style>
       .vault-shell {{ display:grid; grid-template-columns: 320px 1fr; gap:16px; align-items:start; }}
       .vault-rooms {{ position:sticky; top:12px; max-height:calc(100vh - 120px); overflow:auto; border:1px solid var(--line); border-radius:24px; background:rgba(2,6,23,.55); padding:12px; }}
@@ -11106,6 +11175,7 @@ def dashboard_command_center_page():
 
 @app.route("/dashboard/protection", methods=["GET"])
 def dashboard_protection_page():
+    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -11181,7 +11251,7 @@ def dashboard_protection_page():
     guild_banner = dashboard_guild_banner(selected_guild_id, "Protection Guild")
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner}
+    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
     <style>
       .protect-hero{{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:16px}}
       .protect-switch{{display:grid;grid-template-columns:54px minmax(0,1fr) 48px;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045);margin-bottom:10px}}
@@ -11721,6 +11791,7 @@ def nm_global_cleanup_audit():
         print(f"NM Global Cleanup audit failed: {e}")
 
 async def on_ready():
+    print("✅ NM safe guild banner fix active")
     nm_global_cleanup_audit()
     print(f"✅ NM persistent storage active: {NM_DATA_DIR}")
     try:
