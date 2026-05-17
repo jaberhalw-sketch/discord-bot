@@ -5853,29 +5853,13 @@ def dashboard_role_badge_html():
     return "<span class='pill bad'>No Access</span>"
 
 
+
 def dashboard_count_table(table):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {table}")
-        value = cur.fetchone()[0]
-        conn.close()
-        return int(value or 0)
-    except:
-        return 0
+    return nm_selected_table_count(table)
 
 
 def dashboard_total_coins():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy")
-        value = cur.fetchone()[0]
-        conn.close()
-        return int(value or 0)
-    except:
-        return 0
-
+    return nm_selected_economy_total()
 
 def dashboard_set_level_data(user_id, xp=None, level=None):
     old_xp, old_level = get_level_data(user_id)
@@ -5906,19 +5890,39 @@ def dashboard_member_name(user_id):
     return dashboard_member_identity_html(user_id, guild_id=dashboard_current_guild_id_safe(), include_id=True, include_roles=True, compact=False)
 
 
+
 def dashboard_money_rows(limit=10):
     rows = []
-    for i, (user_id, balance) in enumerate(get_top_money(limit), start=1):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "economy")
+        cur.execute("SELECT user_id, balance FROM economy WHERE guild_id = ? ORDER BY balance DESC LIMIT ?", (nm_selected_guild_id(), int(limit)))
+        data = cur.fetchall()
+        conn.commit()
+        conn.close()
+    except Exception:
+        data = []
+    for i, (user_id, balance) in enumerate(data, start=1):
         rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "balance": int(balance or 0)})
     return rows
 
 
 def dashboard_level_rows(limit=10):
     rows = []
-    for i, (user_id, xp, level) in enumerate(get_top_levels(limit), start=1):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "levels")
+        cur.execute("SELECT user_id, xp, level FROM levels WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT ?", (nm_selected_guild_id(), int(limit)))
+        data = cur.fetchall()
+        conn.commit()
+        conn.close()
+    except Exception:
+        data = []
+    for i, (user_id, xp, level) in enumerate(data, start=1):
         rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "level": int(level or 1), "xp": int(xp or 0)})
     return rows
-
 
 def dashboard_memory_summary():
     status = local_memory_status()
@@ -6925,6 +6929,74 @@ def dash_escape(value, limit=500):
     return html.escape(text)
 
 
+
+# =========================
+# NM SELECTED GUILD DATA FIX
+# يمنع خلط بيانات السيرفرات في الداشبورد
+# =========================
+
+def nm_selected_guild_id():
+    try:
+        gid = request.args.get("guild_id") or session.get("selected_guild_id") or session.get("dashboard_active_guild_id") or GUILD_ID
+        return int(gid)
+    except Exception:
+        return int(GUILD_ID)
+
+def nm_selected_guild():
+    try:
+        return bot.get_guild(nm_selected_guild_id()) if bot else None
+    except Exception:
+        return None
+
+def nm_selected_member_count():
+    guild = nm_selected_guild()
+    if not guild:
+        return 0
+    try:
+        return int(getattr(guild, "member_count", 0) or len(getattr(guild, "members", []) or []) or 0)
+    except Exception:
+        return 0
+
+def nm_ensure_table_guild_id(cur, table):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = [r[1] for r in cur.fetchall()]
+        if "guild_id" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN guild_id INTEGER DEFAULT 0")
+        try:
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_guild_id ON {table}(guild_id)")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Could not ensure guild_id for {table}: {e}")
+
+def nm_selected_table_count(table):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, table)
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id = ?", (nm_selected_guild_id(),))
+        value = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+        return value
+    except Exception:
+        return 0
+
+def nm_selected_economy_total():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "economy")
+        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy WHERE guild_id = ?", (nm_selected_guild_id(),))
+        value = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+        return value
+    except Exception:
+        return 0
+
+
 def cc_time(unix_time):
     try:
         unix_time = int(unix_time)
@@ -6937,13 +7009,16 @@ def cc_since_hours(hours=24):
     return int(time.time()) - (int(hours) * 60 * 60)
 
 
-def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details=""):
+
+def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0):
     try:
+        gid = int(guild_id or nm_selected_guild_id())
         conn = db_connect()
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS command_center_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
                 event_type TEXT,
                 user_id INTEGER DEFAULT 0,
                 user_name TEXT DEFAULT '',
@@ -6954,11 +7029,13 @@ def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_n
                 created_at INTEGER
             )
         """)
+        nm_ensure_table_guild_id(cur, "command_center_events")
         cur.execute("""
             INSERT INTO command_center_events
-            (event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (guild_id, event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
+            gid,
             str(event_type)[:80],
             int(user_id or 0),
             str(user_name or "")[:120],
@@ -6973,10 +7050,11 @@ def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_n
             DELETE FROM command_center_events
             WHERE id NOT IN (
                 SELECT id FROM command_center_events
+                WHERE guild_id = ?
                 ORDER BY id DESC
                 LIMIT ?
-            )
-        """, (COMMAND_CENTER_EVENT_LIMIT,))
+            ) AND guild_id = ?
+        """, (gid, COMMAND_CENTER_EVENT_LIMIT, gid))
 
         conn.commit()
         conn.close()
@@ -6988,11 +7066,13 @@ def cc_count_events(event_type=None, since=0):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         if event_type:
-            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE event_type = ? AND created_at >= ?", (str(event_type), int(since)))
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND event_type = ? AND created_at >= ?", (nm_selected_guild_id(), str(event_type), int(since)))
         else:
-            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE created_at >= ?", (int(since),))
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND created_at >= ?", (nm_selected_guild_id(), int(since)))
         count = int(cur.fetchone()[0] or 0)
+        conn.commit()
         conn.close()
         return count
     except:
@@ -7003,8 +7083,9 @@ def cc_sum_amount(event_type=None, since=0, positive_only=False, negative_only=F
     try:
         conn = db_connect()
         cur = conn.cursor()
-        query = "SELECT COALESCE(SUM(amount), 0) FROM command_center_events WHERE created_at >= ?"
-        params = [int(since)]
+        nm_ensure_table_guild_id(cur, "command_center_events")
+        query = "SELECT COALESCE(SUM(amount), 0) FROM command_center_events WHERE guild_id = ? AND created_at >= ?"
+        params = [nm_selected_guild_id(), int(since)]
         if event_type:
             query += " AND event_type = ?"
             params.append(str(event_type))
@@ -7014,6 +7095,7 @@ def cc_sum_amount(event_type=None, since=0, positive_only=False, negative_only=F
             query += " AND amount < 0"
         cur.execute(query, tuple(params))
         total = int(cur.fetchone()[0] or 0)
+        conn.commit()
         conn.close()
         return total
     except:
@@ -7024,28 +7106,29 @@ def cc_recent_events(limit=80, event_type=None):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         if event_type:
             cur.execute("""
                 SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
                 FROM command_center_events
-                WHERE event_type = ?
+                WHERE guild_id = ? AND event_type = ?
                 ORDER BY id DESC
                 LIMIT ?
-            """, (str(event_type), int(limit)))
+            """, (nm_selected_guild_id(), str(event_type), int(limit)))
         else:
             cur.execute("""
                 SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
                 FROM command_center_events
+                WHERE guild_id = ?
                 ORDER BY id DESC
                 LIMIT ?
-            """, (int(limit),))
+            """, (nm_selected_guild_id(), int(limit)))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
         return []
-
-
 
 def cc_log_channel_ids():
     """Channels excluded from activity analytics so log rooms do not dominate Top Active Channels."""
@@ -7099,36 +7182,42 @@ def cc_log_channel_filter_sql(prefix=""):
     return " AND " + " AND ".join(clauses), params
 
 
+
 def cc_count_clean_messages(since=0):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         extra_sql, extra_params = cc_log_channel_filter_sql()
         cur.execute(
-            "SELECT COUNT(*) FROM command_center_events WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''" + extra_sql,
-            tuple([int(since)] + extra_params)
+            "SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND event_type = 'message' AND created_at >= ? AND channel_name != ''" + extra_sql,
+            tuple([nm_selected_guild_id(), int(since)] + extra_params)
         )
         count = int(cur.fetchone()[0] or 0)
+        conn.commit()
         conn.close()
         return count
     except Exception:
         return 0
 
+
 def cc_top_channels(since=0, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         extra_sql, extra_params = cc_log_channel_filter_sql()
         cur.execute("""
             SELECT channel_name, COUNT(*)
             FROM command_center_events
-            WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''
+            WHERE guild_id = ? AND event_type = 'message' AND created_at >= ? AND channel_name != ''
         """ + extra_sql + """
             GROUP BY channel_name
             ORDER BY COUNT(*) DESC
             LIMIT ?
-        """, tuple([int(since)] + extra_params + [int(limit)]))
+        """, tuple([nm_selected_guild_id(), int(since)] + extra_params + [int(limit)]))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
@@ -7139,15 +7228,17 @@ def cc_top_users_by_event(event_type="message", since=0, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         cur.execute("""
             SELECT user_id, user_name, COUNT(*)
             FROM command_center_events
-            WHERE event_type = ? AND created_at >= ? AND user_id != 0
+            WHERE guild_id = ? AND event_type = ? AND created_at >= ? AND user_id != 0
             GROUP BY user_id, user_name
             ORDER BY COUNT(*) DESC
             LIMIT ?
-        """, (str(event_type), int(since), int(limit)))
+        """, (nm_selected_guild_id(), str(event_type), int(since), int(limit)))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
@@ -7158,25 +7249,27 @@ def cc_money_movers(since=0, positive=True, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "command_center_events")
         if positive:
             cur.execute("""
                 SELECT user_id, user_name, SUM(amount) AS total
                 FROM command_center_events
-                WHERE event_type = 'money' AND amount > 0 AND created_at >= ? AND user_id != 0
+                WHERE guild_id = ? AND event_type = 'money' AND amount > 0 AND created_at >= ? AND user_id != 0
                 GROUP BY user_id, user_name
                 ORDER BY total DESC
                 LIMIT ?
-            """, (int(since), int(limit)))
+            """, (nm_selected_guild_id(), int(since), int(limit)))
         else:
             cur.execute("""
                 SELECT user_id, user_name, SUM(amount) AS total
                 FROM command_center_events
-                WHERE event_type = 'money' AND amount < 0 AND created_at >= ? AND user_id != 0
+                WHERE guild_id = ? AND event_type = 'money' AND amount < 0 AND created_at >= ? AND user_id != 0
                 GROUP BY user_id, user_name
                 ORDER BY total ASC
                 LIMIT ?
-            """, (int(since), int(limit)))
+            """, (nm_selected_guild_id(), int(since), int(limit)))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
@@ -7187,15 +7280,17 @@ def cc_active_warning_rows(limit=10):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "warning_history")
         cur.execute("""
             SELECT user_id, COUNT(*) AS total
             FROM warning_history
-            WHERE status = 'active'
+            WHERE guild_id = ? AND status = 'active'
             GROUP BY user_id
             ORDER BY total DESC
             LIMIT ?
-        """, (int(limit),))
+        """, (nm_selected_guild_id(), int(limit)))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
@@ -7206,19 +7301,21 @@ def cc_warning_reason_rows(limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
+        nm_ensure_table_guild_id(cur, "warning_history")
         cur.execute("""
             SELECT reason, COUNT(*) AS total
             FROM warning_history
+            WHERE guild_id = ?
             GROUP BY reason
             ORDER BY total DESC
             LIMIT ?
-        """, (int(limit),))
+        """, (nm_selected_guild_id(), int(limit)))
         rows = cur.fetchall()
+        conn.commit()
         conn.close()
         return rows
     except:
         return []
-
 
 def cc_database_size():
     try:
@@ -7241,8 +7338,9 @@ def cc_bot_uptime_text():
         return "Unknown"
 
 
+
 def cc_guild_snapshot():
-    guild = bot.get_guild(GUILD_ID) if bot else None
+    guild = nm_selected_guild()
     if not guild:
         return {
             "guild_ok": False,
@@ -7255,21 +7353,22 @@ def cc_guild_snapshot():
             "voice_channels": 0,
         }
 
-    members = list(guild.members)
-    humans = [m for m in members if not m.bot]
-    bots = [m for m in members if m.bot]
-    online = [m for m in humans if str(m.status) != "offline"]
-    voice = [m for m in humans if getattr(m, "voice", None) and m.voice and m.voice.channel]
+    members = list(getattr(guild, "members", []) or [])
+    total_members = int(getattr(guild, "member_count", 0) or len(members) or 0)
+    bots = [m for m in members if getattr(m, "bot", False)]
+    humans_cached = [m for m in members if not getattr(m, "bot", False)]
+    online = [m for m in humans_cached if str(getattr(m, "status", "offline")) != "offline"]
+    voice = [m for m in humans_cached if getattr(m, "voice", None) and m.voice and m.voice.channel]
 
     return {
         "guild_ok": True,
-        "members": len(members),
-        "humans": len(humans),
+        "members": total_members,
+        "humans": total_members,
         "bots": len(bots),
         "online": len(online),
         "voice": len(voice),
-        "text_channels": len(guild.text_channels),
-        "voice_channels": len(guild.voice_channels),
+        "text_channels": len(getattr(guild, "text_channels", []) or []),
+        "voice_channels": len(getattr(guild, "voice_channels", []) or []),
     }
 
 def dashboard_selected_guild_stats():
@@ -7454,15 +7553,19 @@ def dashboard_global_bot_stats(force=False):
     return data
 
 
+
 def dashboard_global_stats_html(compact=False):
-    stats = dashboard_global_bot_stats()
     if compact:
+        guild = nm_selected_guild()
+        members = nm_selected_member_count()
         return f"""
         <div class="globalstats compact">
-          <div><b>{stats['guilds']:,}</b><span>Servers</span></div>
-          <div><b>{stats['humans']:,}</b><span>Users</span></div>
+          <div><b>1</b><span>Server</span></div>
+          <div><b>{members:,}</b><span>Members</span></div>
         </div>
         """
+
+    stats = dashboard_global_bot_stats()
     return f"""
     <div class="grid">
       <div class="card stat"><div class="icon">🌍</div><div class="num">{stats['guilds']:,}</div><div class="label">Servers using the bot</div></div>
@@ -7471,10 +7574,6 @@ def dashboard_global_stats_html(compact=False):
       <div class="card stat"><div class="icon">📡</div><div class="num">{stats['text_channels']:,} / {stats['voice_channels']:,}</div><div class="label">Text / Voice channels</div></div>
     </div>
     """
-
-
-
-
 
 # =========================
 # PROBOT-STYLE SERVER RAIL
@@ -7730,7 +7829,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
 <div class="layout">
   {{ server_rail|safe }}
   <aside class="sidebar">
-    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Fast selected-server control panel</p></div></div>
+    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Selected server control panel</p></div></div>
     {{ global_stats_compact|safe }}
     <nav class="navlist">
       <div class="navsection">Monitor</div>
@@ -10588,6 +10687,7 @@ def dashboard_command_center_page():
 
     since_24h = cc_since_hours(24)
     since_1h = cc_since_hours(1)
+    dashboard_set_active_guild(selected_guild_id)
     guild_data = cc_guild_snapshot()
 
     bot_ping = "Offline"
@@ -10708,7 +10808,7 @@ def dashboard_command_center_page():
     </div>
 
     <div id="overview" class="grid">
-      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{guild_data['humans']}</div><div class="cc-sub">Online: {guild_data['online']} • Voice: {guild_data['voice']} • Bots: {guild_data['bots']}</div></div>
+      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{guild_data['members']}</div><div class="cc-sub">Online: {guild_data['online']} • Voice: {guild_data['voice']} • Bots: {guild_data['bots']}</div></div>
       <div class="card"><h3>💬 Messages 24h</h3><div class="cc-stat">{messages_24h:,}</div><div class="cc-sub">Last hour: {messages_1h:,}</div></div>
       <div class="card"><h3>⌨️ Commands 24h</h3><div class="cc-stat">{commands_24h:,}</div><div class="cc-sub">Last hour: {commands_1h:,}</div></div>
       <div class="card"><h3>⚠️ Violations 24h</h3><div class="cc-stat">{violations_24h:,}</div><div class="cc-sub">Last hour: {violations_1h:,}</div></div>
