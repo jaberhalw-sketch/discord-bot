@@ -25996,6 +25996,958 @@ except Exception as e:
     try: print(f"NM Discord dashboard sync boot ignored: {e}")
     except Exception: pass
 
+
+# =====================================================================
+# NM V6 LIVE ECONOMY + CASINO + DASHBOARD SYNC FINAL
+# Purpose:
+# - One source of truth: guild_economy(guild_id,user_id)
+# - No legacy economy table, no MAX(balance), no cross-guild fallback
+# - Casino always deducts bet first. If all-in loses => balance becomes 0
+# - Dashboard Economy / Richest shows live Discord members only, with clear IDs
+# - Every dashboard economy action writes to same ledger used by Discord
+# - Adds cleanup page for fake/corrupted/huge balances
+# =====================================================================
+
+NM_LIVE_DEFAULT_MAX_BET = 250_000
+NM_LIVE_MAX_BET_PERCENT = 10
+NM_LIVE_CASINO_WINDOW_SECONDS = 10 * 60
+NM_LIVE_CASINO_WINDOW_TOTAL = 1_000_000
+NM_LIVE_SNOWFLAKE_MIN = 10**15
+NM_LIVE_BALANCE_WARN = 50_000_000
+NM_LIVE_LEDGER_TABLE = "nm_money_ledger_live_v6"
+NM_LIVE_CASINO_WINDOW_TABLE = "nm_casino_window_live_v6"
+
+
+def nm_live_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default or 0)
+
+
+def nm_live_now():
+    try:
+        return int(time.time())
+    except Exception:
+        return 0
+
+
+def nm_live_valid_discord_id(user_id):
+    uid = nm_live_int(user_id, 0)
+    return uid >= NM_LIVE_SNOWFLAKE_MIN
+
+
+def nm_live_gid(explicit=None):
+    if explicit:
+        return nm_live_int(explicit, 0)
+    try:
+        if request:
+            raw = request.args.get("guild_id") or request.form.get("guild_id") or session.get("dashboard_active_guild_id") or session.get("selected_guild_id")
+            if raw:
+                return nm_live_int(raw, 0)
+    except Exception:
+        pass
+    try:
+        if "nm_v5_find_runtime_guild_id" in globals():
+            gid = nm_live_int(nm_v5_find_runtime_guild_id(), 0)
+            if gid:
+                return gid
+    except Exception:
+        pass
+    try:
+        guilds = list(getattr(bot, "guilds", []) or [])
+        return int(guilds[0].id) if guilds else 0
+    except Exception:
+        return 0
+
+
+def nm_live_coin(guild_id=None):
+    gid = nm_live_gid(guild_id)
+    for fn in ("nm_v5_get_coin_name", "nm_get_coin_name", "nm_coin_name"):
+        try:
+            f = globals().get(fn)
+            if callable(f):
+                val = f(gid)
+                if val:
+                    return str(val)
+        except Exception:
+            pass
+    return globals().get("COIN_NAME", "NM Coin")
+
+
+def nm_live_fmt(amount, guild_id=None):
+    try:
+        return f"{int(amount):,} {nm_live_coin(guild_id)}"
+    except Exception:
+        return f"0 {nm_live_coin(guild_id)}"
+
+
+def nm_live_init_db():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_economy (
+                guild_id INTEGER,
+                user_id INTEGER,
+                balance INTEGER DEFAULT 0,
+                last_daily INTEGER DEFAULT 0,
+                last_boost_weekly INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_LIVE_LEDGER_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_id TEXT UNIQUE,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_name TEXT DEFAULT '',
+                actor_id INTEGER DEFAULT 0,
+                actor_name TEXT DEFAULT '',
+                amount INTEGER NOT NULL,
+                balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                source_type TEXT NOT NULL,
+                source_label TEXT DEFAULT '',
+                reason TEXT DEFAULT '',
+                reference_type TEXT DEFAULT '',
+                reference_id TEXT DEFAULT '',
+                related_user_id INTEGER DEFAULT 0,
+                channel_id INTEGER DEFAULT 0,
+                message_id INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_LIVE_CASINO_WINDOW_TABLE} (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_nm_live_guild_balance ON guild_economy(guild_id, balance DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_nm_live_ledger_guild_time ON {NM_LIVE_LEDGER_TABLE}(guild_id, created_at DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_nm_live_ledger_user_time ON {NM_LIVE_LEDGER_TABLE}(guild_id, user_id, created_at DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_nm_live_casino_window ON {NM_LIVE_CASINO_WINDOW_TABLE}(guild_id, user_id, created_at)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        try: print(f"NM live economy db init failed: {e}")
+        except Exception: pass
+
+
+def nm_live_member(guild_id, user_id):
+    try:
+        guild = bot.get_guild(int(guild_id))
+        if not guild:
+            return None
+        return guild.get_member(int(user_id))
+    except Exception:
+        return None
+
+
+def nm_live_member_name_plain(guild_id, user_id):
+    member = nm_live_member(guild_id, user_id)
+    if member:
+        try:
+            return str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
+        except Exception:
+            pass
+    return f"User {int(user_id)}"
+
+
+def nm_live_member_html(guild_id, user_id):
+    uid = nm_live_int(user_id, 0)
+    member = nm_live_member(guild_id, uid)
+    if not nm_live_valid_discord_id(uid):
+        return f"<div class='membercard'><span class='memberavatar blank'>!</span><div class='membermeta'><b>Invalid / Old Data</b><br><span class='muted small'>ID: <code>{uid}</code></span></div></div>"
+    if not member:
+        return f"<div class='membercard'><span class='memberavatar blank'>?</span><div class='membermeta'><b>User {uid}</b><br><span class='muted small'>ID: <code>{uid}</code> • not cached / left server</span></div></div>"
+    try:
+        avatar = html.escape(str(member.display_avatar.url))
+    except Exception:
+        avatar = ""
+    name = html.escape(str(getattr(member, "display_name", "") or getattr(member, "name", "") or uid))
+    username = html.escape(str(member))
+    roles_html = ""
+    try:
+        roles = [r for r in getattr(member, "roles", []) if getattr(r, "name", "@everyone") != "@everyone"]
+        roles = sorted(roles, key=lambda r: getattr(r, "position", 0), reverse=True)[:4]
+        roles_html = "".join(f"<span class='rolechip'>@{html.escape(str(r.name))}</span>" for r in roles)
+    except Exception:
+        roles_html = ""
+    avatar_html = f"<img class='memberavatar' src='{avatar}'>" if avatar else "<span class='memberavatar blank'>?</span>"
+    return f"<div class='membercard'>{avatar_html}<div class='membermeta'><b>{name}</b><br><span class='muted small'>{username} • ID: <code>{uid}</code></span><div class='memberroles'>{roles_html}</div></div></div>"
+
+
+def dashboard_member_identity_html(user_id, guild_id=0, include_id=True, include_roles=True, compact=False):
+    # Safe override: never blocks the Discord event loop with future.result().
+    gid = nm_live_gid(guild_id)
+    return nm_live_member_html(gid, user_id)
+
+
+def dashboard_member_name(user_id):
+    return nm_live_member_html(nm_live_gid(), user_id)
+
+
+def dashboard_member_name_in_guild(user_id, guild_id=0, include_id=True):
+    return nm_live_member_html(nm_live_gid(guild_id), user_id)
+
+
+def dashboard_get_member_in_guild_sync(guild_id, user_id, timeout=0.2):
+    # Cache only. Blocking fetches from inside bot loop caused heartbeat stalls.
+    return nm_live_member(guild_id, user_id)
+
+
+def dashboard_get_member_sync(user_id):
+    try:
+        for guild in getattr(bot, "guilds", []) or []:
+            m = guild.get_member(int(user_id))
+            if m:
+                return m
+    except Exception:
+        pass
+    return None
+
+
+def nm_live_ensure_balance(guild_id, user_id):
+    nm_live_init_db()
+    gid = nm_live_int(guild_id, 0)
+    uid = nm_live_int(user_id, 0)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly)
+        VALUES (?, ?, 0, 0, 0)
+    """, (gid, uid))
+    conn.commit()
+    conn.close()
+
+
+def nm_live_get_balance(guild_id, user_id):
+    gid = nm_live_int(guild_id, 0)
+    uid = nm_live_int(user_id, 0)
+    nm_live_ensure_balance(gid, uid)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+    row = cur.fetchone()
+    conn.close()
+    return int(row[0] or 0) if row else 0
+
+
+def nm_live_ledger(guild_id, user_id, amount, source_type="system", **kwargs):
+    import uuid
+    gid = nm_live_int(guild_id, 0)
+    uid = nm_live_int(user_id, 0)
+    amount = nm_live_int(amount, 0)
+    if not gid or not uid:
+        return {"ok": False, "error": "missing_guild_or_user", "balance": 0}
+    nm_live_init_db()
+    conn = db_connect()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (gid, uid))
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        before = int((cur.fetchone() or [0])[0] or 0)
+        after = before + amount
+        if after < 0:
+            conn.rollback(); conn.close()
+            return {"ok": False, "error": "insufficient_funds", "balance": before, "before": before, "after": before}
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (after, gid, uid))
+        tx_id = uuid.uuid4().hex
+        cur.execute(f"""
+            INSERT INTO {NM_LIVE_LEDGER_TABLE}
+            (tx_id, guild_id, user_id, user_name, actor_id, actor_name, amount, balance_before, balance_after,
+             source_type, source_label, reason, reference_type, reference_id, related_user_id, channel_id, message_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tx_id, gid, uid, str(kwargs.get("user_name", "") or "")[:120],
+            nm_live_int(kwargs.get("actor_id", 0), 0), str(kwargs.get("actor_name", "") or "")[:120],
+            amount, before, after, str(source_type or "system")[:80],
+            str(kwargs.get("source_label", "") or "")[:120], str(kwargs.get("reason", "") or "")[:500],
+            str(kwargs.get("reference_type", "") or "")[:80], str(kwargs.get("reference_id", "") or "")[:120],
+            nm_live_int(kwargs.get("related_user_id", 0), 0), nm_live_int(kwargs.get("channel_id", 0), 0),
+            nm_live_int(kwargs.get("message_id", 0), 0), nm_live_now()
+        ))
+        conn.commit(); conn.close()
+        # mirror to old audit table when available, but never use it as source of truth
+        try:
+            money_audit_record(
+                guild_id=gid, user_id=uid, amount=amount, new_balance=after,
+                source_type=str(source_type or "system"),
+                admin_id=nm_live_int(kwargs.get("actor_id", 0), 0),
+                admin_name=str(kwargs.get("actor_name", "") or ""),
+                details=str(kwargs.get("reason", "") or ""),
+                batch_id=str(kwargs.get("reference_id", "") or "")
+            )
+        except Exception:
+            pass
+        return {"ok": True, "tx_id": tx_id, "before": before, "after": after, "balance": after, "amount": amount}
+    except Exception as e:
+        try: conn.rollback(); conn.close()
+        except Exception: pass
+        return {"ok": False, "error": str(e), "balance": nm_live_get_balance(gid, uid)}
+
+
+def nm_live_credit(guild_id, user_id, amount, source_type="credit", **kwargs):
+    return nm_live_ledger(guild_id, user_id, abs(nm_live_int(amount, 0)), source_type, **kwargs)
+
+
+def nm_live_debit(guild_id, user_id, amount, source_type="debit", **kwargs):
+    return nm_live_ledger(guild_id, user_id, -abs(nm_live_int(amount, 0)), source_type, **kwargs)
+
+
+def nm_live_set_balance(guild_id, user_id, amount, source_type="set_balance", **kwargs):
+    current = nm_live_get_balance(guild_id, user_id)
+    return nm_live_ledger(guild_id, user_id, nm_live_int(amount, 0) - current, source_type, **kwargs)
+
+
+def nm_live_top_balances(guild_id, limit=10, members_only=True):
+    gid = nm_live_int(guild_id, 0)
+    limit = max(1, min(nm_live_int(limit, 10), 100))
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, balance, last_daily
+        FROM guild_economy
+        WHERE guild_id=? AND user_id>=?
+        ORDER BY balance DESC
+        LIMIT 500
+    """, (gid, NM_LIVE_SNOWFLAKE_MIN))
+    raw = cur.fetchall()
+    conn.close()
+    guild = bot.get_guild(gid)
+    out = []
+    for uid, bal, last_daily in raw:
+        uid = int(uid); bal = int(bal or 0)
+        if members_only and guild:
+            if not guild.get_member(uid):
+                continue
+        out.append((uid, bal, int(last_daily or 0)))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def get_balance(user_id):
+    return nm_live_get_balance(nm_live_gid(), user_id)
+
+
+def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    gid = nm_live_gid(guild_id)
+    res = nm_live_credit(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
+    return int(res.get("balance", nm_live_get_balance(gid, user_id)))
+
+
+def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    gid = nm_live_gid(guild_id)
+    res = nm_live_debit(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
+    return bool(res.get("ok")), int(res.get("balance", nm_live_get_balance(gid, user_id)))
+
+
+def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    gid = nm_live_gid(guild_id)
+    res = nm_live_set_balance(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
+    return int(res.get("balance", nm_live_get_balance(gid, user_id)))
+
+
+def get_top_money(limit=10):
+    return [(uid, bal) for uid, bal, _ in nm_live_top_balances(nm_live_gid(), limit, members_only=True)]
+
+
+def get_money_rank(user_id):
+    gid = nm_live_gid()
+    bal = nm_live_get_balance(gid, user_id)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) + 1 FROM guild_economy WHERE guild_id=? AND user_id>=? AND balance>?", (gid, NM_LIVE_SNOWFLAKE_MIN, bal))
+    rank = int((cur.fetchone() or [1])[0] or 1)
+    conn.close()
+    return rank
+
+
+def economy_status_text(user_id):
+    bal = get_balance(user_id)
+    return bal, f"#{get_money_rank(user_id)}"
+
+
+def dashboard_latest_economy_rows(limit=25):
+    gid = nm_live_gid()
+    rows = []
+    for uid, bal, last_daily in nm_live_top_balances(gid, limit, members_only=True):
+        rows.append({
+            "user_id": uid,
+            "name": nm_live_member_html(gid, uid),
+            "balance": bal,
+            "last_daily": last_daily,
+            "warning": "huge" if int(bal) >= NM_LIVE_BALANCE_WARN else "",
+        })
+    return rows
+
+
+# V5/V6 API compatibility
+def nm_v5_eco_get_balance(guild_id, user_id):
+    return nm_live_get_balance(guild_id, user_id)
+
+def nm_v5_eco_set_balance(guild_id, user_id, new_balance, **kwargs):
+    res = nm_live_set_balance(guild_id, user_id, new_balance, kwargs.get("source_type", "v5_set"), **kwargs)
+    return int(res.get("balance", nm_live_get_balance(guild_id, user_id)))
+
+def nm_v5_eco_credit(guild_id, user_id, amount, source_type="v5_credit", **kwargs):
+    return nm_live_credit(guild_id, user_id, amount, source_type, **kwargs)
+
+def nm_v5_eco_debit(guild_id, user_id, amount, source_type="v5_debit", **kwargs):
+    return nm_live_debit(guild_id, user_id, amount, source_type, **kwargs)
+
+def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="v5_change", **kwargs):
+    return nm_live_ledger(guild_id, user_id, amount, source_type, **kwargs)
+
+def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, **kwargs):
+    amount = abs(nm_live_int(amount, 0))
+    out = nm_live_debit(guild_id, from_user_id, amount, "transfer_out", related_user_id=to_user_id, **kwargs)
+    if not out.get("ok"):
+        return out
+    inc = nm_live_credit(guild_id, to_user_id, amount, "transfer_in", related_user_id=from_user_id, reference_id=out.get("tx_id", ""), **kwargs)
+    return {"ok": True, "out": out, "in": inc}
+
+def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome, multiplier=2, **kwargs):
+    # Kept for old callers, but uses debit-first semantics.
+    return nm_live_play_casino(guild_id, user_id, kwargs.get("user_name", ""), game, bet, forced_outcome=outcome, forced_multiplier=multiplier, **kwargs)
+
+
+def parse_bet_amount(value):
+    s = str(value or "").strip().lower().replace(",", "")
+    if s in {"all", "الكل", "فل"}:
+        return "all"
+    mult = 1
+    if s.endswith("k"):
+        mult = 1000; s = s[:-1]
+    elif s.endswith("m"):
+        mult = 1_000_000; s = s[:-1]
+    try:
+        return int(float(s) * mult)
+    except Exception:
+        return None
+
+
+def nm_live_casino_limit(guild_id, user_id):
+    bal = nm_live_get_balance(guild_id, user_id)
+    if bal <= 0:
+        return 0
+    by_percent = max(1, bal * NM_LIVE_MAX_BET_PERCENT // 100)
+    return max(0, min(NM_LIVE_DEFAULT_MAX_BET, by_percent, bal))
+
+
+def nm_live_casino_window_total(guild_id, user_id):
+    nm_live_init_db()
+    now = nm_live_now()
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(f"DELETE FROM {NM_LIVE_CASINO_WINDOW_TABLE} WHERE created_at < ?", (now - NM_LIVE_CASINO_WINDOW_SECONDS,))
+    cur.execute(f"SELECT COALESCE(SUM(amount),0) FROM {NM_LIVE_CASINO_WINDOW_TABLE} WHERE guild_id=? AND user_id=?", (int(guild_id), int(user_id)))
+    total = int((cur.fetchone() or [0])[0] or 0)
+    conn.commit(); conn.close()
+    return total
+
+
+def nm_live_validate_bet(guild_id, user_id, bet_raw):
+    bal = nm_live_get_balance(guild_id, user_id)
+    if bet_raw == "all":
+        bet = nm_live_casino_limit(guild_id, user_id)
+    else:
+        bet = nm_live_int(bet_raw, -1)
+    if bet <= 0:
+        return False, 0, "المبلغ غير صحيح أو رصيدك صفر."
+    if bal < bet:
+        return False, bet, f"رصيدك ما يكفي. رصيدك الحالي: {bal:,} {nm_live_coin(guild_id)}"
+    max_bet = nm_live_casino_limit(guild_id, user_id)
+    if bet > max_bet:
+        return False, bet, f"الرهان كبير جدًا. أقصى رهان لك الآن: {max_bet:,} {nm_live_coin(guild_id)}"
+    if nm_live_casino_window_total(guild_id, user_id) + bet > NM_LIVE_CASINO_WINDOW_TOTAL:
+        return False, bet, f"وصلت حد القمار خلال 10 دقائق: {NM_LIVE_CASINO_WINDOW_TOTAL:,} {nm_live_coin(guild_id)}"
+    return True, bet, ""
+
+
+def nm_live_casino_window_add(guild_id, user_id, bet):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(f"INSERT INTO {NM_LIVE_CASINO_WINDOW_TABLE} (guild_id, user_id, amount, created_at) VALUES (?, ?, ?, ?)", (int(guild_id), int(user_id), int(bet), nm_live_now()))
+    conn.commit(); conn.close()
+
+
+def nm_live_play_casino(guild_id, user_id, user_name, game, bet_value, **kwargs):
+    gid = nm_live_int(guild_id, 0)
+    uid = nm_live_int(user_id, 0)
+    bet_raw = parse_bet_amount(bet_value)
+    ok, bet, err = nm_live_validate_bet(gid, uid, bet_raw)
+    if not ok:
+        return {"ok": False, "error": err, "bet": bet, "balance": nm_live_get_balance(gid, uid)}
+
+    debit_tx = nm_live_debit(
+        gid, uid, bet, "casino_bet",
+        user_name=user_name,
+        source_label=str(game),
+        reason=f"Casino bet: {game}",
+        channel_id=kwargs.get("channel_id", 0),
+        message_id=kwargs.get("message_id", 0),
+    )
+    if not debit_tx.get("ok"):
+        return {"ok": False, "error": "رصيدك ما يكفي.", "balance": nm_live_get_balance(gid, uid)}
+
+    nm_live_casino_window_add(gid, uid, bet)
+
+    import random as _r
+    game_key = str(game or "luck").lower()
+    outcome = "lose"
+    payout = 0
+    detail = ""
+
+    forced = kwargs.get("forced_outcome")
+    if forced in {"win", "lose", "draw"}:
+        outcome = forced
+        mult = float(kwargs.get("forced_multiplier", 2) or 2)
+        payout = bet if outcome == "draw" else int(bet * mult) if outcome == "win" else 0
+        detail = f"Forced result: {outcome}"
+    elif game_key in {"luck", "حظ"}:
+        if _r.random() < 0.48:
+            outcome = "win"; payout = bet * 2; detail = "فزت"
+        else:
+            detail = "خسرت"
+    elif game_key in {"double", "دبل"}:
+        if _r.random() < 0.45:
+            outcome = "win"; payout = bet * 2; detail = "دبل ناجح"
+        else:
+            detail = "دبل خاسر"
+    elif game_key in {"flip", "وجه"}:
+        if _r.random() < 0.50:
+            outcome = "win"; payout = bet * 2; detail = "الوجه معك"
+        else:
+            detail = "الوجه ضدك"
+    elif game_key in {"slot", "سلوت"}:
+        icons = ["🍒", "🍋", "💎", "7️⃣", "⭐"]
+        roll = [_r.choice(icons) for _ in range(3)]
+        detail = " ".join(roll)
+        if len(set(roll)) == 1:
+            outcome = "win"; payout = bet * 5
+        elif len(set(roll)) == 2:
+            outcome = "win"; payout = bet * 2
+    elif game_key in {"blackjack", "bj", "بلاكجاك"}:
+        player = _r.randint(16, 22)
+        dealer = _r.randint(16, 22)
+        detail = f"أنت {player} | الديلر {dealer}"
+        if player > 21:
+            outcome = "lose"; payout = 0
+        elif dealer > 21 or player > dealer:
+            outcome = "win"; payout = bet * 2
+        elif player == dealer:
+            outcome = "draw"; payout = bet
+        else:
+            outcome = "lose"; payout = 0
+    else:
+        if _r.random() < 0.48:
+            outcome = "win"; payout = bet * 2; detail = "فزت"
+        else:
+            detail = "خسرت"
+
+    payout_tx = None
+    if payout > 0:
+        payout_tx = nm_live_credit(
+            gid, uid, payout, "casino_payout",
+            user_name=user_name,
+            source_label=str(game),
+            reason=f"Casino {outcome}: {game}",
+            reference_id=debit_tx.get("tx_id", ""),
+            channel_id=kwargs.get("channel_id", 0),
+            message_id=kwargs.get("message_id", 0),
+        )
+
+    final_balance = nm_live_get_balance(gid, uid)
+    return {
+        "ok": True,
+        "game": game,
+        "bet": bet,
+        "outcome": outcome,
+        "payout": payout,
+        "detail": detail,
+        "balance": final_balance,
+        "delta": final_balance - int(debit_tx.get("before", final_balance)),
+        "bet_tx": debit_tx.get("tx_id"),
+        "payout_tx": payout_tx.get("tx_id") if payout_tx else "",
+    }
+
+
+async def nm_live_send_casino_result(ctx, game, amount):
+    gid = int(ctx.guild.id)
+    res = nm_live_play_casino(gid, ctx.author.id, getattr(ctx.author, "display_name", str(ctx.author)), game, amount, channel_id=ctx.channel.id, message_id=ctx.message.id)
+    coin = nm_live_coin(gid)
+    if not res.get("ok"):
+        await ctx.reply(f"🛑 {res.get('error', 'تعذر تنفيذ اللعبة')}", mention_author=False)
+        return
+    title = "🎉 ربحت" if res["outcome"] == "win" else "🤝 تعادل" if res["outcome"] == "draw" else "💀 خسرت"
+    await ctx.reply(
+        f"{title} **{int(res['bet']):,}** {coin}\n"
+        f"{html.escape(str(res.get('detail','')))}\n"
+        f"رصيدك: **{int(res['balance']):,}** {coin}",
+        mention_author=False
+    )
+
+
+async def nm_live_luck_text(ctx, amount: str):
+    await nm_live_send_casino_result(ctx, "luck", amount)
+
+async def nm_live_double_text(ctx, amount: str):
+    await nm_live_send_casino_result(ctx, "double", amount)
+
+async def nm_live_slot_text(ctx, amount: str):
+    await nm_live_send_casino_result(ctx, "slot", amount)
+
+async def nm_live_flip_text(ctx, amount: str, guess: str = ""):
+    await nm_live_send_casino_result(ctx, "flip", amount)
+
+async def nm_live_blackjack_text(ctx, amount: str):
+    await nm_live_send_casino_result(ctx, "blackjack", amount)
+
+
+def nm_live_install_text_casino_commands():
+    try:
+        for name in ["حظ", "luck", "دبل", "double", "سلوت", "slot", "وجه", "flip", "bj", "blackjack", "بلاكجاك"]:
+            try:
+                bot.remove_command(name)
+            except Exception:
+                pass
+        bot.add_command(commands.Command(nm_live_luck_text, name="حظ", aliases=["luck"]))
+        bot.add_command(commands.Command(nm_live_double_text, name="دبل", aliases=["double"]))
+        bot.add_command(commands.Command(nm_live_slot_text, name="سلوت", aliases=["slot"]))
+        bot.add_command(commands.Command(nm_live_flip_text, name="وجه", aliases=["flip"]))
+        bot.add_command(commands.Command(nm_live_blackjack_text, name="بلاكجاك", aliases=["bj", "blackjack"]))
+        print("✅ NM live text casino commands installed")
+    except Exception as e:
+        try: print(f"❌ NM live text casino install failed: {e}")
+        except Exception: pass
+
+
+def nm_live_install_slash_casino_commands():
+    # Do not mutate Command.callback (discord.py blocks it). Remove and re-add clean commands.
+    try:
+        async def slash_luck(interaction: discord.Interaction, amount: str):
+            await nm_live_slash_casino(interaction, "luck", amount)
+        async def slash_double(interaction: discord.Interaction, amount: str):
+            await nm_live_slash_casino(interaction, "double", amount)
+        async def slash_slot(interaction: discord.Interaction, amount: str):
+            await nm_live_slash_casino(interaction, "slot", amount)
+        async def slash_flip(interaction: discord.Interaction, amount: str):
+            await nm_live_slash_casino(interaction, "flip", amount)
+        async def slash_blackjack(interaction: discord.Interaction, amount: str):
+            await nm_live_slash_casino(interaction, "blackjack", amount)
+
+        async def add_one(name, desc, cb):
+            try:
+                bot.tree.remove_command(name, type=discord.AppCommandType.chat_input)
+            except Exception:
+                pass
+            try:
+                bot.tree.add_command(app_commands.Command(name=name, description=desc, callback=cb))
+            except Exception as e:
+                try: print(f"NM live slash add skipped {name}: {e}")
+                except Exception: pass
+
+        # async wrapper not needed here; execute synchronously with normal calls
+        for name in ["luck", "double", "slot", "flip", "blackjack"]:
+            try:
+                bot.tree.remove_command(name, type=discord.AppCommandType.chat_input)
+            except Exception:
+                pass
+        try: bot.tree.add_command(app_commands.Command(name="luck", description="Play luck casino", callback=slash_luck))
+        except Exception as e: print(f"NM live slash add skipped luck: {e}")
+        try: bot.tree.add_command(app_commands.Command(name="double", description="Play double casino", callback=slash_double))
+        except Exception as e: print(f"NM live slash add skipped double: {e}")
+        try: bot.tree.add_command(app_commands.Command(name="slot", description="Play slot casino", callback=slash_slot))
+        except Exception as e: print(f"NM live slash add skipped slot: {e}")
+        try: bot.tree.add_command(app_commands.Command(name="flip", description="Play coin flip casino", callback=slash_flip))
+        except Exception as e: print(f"NM live slash add skipped flip: {e}")
+        try: bot.tree.add_command(app_commands.Command(name="blackjack", description="Play blackjack casino", callback=slash_blackjack))
+        except Exception as e: print(f"NM live slash add skipped blackjack: {e}")
+        print("✅ NM live slash casino commands installed")
+    except Exception as e:
+        try: print(f"❌ NM live slash casino install failed: {e}")
+        except Exception: pass
+
+
+async def nm_live_slash_casino(interaction, game, amount):
+    gid = int(interaction.guild.id) if interaction and interaction.guild else 0
+    uid = int(interaction.user.id)
+    res = nm_live_play_casino(gid, uid, getattr(interaction.user, "display_name", str(interaction.user)), game, amount, channel_id=getattr(getattr(interaction, "channel", None), "id", 0), message_id=0)
+    coin = nm_live_coin(gid)
+    if not res.get("ok"):
+        await interaction.response.send_message(f"🛑 {res.get('error', 'تعذر تنفيذ اللعبة')}", ephemeral=True)
+        return
+    title = "🎉 ربحت" if res["outcome"] == "win" else "🤝 تعادل" if res["outcome"] == "draw" else "💀 خسرت"
+    await interaction.response.send_message(f"{title} **{int(res['bet']):,}** {coin}\n{res.get('detail','')}\nرصيدك: **{int(res['balance']):,}** {coin}")
+
+
+async def nm_live_balance_cmd(ctx, member: discord.Member = None):
+    member = member or ctx.author
+    gid = int(ctx.guild.id)
+    bal = nm_live_get_balance(gid, member.id)
+    await ctx.reply(f"💰 رصيد {member.mention}: **{bal:,}** {nm_live_coin(gid)}", mention_author=False)
+
+
+async def nm_live_richest_cmd(ctx):
+    gid = int(ctx.guild.id)
+    rows = nm_live_top_balances(gid, 10, members_only=True)
+    if not rows:
+        await ctx.reply("ما فيه بيانات اقتصاد للحين.", mention_author=False)
+        return
+    coin = nm_live_coin(gid)
+    lines = []
+    for i, (uid, bal, _last) in enumerate(rows, 1):
+        member = nm_live_member(gid, uid)
+        label = member.mention if member else f"`{uid}`"
+        warn = " ⚠️" if bal >= NM_LIVE_BALANCE_WARN else ""
+        lines.append(f"**#{i}** {label} — **{bal:,}** {coin}{warn}")
+    await ctx.reply("🏆 **أغنى الأعضاء**\n" + "\n".join(lines), mention_author=False)
+
+
+def nm_live_install_core_text_commands():
+    try:
+        for name in ["رصيدي", "رصيد", "balance", "الغني", "اغنى", "rich", "topmoney"]:
+            try: bot.remove_command(name)
+            except Exception: pass
+        bot.add_command(commands.Command(nm_live_balance_cmd, name="رصيدي", aliases=["رصيد", "balance"]))
+        bot.add_command(commands.Command(nm_live_richest_cmd, name="الغني", aliases=["اغنى", "rich", "topmoney"]))
+        print("✅ NM live economy text commands installed")
+    except Exception as e:
+        try: print(f"❌ NM live economy command install failed: {e}")
+        except Exception: pass
+
+
+@app.route("/dashboard/economy-cleanup", methods=["GET", "POST"])
+def nm_live_economy_cleanup_page():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_live_gid()
+    msg = ""
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+        cap = nm_live_int(request.form.get("cap") or NM_LIVE_BALANCE_WARN, NM_LIVE_BALANCE_WARN)
+        confirm = (request.form.get("confirm") or "").strip().upper()
+        if confirm != "CONFIRM":
+            msg = "اكتب CONFIRM عشان تنفذ التنظيف."
+        else:
+            conn = db_connect()
+            cur = conn.cursor()
+            if action == "delete_invalid":
+                cur.execute("DELETE FROM guild_economy WHERE guild_id=? AND user_id<?", (gid, NM_LIVE_SNOWFLAKE_MIN))
+                msg = f"Deleted invalid old rows: {cur.rowcount}"
+            elif action == "cap_huge":
+                cur.execute("SELECT user_id, balance FROM guild_economy WHERE guild_id=? AND balance>?", (gid, cap))
+                rows = cur.fetchall()
+                for uid, old in rows:
+                    nm_live_set_balance(gid, int(uid), cap, "dashboard_cleanup_cap", reason=f"Cleanup cap from {old} to {cap}")
+                msg = f"Capped huge balances above {cap:,}: {len(rows)} users"
+            elif action == "zero_left":
+                guild = bot.get_guild(gid)
+                if guild:
+                    member_ids = {int(m.id) for m in guild.members if not m.bot}
+                    cur.execute("SELECT user_id FROM guild_economy WHERE guild_id=? AND user_id>=?", (gid, NM_LIVE_SNOWFLAKE_MIN))
+                    rows = [int(r[0]) for r in cur.fetchall()]
+                    count = 0
+                    for uid in rows:
+                        if uid not in member_ids:
+                            nm_live_set_balance(gid, uid, 0, "dashboard_cleanup_left_server", reason="Cleanup user not in server")
+                            count += 1
+                    msg = f"Zeroed users not in server cache: {count}"
+                else:
+                    msg = "Guild not loaded."
+            conn.commit(); conn.close()
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(balance),0) FROM guild_economy WHERE guild_id=? AND user_id<?", (gid, NM_LIVE_SNOWFLAKE_MIN))
+    invalid_count, invalid_total = cur.fetchone()
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(balance),0) FROM guild_economy WHERE guild_id=? AND balance>=?", (gid, NM_LIVE_BALANCE_WARN))
+    huge_count, huge_total = cur.fetchone()
+    cur.execute("SELECT user_id, balance FROM guild_economy WHERE guild_id=? ORDER BY balance DESC LIMIT 50", (gid,))
+    rows = cur.fetchall()
+    conn.close()
+    rows_html = ""
+    for uid, bal in rows:
+        uid = int(uid); bal = int(bal or 0)
+        status = []
+        if not nm_live_valid_discord_id(uid): status.append("INVALID ID")
+        if bal >= NM_LIVE_BALANCE_WARN: status.append("HUGE")
+        if bot.get_guild(gid) and not nm_live_member(gid, uid): status.append("NOT IN SERVER")
+        rows_html += f"<tr><td>{nm_live_member_html(gid, uid)}</td><td>{nm_live_fmt(bal, gid)}</td><td>{', '.join(status) or 'OK'}</td></tr>"
+    body = f"""
+    {dashboard_toast_html()}
+    <div class='grid3'>
+      <div class='card'><h3>Invalid Old Rows</h3><div class='cc-stat'>{int(invalid_count or 0):,}</div><p>{nm_live_fmt(invalid_total or 0, gid)}</p></div>
+      <div class='card'><h3>Huge Balances</h3><div class='cc-stat'>{int(huge_count or 0):,}</div><p>{nm_live_fmt(huge_total or 0, gid)}</p></div>
+      <div class='card'><h3>Message</h3><p>{html.escape(msg or 'Ready')}</p></div>
+    </div>
+    <div class='grid3'>
+      <form class='card danger' method='post'><h3>Delete Invalid IDs</h3><input type='hidden' name='action' value='delete_invalid'><input name='confirm' placeholder='CONFIRM'><button class='btn red'>Delete invalid rows</button></form>
+      <form class='card danger' method='post'><h3>Cap Huge Balances</h3><input type='hidden' name='action' value='cap_huge'><label>Cap</label><input name='cap' value='{NM_LIVE_BALANCE_WARN}'><input name='confirm' placeholder='CONFIRM'><button class='btn orange'>Cap balances</button></form>
+      <form class='card danger' method='post'><h3>Zero Users Not In Server</h3><input type='hidden' name='action' value='zero_left'><input name='confirm' placeholder='CONFIRM'><button class='btn red'>Zero left users</button></form>
+    </div>
+    <div class='card'><h3>Top Raw Rows Scan</h3><table class='table'><tr><th>User</th><th>Balance</th><th>Status</th></tr>{rows_html}</table></div>
+    """
+    return render_dashboard_page("Economy Cleanup", body)
+
+
+def nm_live_dashboard_economy_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_live_gid()
+    rows = dashboard_latest_economy_rows(50)
+    table = ""
+    for idx, r in enumerate(rows, 1):
+        warn = " <span class='badge red'>Huge</span>" if r.get("warning") else ""
+        table += f"<tr><td>#{idx}</td><td>{r['name']}{warn}</td><td>{nm_live_fmt(r['balance'], gid)}</td><td>{('<t:'+str(r['last_daily'])+':R>') if r['last_daily'] else 'Never'}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={gid}&user_id={int(r['user_id'])}'>Trace</a></td></tr>"
+    table = table or "<tr><td colspan='5'>No live member economy data.</td></tr>"
+    body = f"""
+    {dashboard_toast_html()}
+    <div class='grid3'>
+      <form class='card' method='post' action='/dashboard/economy'><h3>➕ Add Money</h3><input type='hidden' name='guild_id' value='{gid}'><label>User ID</label><input name='user_id' required><label>Amount</label><input name='amount' required><input type='hidden' name='action' value='add'><button class='btn green'>Add</button></form>
+      <form class='card' method='post' action='/dashboard/economy'><h3>➖ Remove Money</h3><input type='hidden' name='guild_id' value='{gid}'><label>User ID</label><input name='user_id' required><label>Amount</label><input name='amount' required><input type='hidden' name='action' value='remove'><button class='btn red'>Remove</button></form>
+      <form class='card' method='post' action='/dashboard/economy'><h3>🎯 Set Balance</h3><input type='hidden' name='guild_id' value='{gid}'><label>User ID</label><input name='user_id' required><label>New Balance</label><input name='amount' required><input type='hidden' name='action' value='set'><button class='btn primary'>Set</button></form>
+    </div>
+    <div class='card'>
+      <a class='btn' href='/dashboard/money-tracker?guild_id={gid}'>Money Tracker</a>
+      <a class='btn' href='/dashboard/financial-audit-pro?guild_id={gid}'>Financial Audit Pro</a>
+      <a class='btn red' href='/dashboard/economy-cleanup?guild_id={gid}'>Economy Cleanup</a>
+      <a class='btn' href='/dashboard/casino-guard-status?guild_id={gid}'>Casino Guard</a>
+    </div>
+    <div class='card'><h3>Live Discord Member Economy</h3><p class='muted small'>This table ignores invalid old rows like User 650 and only shows this guild's member economy.</p><table class='table'><tr><th>Rank</th><th>User</th><th>Balance</th><th>Last Salary</th><th>Trace</th></tr>{table}</table></div>
+    """
+    return render_dashboard_page("Economy", body)
+
+
+def nm_live_dashboard_economy_action():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_live_gid()
+    try:
+        action = request.form.get("action", "add")
+        amount = parse_int_field(request.form.get("amount", "0"), 0, 0)
+        admin_user = session.get("discord_user") or {}
+        admin_id = nm_live_int(admin_user.get("id", 0), 0)
+        admin_name = str(admin_user.get("username", "Dashboard Owner"))
+        if action in {"bulk_add", "bulk_remove"}:
+            msg = "Bulk actions disabled in live economy patch. Use cleanup page or targeted actions to protect the economy."
+        else:
+            user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
+            if not nm_live_valid_discord_id(user_id):
+                msg = "Invalid Discord user ID. رفضت العملية عشان ما تنشئ User 650 وأرقام وهمية."
+            elif action == "add":
+                res = nm_live_credit(gid, user_id, amount, "dashboard_admin_add", actor_id=admin_id, actor_name=admin_name, reason="Dashboard manual add")
+                msg = f"Added {nm_live_fmt(amount, gid)} to {user_id}. New balance: {nm_live_fmt(res.get('balance', 0), gid)}"
+            elif action == "remove":
+                res = nm_live_debit(gid, user_id, amount, "dashboard_admin_remove", actor_id=admin_id, actor_name=admin_name, reason="Dashboard manual remove")
+                msg = f"Removed {nm_live_fmt(amount, gid)} from {user_id}. New balance: {nm_live_fmt(res.get('balance', 0), gid)}" if res.get("ok") else f"Not enough balance. Current: {nm_live_fmt(res.get('balance', 0), gid)}"
+            elif action == "set":
+                res = nm_live_set_balance(gid, user_id, amount, "dashboard_set", actor_id=admin_id, actor_name=admin_name, reason="Dashboard manual set")
+                msg = f"Set {user_id} balance to {nm_live_fmt(res.get('balance', 0), gid)}"
+            else:
+                msg = "Unknown action."
+    except Exception as e:
+        msg = f"Economy action failed: {e}"
+    return redirect(f"/dashboard/economy?guild_id={gid}&msg=" + urllib.parse.quote(str(msg)))
+
+
+def nm_live_money_tracker_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_live_gid()
+    user_id_raw = (request.args.get("user_id") or "").strip()
+    source = (request.args.get("source") or "").strip()
+    params = [gid]
+    q = f"SELECT * FROM {NM_LIVE_LEDGER_TABLE} WHERE guild_id=?"
+    if user_id_raw.isdigit():
+        q += " AND user_id=?"; params.append(int(user_id_raw))
+    if source:
+        q += " AND source_type LIKE ?"; params.append(f"%{source}%")
+    q += " ORDER BY id DESC LIMIT 300"
+    nm_live_init_db()
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute(q, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    rows_html = ""
+    for r in rows:
+        # tuple indexes based on ledger schema
+        rid, tx_id, rgid, uid, uname, actor_id, actor_name, amount, before, after, source_type, source_label, reason, ref_type, ref_id, related_uid, channel_id, message_id, created_at = r
+        rows_html += f"<tr><td><code>{html.escape(str(tx_id)[:10])}</code><br><span class='muted small'>{created_at}</span></td><td>{nm_live_member_html(gid, uid)}</td><td>{nm_live_fmt(amount, gid)}</td><td>{nm_live_fmt(before, gid)} → {nm_live_fmt(after, gid)}</td><td><b>{html.escape(str(source_type))}</b><br><span class='muted small'>{html.escape(str(source_label or ''))}</span></td><td>{html.escape(str(reason or ''))}<br><span class='muted small'>Actor: {html.escape(str(actor_name or actor_id or '-'))}</span></td></tr>"
+    rows_html = rows_html or "<tr><td colspan='6'>No ledger rows yet.</td></tr>"
+    body = f"""
+    <div class='card'>
+      <form method='get'>
+        <input type='hidden' name='guild_id' value='{gid}'>
+        <label>User ID</label><input name='user_id' value='{html.escape(user_id_raw)}'>
+        <label>Source</label><input name='source' value='{html.escape(source)}' placeholder='casino / dashboard / salary'>
+        <button class='btn primary'>Filter</button>
+      </form>
+    </div>
+    <div class='card'><h3>Live Money Ledger</h3><table class='table'><tr><th>TX</th><th>User</th><th>Amount</th><th>Before → After</th><th>Source</th><th>Reason / Actor</th></tr>{rows_html}</table></div>
+    """
+    return render_dashboard_page("Money Tracker", body)
+
+
+def nm_live_casino_guard_status():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_live_gid()
+    body = f"""
+    <div class='grid3'>
+      <div class='card'><h3>Debit First</h3><div class='cc-stat' style='color:#22c55e'>ON</div><p>If user bets all and loses, balance becomes 0.</p></div>
+      <div class='card'><h3>Max Bet</h3><div class='cc-stat'>{NM_LIVE_DEFAULT_MAX_BET:,}</div><p>{NM_LIVE_MAX_BET_PERCENT}% of balance, whichever is lower.</p></div>
+      <div class='card'><h3>10m Window</h3><div class='cc-stat'>{NM_LIVE_CASINO_WINDOW_TOTAL:,}</div><p>Prevents economy explosion.</p></div>
+    </div>
+    <div class='card'><a class='btn' href='/dashboard/casino-allin-loss-test?guild_id={gid}'>Run All-In Loss Test</a> <a class='btn' href='/dashboard/money-tracker?guild_id={gid}&source=casino'>Casino Ledger</a></div>
+    """
+    return render_dashboard_page("Casino Guard Status", body)
+
+
+def nm_live_register_dashboard_overrides():
+    try:
+        app.view_functions["dashboard_economy_page"] = nm_live_dashboard_economy_page
+    except Exception:
+        pass
+    try:
+        app.view_functions["dashboard_economy_action"] = nm_live_dashboard_economy_action
+    except Exception:
+        pass
+    try:
+        app.view_functions["nm_v6_money_tracker_page"] = nm_live_money_tracker_page
+    except Exception:
+        pass
+    try:
+        app.view_functions["nm_v6_casino_guard_status_page"] = nm_live_casino_guard_status
+    except Exception:
+        pass
+
+
+try:
+    nm_live_init_db()
+    nm_live_install_text_casino_commands()
+    nm_live_install_core_text_commands()
+    nm_live_install_slash_casino_commands()
+    nm_live_register_dashboard_overrides()
+    print("✅ NM V6 LIVE economy/casino/dashboard sync FINAL active: one guild ledger, debit-first casino, live member dashboard, cleanup tools")
+except Exception as e:
+    try: print(f"❌ NM V6 LIVE economy/casino/dashboard sync FINAL failed: {e}")
+    except Exception: pass
+
+
 keep_alive()
 
 while True:
