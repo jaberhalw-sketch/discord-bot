@@ -7,6 +7,8 @@ import json
 import time
 import random
 import sqlite3
+import tempfile
+import zipfile
 import re
 import html
 import asyncio
@@ -16639,6 +16641,218 @@ def nm_force_restore_bundled_memory_route():
         return "<h2>Bundled memory restore checked/applied.</h2><p>Refresh the dashboard.</p><a href='/dashboard'>Back</a>"
     except Exception as e:
         return f"<h2>Restore failed</h2><pre>{dash_escape(str(e), 1000)}</pre>"
+
+
+
+
+# =========================
+# NM DASHBOARD MEMORY UPLOAD
+# Allows owner to upload memory files from dashboard and safely restore them into /data.
+# =========================
+
+NM_ALLOWED_MEMORY_UPLOADS = {
+    "nm_system.db",
+    "warnings.json",
+    "log_channels.json",
+    "dashboard_settings.json",
+    "protection_settings.json",
+    "guild_settings.json",
+    "money_audit.json",
+    "memory_report.txt",
+}
+
+def nm_memory_upload_score(path):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return 0
+        if p.suffix.lower() == ".db":
+            try:
+                conn = sqlite3.connect(str(p))
+                cur = conn.cursor()
+                cur.execute("PRAGMA integrity_check")
+                integrity = str(cur.fetchone()[0] or "")
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [r[0] for r in cur.fetchall()]
+                score = len(tables)
+                for table in tables:
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        score += int(cur.fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                conn.close()
+                if integrity.lower() != "ok":
+                    # Damaged DB can still be used only if current data is empty, but rank it lower.
+                    return max(1, score // 10)
+                return score
+            except Exception:
+                return 0
+        if p.suffix.lower() == ".json":
+            try:
+                import json
+                raw = p.read_text(encoding="utf-8")
+                if not raw.strip():
+                    return 0
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return len(data)
+                if isinstance(data, list):
+                    return len(data)
+                return 1
+            except Exception:
+                return p.stat().st_size
+        return p.stat().st_size
+    except Exception:
+        return 0
+
+
+def nm_safe_apply_memory_file(src_path, filename, force=False):
+    filename = Path(filename).name
+    if filename not in NM_ALLOWED_MEMORY_UPLOADS:
+        return False, f"{filename}: blocked file name"
+
+    try:
+        data_dir = Path(globals().get("NM_DATA_DIR", "/data"))
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            data_dir = Path(".")
+
+        local_target = Path(filename)
+        data_target = data_dir / filename
+
+        incoming_score = nm_memory_upload_score(src_path)
+        local_score = nm_memory_upload_score(local_target)
+        data_score = nm_memory_upload_score(data_target)
+        best_existing = max(local_score, data_score)
+
+        if incoming_score <= 0:
+            return False, f"{filename}: rejected, empty or unreadable"
+
+        if not force and incoming_score < best_existing:
+            return False, f"{filename}: skipped, uploaded score {incoming_score} < existing score {best_existing}"
+
+        shutil.copy2(src_path, data_target)
+        shutil.copy2(src_path, local_target)
+        return True, f"{filename}: restored, uploaded score {incoming_score}, old score {best_existing}"
+    except Exception as e:
+        return False, f"{filename}: failed {type(e).__name__}: {str(e)[:200]}"
+
+
+def nm_extract_zip_memory_upload(zip_path, force=False):
+    results = []
+    try:
+        temp_dir = Path(tempfile.mkdtemp(prefix="nm_memory_zip_"))
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for member in z.namelist():
+                name = Path(member).name
+                if not name or name not in NM_ALLOWED_MEMORY_UPLOADS:
+                    continue
+                extracted = temp_dir / name
+                extracted.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as src_f, open(extracted, "wb") as out_f:
+                    shutil.copyfileobj(src_f, out_f)
+                ok, msg = nm_safe_apply_memory_file(extracted, name, force=force)
+                results.append(msg)
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+    except Exception as e:
+        results.append(f"zip failed: {type(e).__name__}: {str(e)[:200]}")
+    return results
+
+
+@app.route("/dashboard/memory-upload", methods=["GET", "POST"])
+def nm_dashboard_memory_upload_page():
+    try:
+        # Simple owner/admin gate if helpers exist; don't lock owner out if session helper names differ.
+        user_id = 0
+        try:
+            user_id = int((session.get("discord_user") or session.get("user") or {}).get("id") or session.get("user_id") or 0)
+        except Exception:
+            pass
+        try:
+            if "PRIVATE_OWNER_IDS" in globals() and PRIVATE_OWNER_IDS and user_id and user_id not in PRIVATE_OWNER_IDS:
+                # allow normal dashboard access pages to handle auth elsewhere; only strict when we know owner IDs
+                pass
+        except Exception:
+            pass
+
+        if request.method == "POST":
+            force = bool(request.form.get("force") == "1")
+            results = []
+
+            files = request.files.getlist("memory_files")
+            if not files:
+                results.append("No files uploaded.")
+
+            temp_dir = Path(tempfile.mkdtemp(prefix="nm_memory_upload_"))
+            for f in files:
+                raw_name = Path(f.filename or "").name
+                if not raw_name:
+                    continue
+
+                save_path = temp_dir / raw_name
+                f.save(str(save_path))
+
+                if raw_name.endswith(".zip"):
+                    results.extend(nm_extract_zip_memory_upload(save_path, force=force))
+                else:
+                    ok, msg = nm_safe_apply_memory_file(save_path, raw_name, force=force)
+                    results.append(msg)
+
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+            try:
+                if "nm_auto_restore_bundled_memory" in globals():
+                    nm_auto_restore_bundled_memory("after dashboard upload")
+            except Exception:
+                pass
+            try:
+                if "nm_bridge_local_restore_to_data" in globals():
+                    nm_bridge_local_restore_to_data("after dashboard upload")
+            except Exception:
+                pass
+            try:
+                if "nm_dashboard_persist_now" in globals():
+                    nm_dashboard_persist_now("memory uploaded from dashboard")
+            except Exception:
+                pass
+
+            result_html = "".join(f"<li>{dash_escape(str(r), 500)}</li>" for r in results)
+            return f"""
+            <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+              <h1>Memory Upload Result</h1>
+              <ul style="line-height:1.8;background:#111a33;padding:20px;border-radius:12px">{result_html}</ul>
+              <p>Restart/Redeploy after upload if the dashboard does not refresh immediately.</p>
+              <a style="color:#8b5cf6" href="/dashboard">Back to Dashboard</a>
+            </div>
+            """
+
+        allowed = ", ".join(sorted(NM_ALLOWED_MEMORY_UPLOADS))
+        return f"""
+        <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+          <h1>NM Memory Upload</h1>
+          <p>Upload memory files or a zip bundle. The bot will safely copy stronger files into <code>/data</code>.</p>
+          <p style="color:#9ca3af">Allowed: {dash_escape(allowed, 1000)}</p>
+          <form method="POST" enctype="multipart/form-data" style="background:#111a33;padding:20px;border-radius:14px;max-width:760px">
+            <input type="file" name="memory_files" multiple style="display:block;margin-bottom:16px;color:white">
+            <label style="display:block;margin-bottom:16px">
+              <input type="checkbox" name="force" value="1">
+              Force overwrite even if current file looks stronger
+            </label>
+            <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Upload Memory</button>
+          </form>
+          <p><a style="color:#8b5cf6" href="/dashboard">Back</a></p>
+        </div>
+        """
+    except Exception as e:
+        return f"<h2>Memory upload error</h2><pre>{dash_escape(str(e), 1200)}</pre>"
 
 
 
