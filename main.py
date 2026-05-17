@@ -65,6 +65,19 @@ ANTI_LINKS = True
 SPAM_LIMIT = 10
 SPAM_SECONDS = 5
 MASS_MENTION_LIMIT = 8
+
+# Protection dashboard controls
+PROTECTION_BAD_WORDS_ENABLED = True
+PROTECTION_LINKS_ENABLED = True
+PROTECTION_SPAM_ENABLED = True
+PROTECTION_MASS_MENTION_ENABLED = True
+PROTECTION_DELETE_MESSAGES = True
+PROTECTION_TIMEOUTS_ENABLED = True
+PROTECTION_BYPASS_ADMINS = True
+PROTECTION_LOG_ONLY_MODE = False
+PROTECTION_LINK_WHITELIST = []
+PROTECTION_IGNORED_CHANNEL_IDS = set()
+
 LEVEL_COOLDOWN = 25
 COMMANDS_CHANNEL_ID = 1504067161734516757
 MEMORY_BACKUP_CHANNEL_ID = 1504161977063178370
@@ -2703,10 +2716,11 @@ async def apply_punishment(member, channel, count):
 async def handle_violation(message, reason):
     old_message = message.content
 
-    try:
-        await message.delete()
-    except:
-        pass
+    if PROTECTION_DELETE_MESSAGES and not PROTECTION_LOG_ONLY_MODE:
+        try:
+            await message.delete()
+        except:
+            pass
 
     count = add_warning(message.author, reason, old_message, "النظام التلقائي")
     cc_record_event(
@@ -2717,7 +2731,12 @@ async def handle_violation(message, reason):
         channel_name=getattr(message.channel, "name", "unknown"),
         details=f"{reason} | Warning #{count} | Message: {old_message[:300]}"
     )
-    punishment = await apply_punishment(message.author, message.channel, count)
+    if PROTECTION_LOG_ONLY_MODE:
+        punishment = "Log only / بدون عقوبة"
+    elif PROTECTION_TIMEOUTS_ENABLED:
+        punishment = await apply_punishment(message.author, message.channel, count)
+    else:
+        punishment = "تحذير فقط / Timeouts disabled"
 
     embed = discord.Embed(
         title="⚠️ تحذير تلقائي",
@@ -4816,6 +4835,60 @@ def parse_dashboard_role_id_list(values):
     return cleaned
 
 
+
+
+def parse_dashboard_int_list(values):
+    cleaned = []
+    seen = set()
+    if isinstance(values, str):
+        values = values.replace("\n", ",").split(",")
+    if not isinstance(values, (list, tuple, set)):
+        return cleaned
+    for value in values:
+        try:
+            item = int(str(value).strip())
+        except:
+            continue
+        if item <= 0 or item in seen:
+            continue
+        seen.add(item)
+        cleaned.append(item)
+    return cleaned
+
+
+def parse_text_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value).replace("\r", "\n").replace(",", "\n").split("\n")
+    cleaned = []
+    seen = set()
+    for item in raw_items:
+        text = str(item).strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        cleaned.append(text[:120])
+    return cleaned
+
+
+def protection_channel_ignored(channel_id):
+    try:
+        return int(channel_id) in {int(x) for x in PROTECTION_IGNORED_CHANNEL_IDS}
+    except:
+        return False
+
+
+def protection_link_allowed(content):
+    text = str(content or "").lower()
+    for item in PROTECTION_LINK_WHITELIST:
+        item = str(item).strip().lower()
+        if item and item in text:
+            return True
+    return False
+
 def dashboard_get_guild_roles():
     guild = bot.get_guild(GUILD_ID) if bot else None
     if not guild:
@@ -5562,6 +5635,10 @@ def dashboard_apply_saved_settings():
     global VIP_ROLE_ID, EVENT_WINNER_ROLE_ID, VIP_ROLE_NAME, EVENT_WINNER_ROLE_NAME, VIP_ROLE_COLOR, EVENT_WINNER_ROLE_COLOR
     global SHOP_ENABLED, EVENTS_ENABLED, SHOP_VIP_PRICE, SHOP_VIP_DAYS, LOOTBOX_PRICE, LOOTBOX_COOLDOWN_SECONDS
     global DEFAULT_EVENT_PRIZE, DEFAULT_EVENT_DURATION_MINUTES, PUBLIC_LEADERBOARD_ENABLED, DAILY_REWARD_BASE, LEVEL_UP_COIN_BONUS
+    global protection_enabled, ANTI_LINKS, SPAM_LIMIT, SPAM_SECONDS, MASS_MENTION_LIMIT
+    global PROTECTION_BAD_WORDS_ENABLED, PROTECTION_LINKS_ENABLED, PROTECTION_SPAM_ENABLED, PROTECTION_MASS_MENTION_ENABLED
+    global PROTECTION_DELETE_MESSAGES, PROTECTION_TIMEOUTS_ENABLED, PROTECTION_BYPASS_ADMINS, PROTECTION_LOG_ONLY_MODE
+    global PROTECTION_LINK_WHITELIST, PROTECTION_IGNORED_CHANNEL_IDS
     data = dashboard_load_settings_file()
     if not data:
         return
@@ -5592,6 +5669,23 @@ def dashboard_apply_saved_settings():
     DEFAULT_EVENT_PRIZE = parse_int_field(data.get("DEFAULT_EVENT_PRIZE", DEFAULT_EVENT_PRIZE), DEFAULT_EVENT_PRIZE, 0)
     DEFAULT_EVENT_DURATION_MINUTES = parse_int_field(data.get("DEFAULT_EVENT_DURATION_MINUTES", DEFAULT_EVENT_DURATION_MINUTES), DEFAULT_EVENT_DURATION_MINUTES, 1)
     PUBLIC_LEADERBOARD_ENABLED = parse_bool_field(data.get("PUBLIC_LEADERBOARD_ENABLED", PUBLIC_LEADERBOARD_ENABLED), PUBLIC_LEADERBOARD_ENABLED)
+
+    protection_enabled = parse_bool_field(data.get("protection_enabled", protection_enabled), protection_enabled)
+    PROTECTION_BAD_WORDS_ENABLED = parse_bool_field(data.get("PROTECTION_BAD_WORDS_ENABLED", PROTECTION_BAD_WORDS_ENABLED), PROTECTION_BAD_WORDS_ENABLED)
+    PROTECTION_LINKS_ENABLED = parse_bool_field(data.get("PROTECTION_LINKS_ENABLED", data.get("ANTI_LINKS", PROTECTION_LINKS_ENABLED)), PROTECTION_LINKS_ENABLED)
+    ANTI_LINKS = PROTECTION_LINKS_ENABLED
+    PROTECTION_SPAM_ENABLED = parse_bool_field(data.get("PROTECTION_SPAM_ENABLED", PROTECTION_SPAM_ENABLED), PROTECTION_SPAM_ENABLED)
+    PROTECTION_MASS_MENTION_ENABLED = parse_bool_field(data.get("PROTECTION_MASS_MENTION_ENABLED", PROTECTION_MASS_MENTION_ENABLED), PROTECTION_MASS_MENTION_ENABLED)
+    PROTECTION_DELETE_MESSAGES = parse_bool_field(data.get("PROTECTION_DELETE_MESSAGES", PROTECTION_DELETE_MESSAGES), PROTECTION_DELETE_MESSAGES)
+    PROTECTION_TIMEOUTS_ENABLED = parse_bool_field(data.get("PROTECTION_TIMEOUTS_ENABLED", PROTECTION_TIMEOUTS_ENABLED), PROTECTION_TIMEOUTS_ENABLED)
+    PROTECTION_BYPASS_ADMINS = parse_bool_field(data.get("PROTECTION_BYPASS_ADMINS", PROTECTION_BYPASS_ADMINS), PROTECTION_BYPASS_ADMINS)
+    PROTECTION_LOG_ONLY_MODE = parse_bool_field(data.get("PROTECTION_LOG_ONLY_MODE", PROTECTION_LOG_ONLY_MODE), PROTECTION_LOG_ONLY_MODE)
+    SPAM_LIMIT = parse_int_field(data.get("SPAM_LIMIT", SPAM_LIMIT), SPAM_LIMIT, 2)
+    SPAM_SECONDS = parse_int_field(data.get("SPAM_SECONDS", SPAM_SECONDS), SPAM_SECONDS, 1)
+    MASS_MENTION_LIMIT = parse_int_field(data.get("MASS_MENTION_LIMIT", MASS_MENTION_LIMIT), MASS_MENTION_LIMIT, 1)
+    PROTECTION_LINK_WHITELIST = parse_text_list(data.get("PROTECTION_LINK_WHITELIST", PROTECTION_LINK_WHITELIST))
+    PROTECTION_IGNORED_CHANNEL_IDS = set(parse_dashboard_int_list(data.get("PROTECTION_IGNORED_CHANNEL_IDS", list(PROTECTION_IGNORED_CHANNEL_IDS))))
+
     if str(data.get("COIN_NAME", "")).strip():
         COIN_NAME = str(data.get("COIN_NAME")).strip()[:40]
     if str(data.get("VIP_ROLE_NAME", "")).strip():
@@ -5639,6 +5733,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard/log-vault"><span class="navicon">🗄️</span><span>Log Vault</span></a>
       <a class="navitem" href="/dashboard/user"><span class="navicon">👤</span><span>User Lookup</span></a>
       <a class="navitem" href="/dashboard/warnings"><span class="navicon">⚠️</span><span>Warnings</span></a>
+      {% if access_level == 'owner' %}<a class="navitem" href="/dashboard/protection"><span class="navicon">🛡️</span><span>Protection</span><span class="ownerlock">Owner</span></a>{% endif %}
       <div class="navsection">Systems</div>
       <a class="navitem" href="/dashboard/economy"><span class="navicon">🪙</span><span>Economy</span></a>
       {% if access_level == 'owner' %}<a class="navitem" href="/dashboard/money-audit"><span class="navicon">🏦</span><span>Money Audit</span><span class="ownerlock">Owner</span></a>{% endif %}
@@ -7347,6 +7442,179 @@ def dashboard_command_center_page():
 
     return render_dashboard_page("Command Center", body)
 
+@app.route("/dashboard/protection", methods=["GET"])
+def dashboard_protection_page():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    def checked(value):
+        return "checked" if bool(value) else ""
+
+    whitelist_text = "\n".join(PROTECTION_LINK_WHITELIST)
+    ignored_channels_text = "\n".join(str(x) for x in sorted({int(v) for v in PROTECTION_IGNORED_CHANNEL_IDS}))
+
+    modules = [
+        ("protection_enabled", "Master Protection", protection_enabled, "القفل الرئيسي للحماية. إذا طفيته كل أنظمة الحماية توقف."),
+        ("PROTECTION_BAD_WORDS_ENABLED", "Bad Words Filter", PROTECTION_BAD_WORDS_ENABLED, "فلتر السب والكلمات الممنوعة."),
+        ("PROTECTION_LINKS_ENABLED", "Anti Links", PROTECTION_LINKS_ENABLED, "منع الروابط والدعوات إلا اللي تضيفها في whitelist."),
+        ("PROTECTION_SPAM_ENABLED", "Anti Spam", PROTECTION_SPAM_ENABLED, "يمسك السبام حسب عدد الرسائل والمدة."),
+        ("PROTECTION_MASS_MENTION_ENABLED", "Mass Mention Guard", PROTECTION_MASS_MENTION_ENABLED, "يمسك المنشن الكثير و @everyone."),
+        ("PROTECTION_DELETE_MESSAGES", "Delete Violating Message", PROTECTION_DELETE_MESSAGES, "يحذف رسالة المخالفة تلقائيًا."),
+        ("PROTECTION_TIMEOUTS_ENABLED", "Auto Timeouts", PROTECTION_TIMEOUTS_ENABLED, "يفعل تصعيد العقوبات حسب عدد الإنذارات."),
+        ("PROTECTION_BYPASS_ADMINS", "Bypass Admins", PROTECTION_BYPASS_ADMINS, "الأدمن والـ bypass IDs ما تنطبق عليهم الحماية."),
+        ("PROTECTION_LOG_ONLY_MODE", "Log Only Mode", PROTECTION_LOG_ONLY_MODE, "يسجل الإنذار فقط بدون حذف وبدون تايم آوت. مفيد للتجربة."),
+    ]
+
+    module_cards = "".join([
+        f"""
+        <label class='protect-switch'>
+          <input type='checkbox' name='{key}' {checked(enabled)}>
+          <div>
+            <b>{title}</b>
+            <span>{desc}</span>
+          </div>
+          <em>{'ON' if enabled else 'OFF'}</em>
+        </label>
+        """
+        for key, title, enabled, desc in modules
+    ])
+
+    body = f"""
+    {dashboard_toast_html()}
+    <style>
+      .protect-hero{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(260px,.7fr);gap:16px}}
+      .protect-switch{{display:grid;grid-template-columns:54px minmax(0,1fr) 48px;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045);margin-bottom:10px}}
+      .protect-switch:hover{{border-color:rgba(139,92,246,.45);background:rgba(255,255,255,.07)}}
+      .protect-switch input{{width:22px;height:22px;accent-color:var(--purple)}}
+      .protect-switch b{{display:block;font-size:14px}}
+      .protect-switch span{{display:block;color:var(--muted);font-size:12px;margin-top:4px;line-height:1.35}}
+      .protect-switch em{{font-style:normal;font-size:11px;font-weight:1000;color:#dbeafe;background:rgba(88,101,242,.2);border:1px solid rgba(88,101,242,.28);padding:6px 8px;border-radius:999px;text-align:center}}
+      .protect-tip{{padding:13px;border:1px solid var(--line);border-radius:16px;background:rgba(2,6,23,.35);margin-top:10px;color:var(--muted);font-size:13px;line-height:1.55}}
+      textarea{{min-height:120px;resize:vertical}}
+      @media(max-width:950px){{.protect-hero{{grid-template-columns:1fr}}}}
+    </style>
+
+    <div class='protect-hero'>
+      <div class='card'>
+        <div class='big'>🛡️ Protection Control</div>
+        <p class='muted'>تحكم كامل ومريح بأنظمة الحماية من الداشبورد. افتح أو اقفل اللي تبيه بدون تعديل الكود.</p>
+        <div style='height:10px'></div>
+        <span class='pill {'ok' if protection_enabled else 'danger'}'>Master: {'ON' if protection_enabled else 'OFF'}</span>
+        <span class='pill'>Spam: {SPAM_LIMIT}/{SPAM_SECONDS}s</span>
+        <span class='pill'>Mentions: {MASS_MENTION_LIMIT}</span>
+      </div>
+      <div class='card'>
+        <h3>⚡ Quick Explain</h3>
+        <p class='muted'>Log Only Mode يخليك تجرب الفلتر بدون حذف رسائل أو تايم آوت.</p>
+        <p class='muted'>Ignored Channels توقف الحماية في رومات معيّنة مثل روم أوامر أو تجارب.</p>
+        <p class='muted'>Whitelist يسمح بروابط معيّنة حتى لو Anti Links شغال.</p>
+      </div>
+    </div>
+
+    <div style='height:16px'></div>
+
+    <form method='post' action='/dashboard/protection'>
+      <div class='grid2'>
+        <div class='card'>
+          <h3>🔌 Protection Modules</h3>
+          {module_cards}
+        </div>
+        <div class='card'>
+          <h3>⚙️ Thresholds</h3>
+          <label>Spam Limit</label>
+          <input name='SPAM_LIMIT' value='{SPAM_LIMIT}'>
+          <p class='muted'>عدد الرسائل قبل ما يعتبره سبام.</p>
+
+          <label>Spam Window Seconds</label>
+          <input name='SPAM_SECONDS' value='{SPAM_SECONDS}'>
+          <p class='muted'>خلال كم ثانية ينحسب السبام.</p>
+
+          <label>Mass Mention Limit</label>
+          <input name='MASS_MENTION_LIMIT' value='{MASS_MENTION_LIMIT}'>
+          <p class='muted'>كم منشن قبل ما يعطي مخالفة.</p>
+
+          <div class='protect-tip'>
+            الإعداد المقترح للسيرفرات الصغيرة: Spam = 8 رسائل / 5 ثواني، والمنشن = 6 إلى 8.
+          </div>
+        </div>
+      </div>
+
+      <div style='height:16px'></div>
+
+      <div class='grid2'>
+        <div class='card'>
+          <h3>✅ Link Whitelist</h3>
+          <p class='muted'>اكتب دومين أو رابط في كل سطر. أي رسالة تحتويه ما تنمسك من Anti Links.</p>
+          <textarea name='PROTECTION_LINK_WHITELIST' placeholder='youtube.com\ntwitch.tv\nyour-site.com'>{dash_escape(whitelist_text, 3000)}</textarea>
+        </div>
+        <div class='card'>
+          <h3>🚪 Ignored Channels</h3>
+          <p class='muted'>اكتب Channel ID في كل سطر. الحماية ما تشتغل داخل هذي الرومات.</p>
+          <textarea name='PROTECTION_IGNORED_CHANNEL_IDS' placeholder='123456789\n987654321'>{dash_escape(ignored_channels_text, 3000)}</textarea>
+        </div>
+      </div>
+
+      <div style='height:16px'></div>
+      <button class='btn primary' type='submit'>💾 Save Protection Settings</button>
+      <a class='btn' href='/dashboard/command-center'>🧠 Open Command Center</a>
+      <a class='btn' href='/dashboard/warnings'>⚠️ Open Warnings</a>
+    </form>
+    """
+    return render_dashboard_page("Protection", body)
+
+
+@app.route("/dashboard/protection", methods=["POST"])
+def dashboard_protection_action():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    global protection_enabled, ANTI_LINKS, SPAM_LIMIT, SPAM_SECONDS, MASS_MENTION_LIMIT
+    global PROTECTION_BAD_WORDS_ENABLED, PROTECTION_LINKS_ENABLED, PROTECTION_SPAM_ENABLED, PROTECTION_MASS_MENTION_ENABLED
+    global PROTECTION_DELETE_MESSAGES, PROTECTION_TIMEOUTS_ENABLED, PROTECTION_BYPASS_ADMINS, PROTECTION_LOG_ONLY_MODE
+    global PROTECTION_LINK_WHITELIST, PROTECTION_IGNORED_CHANNEL_IDS
+
+    try:
+        protection_enabled = "protection_enabled" in request.form
+        PROTECTION_BAD_WORDS_ENABLED = "PROTECTION_BAD_WORDS_ENABLED" in request.form
+        PROTECTION_LINKS_ENABLED = "PROTECTION_LINKS_ENABLED" in request.form
+        ANTI_LINKS = PROTECTION_LINKS_ENABLED
+        PROTECTION_SPAM_ENABLED = "PROTECTION_SPAM_ENABLED" in request.form
+        PROTECTION_MASS_MENTION_ENABLED = "PROTECTION_MASS_MENTION_ENABLED" in request.form
+        PROTECTION_DELETE_MESSAGES = "PROTECTION_DELETE_MESSAGES" in request.form
+        PROTECTION_TIMEOUTS_ENABLED = "PROTECTION_TIMEOUTS_ENABLED" in request.form
+        PROTECTION_BYPASS_ADMINS = "PROTECTION_BYPASS_ADMINS" in request.form
+        PROTECTION_LOG_ONLY_MODE = "PROTECTION_LOG_ONLY_MODE" in request.form
+        SPAM_LIMIT = parse_int_field(request.form.get("SPAM_LIMIT"), SPAM_LIMIT, 2)
+        SPAM_SECONDS = parse_int_field(request.form.get("SPAM_SECONDS"), SPAM_SECONDS, 1)
+        MASS_MENTION_LIMIT = parse_int_field(request.form.get("MASS_MENTION_LIMIT"), MASS_MENTION_LIMIT, 1)
+        PROTECTION_LINK_WHITELIST = parse_text_list(request.form.get("PROTECTION_LINK_WHITELIST", ""))
+        PROTECTION_IGNORED_CHANNEL_IDS = set(parse_dashboard_int_list(request.form.get("PROTECTION_IGNORED_CHANNEL_IDS", "")))
+
+        dashboard_merge_settings({
+            "protection_enabled": protection_enabled,
+            "PROTECTION_BAD_WORDS_ENABLED": PROTECTION_BAD_WORDS_ENABLED,
+            "PROTECTION_LINKS_ENABLED": PROTECTION_LINKS_ENABLED,
+            "ANTI_LINKS": PROTECTION_LINKS_ENABLED,
+            "PROTECTION_SPAM_ENABLED": PROTECTION_SPAM_ENABLED,
+            "PROTECTION_MASS_MENTION_ENABLED": PROTECTION_MASS_MENTION_ENABLED,
+            "PROTECTION_DELETE_MESSAGES": PROTECTION_DELETE_MESSAGES,
+            "PROTECTION_TIMEOUTS_ENABLED": PROTECTION_TIMEOUTS_ENABLED,
+            "PROTECTION_BYPASS_ADMINS": PROTECTION_BYPASS_ADMINS,
+            "PROTECTION_LOG_ONLY_MODE": PROTECTION_LOG_ONLY_MODE,
+            "SPAM_LIMIT": SPAM_LIMIT,
+            "SPAM_SECONDS": SPAM_SECONDS,
+            "MASS_MENTION_LIMIT": MASS_MENTION_LIMIT,
+            "PROTECTION_LINK_WHITELIST": PROTECTION_LINK_WHITELIST,
+            "PROTECTION_IGNORED_CHANNEL_IDS": sorted([int(x) for x in PROTECTION_IGNORED_CHANNEL_IDS]),
+        })
+        dashboard_log_action("Protection updated", "Protection Control settings were changed", session.get("discord_user"))
+        return redirect("/dashboard/protection?msg=" + urllib.parse.quote("Protection settings saved."))
+    except Exception as e:
+        return redirect("/dashboard/protection?err=" + urllib.parse.quote(str(e)))
+
+
 @app.route("/dashboard/settings", methods=["GET"])
 def dashboard_settings_page():
     denied = dashboard_require_owner()
@@ -7817,47 +8085,51 @@ async def on_message(message):
                 delete_after=10
             )
 
-    if protection_enabled and is_system_enabled("protection") and not is_bypass(message.author):
+    protection_skip_member = is_bypass(message.author) if PROTECTION_BYPASS_ADMINS else (message.author.id in BYPASS_USER_IDS)
 
-        if contains_bad_word(content):
+    if protection_enabled and is_system_enabled("protection") and not protection_skip_member and not protection_channel_ignored(message.channel.id):
+
+        if PROTECTION_BAD_WORDS_ENABLED and contains_bad_word(content):
             await handle_violation(message, "كلمة ممنوعة / سب")
             return
 
-        if ANTI_LINKS:
+        if PROTECTION_LINKS_ENABLED:
             link_words = ["discord.gg", "discord.com/invite", "http://", "https://"]
 
-            if any(link in content for link in link_words):
+            if any(link in content for link in link_words) and not protection_link_allowed(content):
                 await handle_violation(message, "إرسال رابط ممنوع")
                 return
 
-        mentions_count = len(message.mentions) + len(message.role_mentions)
+        if PROTECTION_MASS_MENTION_ENABLED:
+            mentions_count = len(message.mentions) + len(message.role_mentions)
 
-        if message.mention_everyone:
-            mentions_count += 10
+            if message.mention_everyone:
+                mentions_count += 10
 
-        if mentions_count >= MASS_MENTION_LIMIT:
-            await handle_violation(message, f"منشن كثير ({mentions_count})")
-            return
+            if mentions_count >= MASS_MENTION_LIMIT:
+                await handle_violation(message, f"منشن كثير ({mentions_count})")
+                return
 
-        user_id = message.author.id
-        msg_now = time.time()
+        if PROTECTION_SPAM_ENABLED:
+            user_id = message.author.id
+            msg_now = time.time()
 
-        if user_id not in user_message_times:
-            user_message_times[user_id] = []
+            if user_id not in user_message_times:
+                user_message_times[user_id] = []
 
-        user_message_times[user_id].append(msg_now)
-        user_message_times[user_id] = [
-            t for t in user_message_times[user_id]
-            if msg_now - t <= SPAM_SECONDS
-        ]
+            user_message_times[user_id].append(msg_now)
+            user_message_times[user_id] = [
+                t for t in user_message_times[user_id]
+                if msg_now - t <= SPAM_SECONDS
+            ]
 
-        if len(user_message_times[user_id]) >= SPAM_LIMIT:
-            user_message_times[user_id] = []
-            await handle_violation(
-                message,
-                f"سبام: {SPAM_LIMIT} رسائل خلال {SPAM_SECONDS} ثواني"
-            )
-            return
+            if len(user_message_times[user_id]) >= SPAM_LIMIT:
+                user_message_times[user_id] = []
+                await handle_violation(
+                    message,
+                    f"سبام: {SPAM_LIMIT} رسائل خلال {SPAM_SECONDS} ثواني"
+                )
+                return
 
     await bot.process_commands(message)
 
