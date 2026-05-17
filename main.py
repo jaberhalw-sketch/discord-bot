@@ -7191,6 +7191,44 @@ def dashboard_select_guild(guild_id):
     return redirect(f"/dashboard/guild/{int(guild_id)}/setup")
 
 
+
+def dashboard_active_guild_stats():
+    try:
+        gid = int(session.get("selected_guild_id") or request.args.get("guild_id") or GUILD_ID)
+    except:
+        gid = GUILD_ID
+
+    guild = bot.get_guild(int(gid)) if bot else None
+    if not guild:
+        return {
+            "guild_id": int(gid or 0),
+            "name": "Selected Server",
+            "servers": 1,
+            "server_count": 1,
+            "users": 0,
+            "members": 0,
+            "member_count": 0,
+        }
+
+    member_count = int(getattr(guild, "member_count", 0) or len(getattr(guild, "members", []) or []) or 0)
+    return {
+        "guild_id": int(guild.id),
+        "name": str(guild.name),
+        "servers": 1,
+        "server_count": 1,
+        "users": member_count,
+        "members": member_count,
+        "member_count": member_count,
+    }
+
+
+def dashboard_selected_server_count():
+    return 1
+
+
+def dashboard_selected_member_count():
+    return int(dashboard_active_guild_stats().get("member_count", 0) or 0)
+
 DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
 <html lang="en">
@@ -7385,6 +7423,17 @@ DASHBOARD_BASE_TEMPLATE = r'''
         });
       });
     </script>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const selectedServerMembers = "__NM_SELECTED_MEMBERS__";
+  document.querySelectorAll("*").forEach(function(el){
+    if (el.childNodes && el.childNodes.length === 1 && el.textContent.trim() === "SERVERS") el.textContent = "SERVER";
+    if (el.childNodes && el.childNodes.length === 1 && el.textContent.trim() === "USERS") el.textContent = "MEMBERS";
+  });
+});
+</script>
 
 </body>
 </html>
