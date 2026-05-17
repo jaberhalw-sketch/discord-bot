@@ -11731,6 +11731,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v4_boot_normalize_brand_coin()
     nm_pg_boot()
     nm_auto_restore_bundled_memory("on_ready")
     await nm_restore_latest_discord_memory_backup("on_ready")
@@ -17281,7 +17282,162 @@ def nm_pg_status_page():
     return f"<div style='font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px'><h1>NM V4 PostgreSQL Status</h1><p>Status: <b style='color:{color}'>{status}</b></p><p>DATABASE_URL: {dbtxt}</p><table style='border-collapse:collapse;min-width:520px'><tr><th style='text-align:left;padding:8px;border-bottom:1px solid #334155'>Table</th><th style='text-align:left;padding:8px;border-bottom:1px solid #334155'>Rows</th></tr>{rows}</table><p><a style='color:#8b5cf6' href='/dashboard'>Back</a></p></div>"
 
 
+
+# =========================
+# NM V4 BRAND / COIN SYNC FIX
+# يجعل اسم العملة والبراند يقرأ وينحفظ من PostgreSQL + fallback متوافق مع الداشبورد القديم.
+# =========================
+
+def nm_v4_selected_gid_for_settings():
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or GUILD_ID
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v4_normalize_settings_keys(settings):
+    settings = dict(settings or {})
+
+    # coin aliases
+    coin = (
+        settings.get("coin_name")
+        or settings.get("currency_name")
+        or settings.get("economy_coin_name")
+        or settings.get("money_name")
+        or settings.get("coin")
+        or "NM Coin"
+    )
+    settings["coin_name"] = coin
+    settings["currency_name"] = coin
+    settings["economy_coin_name"] = coin
+
+    # brand aliases
+    brand = (
+        settings.get("bot_brand")
+        or settings.get("brand_name")
+        or settings.get("bot_name")
+        or "NM System"
+    )
+    settings["bot_brand"] = brand
+    settings["brand_name"] = brand
+    settings["bot_name"] = brand
+
+    return settings
+
+def nm_v4_get_settings(guild_id=None):
+    gid = int(guild_id or nm_v4_selected_gid_for_settings())
+    data = {}
+    try:
+        if NM_V4_POSTGRES_ENABLED:
+            with nm_pg_conn() as conn:
+                row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (gid,)).fetchone()
+                if row:
+                    data = nm_pg_unjson(row["settings"])
+    except Exception as e:
+        print(f"NM V4 settings get failed: {e}")
+
+    # Fallback to old file/global only if PG has nothing useful.
+    if not data:
+        try:
+            if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+                data.update(dashboard_settings)
+        except Exception:
+            pass
+
+    return nm_v4_normalize_settings_keys(data)
+
+def nm_v4_save_settings(guild_id=None, settings=None):
+    gid = int(guild_id or nm_v4_selected_gid_for_settings())
+    settings = nm_v4_normalize_settings_keys(settings or {})
+    try:
+        if NM_V4_POSTGRES_ENABLED:
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO guild_settings (guild_id, settings, updated_at)
+                    VALUES (%s,%s::jsonb,NOW())
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+                """, (gid, nm_pg_json(settings)))
+                conn.commit()
+            return True
+    except Exception as e:
+        print(f"NM V4 settings save failed: {e}")
+
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(settings)
+            if "save_dashboard_settings" in globals():
+                save_dashboard_settings()
+            return True
+    except Exception:
+        pass
+    return False
+
+# Override generic settings functions again after all old functions exist.
+def get_guild_settings(guild_id):
+    return nm_v4_get_settings(guild_id)
+
+def save_guild_settings(guild_id, settings):
+    return nm_v4_save_settings(guild_id, settings)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_v4_get_settings(guild_id).get("coin_name", "NM Coin")
+
+def nm_get_brand_name(guild_id=None):
+    return nm_v4_get_settings(guild_id).get("bot_brand", "NM System")
+
+@app.route("/dashboard/fix-brand-coin")
+def nm_fix_brand_coin_route():
+    gid = nm_v4_selected_gid_for_settings()
+    settings = nm_v4_get_settings(gid)
+
+    # If old dashboard imported NM Coin, replace it with NM Coin once.
+    if str(settings.get("coin_name", "")).lower().strip() in {"retard coin", "retard", "retard coins"}:
+        settings["coin_name"] = "NM Coin"
+        settings["currency_name"] = "NM Coin"
+        settings["economy_coin_name"] = "NM Coin"
+
+    if not settings.get("bot_brand"):
+        settings["bot_brand"] = "NM System"
+
+    nm_v4_save_settings(gid, settings)
+
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Brand/Coin fixed</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Brand: <b>{dash_escape(settings.get('bot_brand','NM System'),100)}</b></p>
+      <p>Coin: <b>{dash_escape(settings.get('coin_name','NM Coin'),100)}</b></p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+
+
+def nm_v4_boot_normalize_brand_coin():
+    try:
+        if not NM_V4_POSTGRES_ENABLED:
+            return
+        main_gid = int(globals().get("GUILD_ID", 0) or 0)
+        if main_gid:
+            s = nm_v4_get_settings(main_gid)
+            if str(s.get("coin_name","")).lower().strip() in {"retard coin","retard","retard coins"}:
+                s["coin_name"] = "NM Coin"
+                s["currency_name"] = "NM Coin"
+                s["economy_coin_name"] = "NM Coin"
+            nm_v4_save_settings(main_gid, s)
+            print("✅ NM V4 brand/coin normalized.")
+    except Exception as e:
+        print(f"NM V4 brand/coin normalize failed: {e}")
+
+
 nm_pg_boot()
+nm_v4_boot_normalize_brand_coin()
 
 keep_alive()
 
