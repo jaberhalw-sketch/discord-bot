@@ -4791,6 +4791,158 @@ class GameRolesView(discord.ui.View):
 app = Flask(__name__)
 
 # =========================
+# NM DASHBOARD MULTI-GUILD ROUTING FIX
+# Fixes opening other servers from the left server rail.
+# =========================
+
+def nm_route_selected_guild_id(default=None):
+    try:
+        path = str(getattr(request, "path", "") or "")
+        m = re.search(r"/dashboard/guild/(\d+)", path)
+        if m:
+            gid = int(m.group(1))
+            session["selected_guild_id"] = gid
+            session["dashboard_active_guild_id"] = gid
+            return gid
+    except Exception:
+        pass
+
+    try:
+        if getattr(request, "view_args", None) and request.view_args.get("guild_id"):
+            gid = int(request.view_args.get("guild_id"))
+            session["selected_guild_id"] = gid
+            session["dashboard_active_guild_id"] = gid
+            return gid
+    except Exception:
+        pass
+
+    try:
+        gid = request.args.get("guild_id") or request.form.get("guild_id")
+        if gid:
+            gid = int(gid)
+            session["selected_guild_id"] = gid
+            session["dashboard_active_guild_id"] = gid
+            return gid
+    except Exception:
+        pass
+
+    try:
+        gid = session.get("selected_guild_id") or session.get("dashboard_active_guild_id") or default or GUILD_ID
+        return int(gid)
+    except Exception:
+        return int(default or GUILD_ID or 0)
+
+
+def nm_route_selected_guild():
+    try:
+        return bot.get_guild(int(nm_route_selected_guild_id())) if bot else None
+    except Exception:
+        return None
+
+
+def nm_route_member_count():
+    guild = nm_route_selected_guild()
+    if not guild:
+        return 0
+    try:
+        return int(getattr(guild, "member_count", 0) or len(getattr(guild, "members", []) or []) or 0)
+    except Exception:
+        return 0
+
+
+def nm_can_open_dashboard_guild(guild_id):
+    try:
+        gid = int(guild_id)
+        # Bot owner can open all guild dashboards.
+        try:
+            user_id = int((session.get("discord_user") or session.get("user") or {}).get("id") or session.get("user_id") or 0)
+        except Exception:
+            user_id = 0
+
+        try:
+            if "PRIVATE_OWNER_IDS" in globals() and user_id in PRIVATE_OWNER_IDS:
+                return True
+        except Exception:
+            pass
+
+        # If old dashboard owner helper exists, respect it.
+        try:
+            if "is_dashboard_owner_id" in globals() and is_dashboard_owner_id(user_id):
+                return True
+        except Exception:
+            pass
+
+        guild = bot.get_guild(gid) if bot else None
+        if not guild:
+            return False
+
+        member = guild.get_member(user_id)
+        if not member:
+            return False
+
+        perms = getattr(member, "guild_permissions", None)
+        if perms and (perms.administrator or perms.manage_guild):
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
+@app.before_request
+def nm_multiguild_select_before_request():
+    try:
+        if request.path.startswith("/dashboard"):
+            nm_route_selected_guild_id()
+    except Exception:
+        pass
+
+
+@app.route("/dashboard/guild/<int:guild_id>", endpoint="nm_open_guild_dashboard_root")
+def nm_open_guild_dashboard_root(guild_id):
+    session["selected_guild_id"] = int(guild_id)
+    session["dashboard_active_guild_id"] = int(guild_id)
+    return redirect(f"/dashboard?guild_id={int(guild_id)}")
+
+
+@app.route("/dashboard/guild/<int:guild_id>/<path:page>", endpoint="nm_open_guild_dashboard_page")
+def nm_open_guild_dashboard_page(guild_id, page):
+    session["selected_guild_id"] = int(guild_id)
+    session["dashboard_active_guild_id"] = int(guild_id)
+
+    page = str(page or "").strip("/").lower()
+    route_map = {
+        "overview": "/dashboard",
+        "setup": "/dashboard/guild-setup",
+        "guild-setup": "/dashboard/guild-setup",
+        "command-center": "/dashboard/command-center",
+        "log-vault": "/dashboard/log-vault",
+        "logs": "/dashboard/log-vault",
+        "user-lookup": "/dashboard/user-lookup",
+        "warnings": "/dashboard/warnings",
+        "protection": "/dashboard/protection",
+        "economy": "/dashboard/economy",
+        "money-audit": "/dashboard/money-audit",
+        "levels": "/dashboard/levels",
+        "casino": "/dashboard/casino",
+        "shop": "/dashboard/shop",
+        "events": "/dashboard/events",
+        "memory": "/dashboard/memory",
+        "owner-console": "/dashboard/owner-console",
+        "admin-access": "/dashboard/admin-access",
+        "control": "/dashboard/control",
+        "control-center": "/dashboard/control",
+        "audit": "/dashboard/audit",
+        "audit-center": "/dashboard/audit",
+        "settings": "/dashboard/settings",
+        "oauth-debug": "/dashboard/oauth-debug",
+    }
+    target = route_map.get(page, "/dashboard")
+    return redirect(f"{target}?guild_id={int(guild_id)}")
+
+
+
+# =========================
 # NM SYSTEM GLOBAL CLEANUP
 # No server is special. GUILD_ID is only fallback for old data / emergency.
 # =========================
@@ -4907,10 +5059,10 @@ def nm_disable_main_guild_lock():
 # =========================
 
 def nm_absolute_selected_guild_id():
-    return nm_runtime_guild_id()
+    return nm_route_selected_guild_id()
 
 def nm_absolute_selected_guild():
-    return nm_runtime_guild()
+    return nm_route_selected_guild()
 
 def nm_absolute_member_count():
     guild = nm_absolute_selected_guild()
@@ -4935,7 +5087,7 @@ def nm_absolute_human_bot_counts():
 
 
 @app.before_request
-def nm_force_selected_guild_from_url():
+def nm_force_selected_guild_from_url_old():
     try:
         if request.path.startswith("/dashboard"):
             nm_absolute_selected_guild_id()
@@ -5002,7 +5154,7 @@ def nm_int(value, default=0):
 
 
 def nm_active_guild_id():
-    return nm_runtime_guild_id()
+    return nm_route_selected_guild_id()
 
 def nm_set_active_guild(guild_id):
     guild_id = nm_int(guild_id, GUILD_ID)
@@ -7082,13 +7234,13 @@ def dash_escape(value, limit=500):
 # =========================
 
 def nm_selected_guild_id():
-    return nm_runtime_guild_id()
+    return nm_route_selected_guild_id()
 
 def nm_selected_guild():
-    return nm_runtime_guild()
+    return nm_route_selected_guild()
 
 def nm_selected_member_count():
-    return nm_absolute_member_count()
+    return nm_route_member_count()
 
 def nm_ensure_table_guild_id(cur, table):
     try:
@@ -7691,7 +7843,7 @@ def dashboard_global_bot_stats(force=False):
 
 def dashboard_global_stats_html(compact=False):
     if compact:
-        members = nm_absolute_member_count()
+        members = nm_route_member_count()
         return f"""
         <div class="globalstats compact">
           <div><b>1</b><span>Server</span></div>
@@ -7959,7 +8111,7 @@ def dashboard_selected_server_count():
 
 
 def dashboard_selected_member_count():
-    return nm_absolute_member_count()
+    return nm_route_member_count()
 
 def nm_db_table_count(table_name):
     try:
@@ -8286,6 +8438,36 @@ document.addEventListener("DOMContentLoaded", function () {
     } catch(e) {}
   });
   document.querySelectorAll('form[action^="/dashboard"], form:not([action])').forEach(f => {
+    if (!f.querySelector('input[name="guild_id"]')) {
+      const input = document.createElement("input");
+      input.type = "hidden";
+      input.name = "guild_id";
+      input.value = gid;
+      f.appendChild(input);
+    }
+  });
+});
+</script>
+
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const pathMatch = location.pathname.match(/\/dashboard\/guild\/(\d+)/);
+  const gid = pathMatch ? pathMatch[1] : new URLSearchParams(location.search).get("guild_id");
+  if (!gid) return;
+
+  document.querySelectorAll('a[href^="/dashboard"]').forEach(a => {
+    try {
+      const raw = a.getAttribute("href");
+      const u = new URL(raw, location.origin);
+      if (!u.pathname.includes("/dashboard/guild/") && !u.searchParams.get("guild_id")) {
+        u.searchParams.set("guild_id", gid);
+        a.setAttribute("href", u.pathname + u.search + u.hash);
+      }
+    } catch(e) {}
+  });
+
+  document.querySelectorAll('form').forEach(f => {
     if (!f.querySelector('input[name="guild_id"]')) {
       const input = document.createElement("input");
       input.type = "hidden";
