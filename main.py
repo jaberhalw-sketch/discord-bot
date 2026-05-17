@@ -11743,6 +11743,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_access_scope_boot()
     nm_v5_final_audit_boot()
     nm_v5_richest_sync_boot()
     nm_v5_admin_pro_boot()
@@ -23398,6 +23399,352 @@ def nm_v5_final_audit_boot():
             print(f"NM V5 final audit boot failed: {e}")
         except Exception:
             pass
+
+
+
+# =====================================================================
+# NM V5 PER-SERVER DASHBOARD ACCESS SCOPE
+# Important:
+# - Server Owner/Admin is NOT bot owner.
+# - Bot private owner can see all servers.
+# - Normal dashboard users only see servers where:
+#   1) they have Discord Administrator permission, OR
+#   2) they are saved Owner/Admin in Admin Access for that guild.
+# - Direct URL access to other guilds is blocked.
+# =====================================================================
+
+def nm_v5_access_user_id():
+    try:
+        user = session.get("discord_user") or {}
+        return int(user.get("id") or 0)
+    except Exception:
+        return 0
+
+def nm_v5_is_private_bot_owner():
+    try:
+        user = session.get("discord_user") or {}
+        if not user:
+            return False
+        if "dashboard_session_is_private_owner" in globals():
+            return bool(dashboard_session_is_private_owner(user))
+        uid = int(user.get("id") or 0)
+        return uid in set(int(x) for x in globals().get("DASHBOARD_PRIVATE_OWNER_USER_IDS", set()))
+    except Exception:
+        return False
+
+def nm_v5_guild_from_bot(guild_id):
+    try:
+        return bot.get_guild(int(guild_id))
+    except Exception:
+        return None
+
+def nm_v5_access_member(guild_id, user_id=None):
+    try:
+        guild = nm_v5_guild_from_bot(guild_id)
+        if not guild:
+            return None
+        return guild.get_member(int(user_id or nm_v5_access_user_id()))
+    except Exception:
+        return None
+
+def nm_v5_member_has_administrator(guild_id, user_id=None):
+    try:
+        member = nm_v5_access_member(guild_id, user_id)
+        if not member:
+            return False
+        perms = getattr(member, "guild_permissions", None)
+        return bool(getattr(perms, "administrator", False))
+    except Exception:
+        return False
+
+def nm_v5_user_saved_access_level(guild_id, user_id=None):
+    try:
+        uid = int(user_id or nm_v5_access_user_id())
+        if not uid:
+            return "none"
+        settings = nm_v5_admin_get(int(guild_id)) if "nm_v5_admin_get" in globals() else {}
+        owner_users = set(int(x) for x in settings.get("owner_user_ids", []))
+        admin_users = set(int(x) for x in settings.get("admin_user_ids", []))
+        owner_roles = set(int(x) for x in settings.get("owner_role_ids", []))
+        admin_roles = set(int(x) for x in settings.get("admin_role_ids", []))
+
+        member = nm_v5_access_member(guild_id, uid)
+        role_ids = set()
+        if member:
+            role_ids = {int(r.id) for r in getattr(member, "roles", [])}
+
+        if uid in owner_users or role_ids.intersection(owner_roles):
+            return "owner"
+        if uid in admin_users or role_ids.intersection(admin_roles):
+            return "admin"
+    except Exception:
+        pass
+    return "none"
+
+def nm_v5_user_can_access_guild(guild_id, user_id=None):
+    try:
+        gid = int(guild_id)
+    except Exception:
+        return False
+
+    # Bot owner sees everything.
+    if nm_v5_is_private_bot_owner():
+        return True
+
+    uid = int(user_id or nm_v5_access_user_id() or 0)
+    if not uid:
+        return False
+
+    # Discord Administrator permission gives access to that server only.
+    if nm_v5_member_has_administrator(gid, uid):
+        return True
+
+    # Saved Admin Access gives access to that server only.
+    return nm_v5_user_saved_access_level(gid, uid) in ("owner", "admin")
+
+def nm_v5_user_is_server_owner(guild_id, user_id=None):
+    if nm_v5_is_private_bot_owner():
+        return True
+    if nm_v5_member_has_administrator(guild_id, user_id):
+        return True
+    return nm_v5_user_saved_access_level(guild_id, user_id) == "owner"
+
+def nm_v5_user_is_server_admin_or_owner(guild_id, user_id=None):
+    if nm_v5_user_is_server_owner(guild_id, user_id):
+        return True
+    return nm_v5_user_saved_access_level(guild_id, user_id) == "admin"
+
+def nm_v5_allowed_guilds_for_user():
+    allowed = []
+    try:
+        for guild in getattr(bot, "guilds", []):
+            try:
+                if nm_v5_user_can_access_guild(int(guild.id)):
+                    allowed.append(guild)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return allowed
+
+def nm_v5_active_guild_id_for_request():
+    try:
+        gid = int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or 0
+        )
+        if gid:
+            return gid
+    except Exception:
+        pass
+
+    allowed = nm_v5_allowed_guilds_for_user()
+    if allowed:
+        return int(allowed[0].id)
+
+    try:
+        return int(globals().get("GUILD_ID", 0) or 0)
+    except Exception:
+        return 0
+
+def nm_v5_access_denied_page(guild_id=None):
+    gid = int(guild_id or 0)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Access Denied</h1>
+      <p>ما عندك صلاحية على هذا السيرفر.</p>
+      <p>Server Owner/Admin Access يعطيك صلاحية فقط داخل نفس السيرفر، مو صلاحيات صاحب البوت.</p>
+      <p>Guild ID: <b>{gid}</b></p>
+      <p><a style="color:#8b5cf6" href="/dashboard/guilds">Back to your servers</a></p>
+    </div>
+    """, 403
+
+@app.before_request
+def nm_v5_scope_dashboard_access_before_request():
+    try:
+        path = str(request.path or "")
+        if not path.startswith("/dashboard"):
+            return None
+
+        # Public-ish dashboard helper pages still require login in old code, but don't scope here.
+        open_paths = {
+            "/dashboard/health-check",
+            "/dashboard/runtime-errors",
+        }
+        if path in open_paths:
+            return None
+
+        # If not logged in, let old auth handle it.
+        if not (session.get("discord_user") or {}):
+            return None
+
+        # Private owner unrestricted.
+        if nm_v5_is_private_bot_owner():
+            return None
+
+        gid = None
+        try:
+            raw_gid = request.args.get("guild_id") or request.form.get("guild_id")
+            if raw_gid:
+                gid = int(raw_gid)
+        except Exception:
+            gid = None
+
+        # Guild list page is allowed, but will be filtered.
+        if path in ("/dashboard/guilds", "/dashboard/guilds/"):
+            return None
+
+        # If route is general /dashboard without guild_id, redirect to first allowed server.
+        if not gid:
+            allowed = nm_v5_allowed_guilds_for_user()
+            if allowed:
+                session["selected_guild_id"] = str(int(allowed[0].id))
+                session["dashboard_active_guild_id"] = str(int(allowed[0].id))
+                if path == "/dashboard":
+                    return redirect(f"/dashboard?guild_id={int(allowed[0].id)}")
+                return None
+            return nm_v5_access_denied_page(0)
+
+        if not nm_v5_user_can_access_guild(gid):
+            return nm_v5_access_denied_page(gid)
+
+        session["selected_guild_id"] = str(int(gid))
+        session["dashboard_active_guild_id"] = str(int(gid))
+    except Exception as e:
+        try:
+            print(f"NM V5 dashboard scope guard skipped error: {e}")
+        except Exception:
+            pass
+    return None
+
+# Override old owner/admin requirement helpers to be server-scoped.
+def dashboard_require_owner():
+    try:
+        if not (session.get("discord_user") or {}):
+            return redirect("/login")
+        gid = nm_v5_active_guild_id_for_request()
+        if nm_v5_user_is_server_owner(gid):
+            return None
+        return nm_v5_access_denied_page(gid)
+    except Exception:
+        return nm_v5_access_denied_page(0)
+
+def dashboard_require_admin():
+    try:
+        if not (session.get("discord_user") or {}):
+            return redirect("/login")
+        gid = nm_v5_active_guild_id_for_request()
+        if nm_v5_user_is_server_admin_or_owner(gid):
+            return None
+        return nm_v5_access_denied_page(gid)
+    except Exception:
+        return nm_v5_access_denied_page(0)
+
+def dashboard_current_user_access_label(guild_id=None):
+    gid = int(guild_id or nm_v5_active_guild_id_for_request())
+    if nm_v5_is_private_bot_owner():
+        return "Bot Private Owner"
+    if nm_v5_member_has_administrator(gid):
+        return "Discord Administrator"
+    lvl = nm_v5_user_saved_access_level(gid)
+    if lvl == "owner":
+        return "Server Owner"
+    if lvl == "admin":
+        return "Server Admin"
+    return "No Access"
+
+def nm_v5_scoped_guilds_page():
+    if not (session.get("discord_user") or {}):
+        return redirect("/login")
+
+    guilds = nm_v5_allowed_guilds_for_user()
+    cards = []
+
+    for g in guilds:
+        try:
+            icon = g.icon.url if getattr(g, "icon", None) else ""
+        except Exception:
+            icon = ""
+        try:
+            member_count = int(getattr(g, "member_count", 0) or len(getattr(g, "members", []) or []))
+        except Exception:
+            member_count = 0
+        label = dashboard_current_user_access_label(int(g.id))
+        cards.append(f"""
+        <div class="guild-card">
+          <div class="guild-main">
+            <img src="{icon}" class="guild-icon">
+            <div>
+              <h3>{dash_escape(getattr(g,'name','Unknown'), 100)}</h3>
+              <p class="muted">ID: <code>{int(g.id)}</code> • Members: {member_count}</p>
+              <span class="pill">{dash_escape(label, 60)}</span>
+            </div>
+          </div>
+          <a class="btn primary" href="/dashboard?guild_id={int(g.id)}">Open Dashboard</a>
+        </div>
+        """)
+
+    if not cards:
+        cards.append("""
+        <div class="empty">
+          <h3>No accessible servers</h3>
+          <p>ما عندك Administrator ولا Admin Access في أي سيرفر موجود فيه البوت.</p>
+        </div>
+        """)
+
+    body = f"""
+    <style>
+      .guild-card {{
+        display:flex; justify-content:space-between; align-items:center; gap:18px;
+        background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:18px; margin:12px 0;
+      }}
+      .guild-main {{ display:flex; align-items:center; gap:14px; }}
+      .guild-icon {{ width:64px; height:64px; border-radius:18px; object-fit:cover; background:#111827; }}
+      .empty {{ background:#0b1224; border:1px solid #334155; border-radius:22px; padding:24px; }}
+      @media(max-width:800px) {{ .guild-card {{ flex-direction:column; align-items:flex-start; }} }}
+    </style>
+    <div class="card">
+      <h2>🌐 Your Accessible Servers</h2>
+      <p class="muted">تظهر لك فقط السيرفرات اللي عندك فيها Administrator أو Admin Access محفوظ. صلاحية Owner داخل سيرفر ما تعطيك صلاحية صاحب البوت.</p>
+    </div>
+    {''.join(cards)}
+    """
+    return render_dashboard_page("Guilds", body)
+
+try:
+    app.view_functions["dashboard_guilds_page"] = nm_v5_scoped_guilds_page
+except Exception as e:
+    try: print(f"NM V5 scoped guild page override skipped: {e}")
+    except Exception: pass
+
+@app.route("/dashboard/access-scope-status")
+def nm_v5_access_scope_status():
+    if not (session.get("discord_user") or {}):
+        return redirect("/login")
+    allowed = nm_v5_allowed_guilds_for_user()
+    rows = []
+    for g in allowed:
+        rows.append(f"<li>{dash_escape(getattr(g,'name','Unknown'),100)} — {int(g.id)} — {dash_escape(dashboard_current_user_access_label(int(g.id)),60)}</li>")
+    rows_html = "".join(rows) or "<li>No accessible guilds</li>"
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Dashboard Access Scope</h1>
+      <p>Bot Private Owner: <b>{dash_escape(str(nm_v5_is_private_bot_owner()), 20)}</b></p>
+      <p>User ID: <b>{nm_v5_access_user_id()}</b></p>
+      <h3>Accessible Guilds</h3>
+      <ul>{rows_html}</ul>
+      <p><a style="color:#8b5cf6" href="/dashboard/guilds">Back to Guilds</a></p>
+    </div>
+    """
+
+def nm_v5_access_scope_boot():
+    try:
+        print("✅ NM V5 per-server dashboard access scope active")
+    except Exception:
+        pass
 
 
 keep_alive()
