@@ -7881,12 +7881,24 @@ def dashboard_warning_table_rows(rows):
         else:
             action_html = "<span class='muted small'>Saved in history</span>"
 
+        select_html = ""
+        if status == "active":
+            select_html = f"""
+              <label class="warning-select-wrap" title="Select this warning">
+                <input type="checkbox" class="js-warning-select" value="{warning_id}">
+                <span>Select</span>
+              </label>
+            """
+
         html_rows += f"""
         <div class="warning-row" data-warning-id="{warning_id}" data-user-id="{user_id}" data-status="{status}">
           <div class="warning-main">
             <div class="warning-user-block">
-              <span class="pill {pill}">{status}</span>
-              <span class="muted small">ID: {warning_id}</span>
+              <div class="warning-status-line">
+                <span class="pill {pill}">{status}</span>
+                <span class="muted small">ID: {warning_id}</span>
+              </div>
+              {select_html}
               <div class="warning-member">{dashboard_member_name(user_id)}</div>
               <div class="muted small mono">{user_id}</div>
             </div>
@@ -7984,6 +7996,64 @@ def dashboard_warnings_page():
       .warning-content-block,
       .warning-action-block {{
         min-width:0;
+      }}
+      .warning-status-line {{
+        display:flex;
+        gap:8px;
+        align-items:center;
+        flex-wrap:wrap;
+      }}
+      .warning-select-wrap {{
+        display:inline-flex;
+        align-items:center;
+        gap:8px;
+        margin-top:10px;
+        padding:8px 10px;
+        border:1px solid rgba(148,163,184,.18);
+        background:rgba(2,6,23,.35);
+        border-radius:12px;
+        color:var(--muted);
+        font-size:13px;
+        cursor:pointer;
+        user-select:none;
+      }}
+      .warning-select-wrap input {{
+        width:16px;
+        height:16px;
+        min-width:16px !important;
+        accent-color:#5865f2;
+      }}
+      .warning-row.is-selected {{
+        border-color:rgba(88,101,242,.9);
+        box-shadow:0 0 0 1px rgba(88,101,242,.45), 0 18px 40px rgba(88,101,242,.10);
+      }}
+      .bulk-warning-bar {{
+        position:sticky;
+        top:12px;
+        z-index:5;
+        display:flex;
+        align-items:end;
+        justify-content:space-between;
+        gap:12px;
+        padding:14px;
+        margin-bottom:14px;
+        border:1px solid rgba(88,101,242,.28);
+        border-radius:18px;
+        background:rgba(15,23,42,.92);
+        backdrop-filter:blur(14px);
+      }}
+      .bulk-warning-left, .bulk-warning-right {{
+        display:flex;
+        gap:10px;
+        flex-wrap:wrap;
+        align-items:end;
+      }}
+      .bulk-warning-bar input {{
+        min-width:260px;
+      }}
+      .bulk-count {{
+        font-weight:900;
+        color:#c4b5fd;
       }}
       .warning-member {{
         margin-top:10px;
@@ -8127,7 +8197,23 @@ def dashboard_warnings_page():
 
     <div class="card">
       <h3>📋 Warning History</h3>
-      <p class="muted small">عرض مرتب بدون جدول عريض عشان ما يخرب الشكل. الإنذارات المزالة تبقى محفوظة كـ Cleared.</p>
+      <p class="muted small">تقدر تحدد أكثر من إنذار وتسوي عليها Clear دفعة وحدة. الإنذارات المزالة تبقى محفوظة كـ Cleared.</p>
+
+      <div class="bulk-warning-bar">
+        <div class="bulk-warning-left">
+          <button type="button" class="btn" id="selectActiveWarnings">Select active</button>
+          <button type="button" class="btn" id="clearSelectionWarnings">Clear selection</button>
+          <span class="muted small"><span class="bulk-count" id="selectedWarningsCount">0</span> selected</span>
+        </div>
+        <div class="bulk-warning-right">
+          <div>
+            <label>Bulk clear reason</label>
+            <input id="bulkWarningReason" value="Removed from dashboard" placeholder="Reason for selected warnings">
+          </div>
+          <button type="button" class="btn red" id="bulkClearWarningsBtn">Clear Selected</button>
+        </div>
+      </div>
+
       <div class="warnings-list">
         {table}
       </div>
@@ -8164,6 +8250,95 @@ def dashboard_warnings_page():
         }} finally {{
           if (btn) {{ btn.disabled = false; btn.textContent = oldText; }}
         }}
+      }}
+
+      const selectedWarnings = new Set();
+
+      function updateWarningSelectionUI() {{
+        document.querySelectorAll('.js-warning-select').forEach(chk => {{
+          const row = chk.closest('.warning-row');
+          if (chk.checked) {{
+            selectedWarnings.add(chk.value);
+            if (row) row.classList.add('is-selected');
+          }} else {{
+            selectedWarnings.delete(chk.value);
+            if (row) row.classList.remove('is-selected');
+          }}
+        }});
+        const count = document.getElementById('selectedWarningsCount');
+        if (count) count.textContent = selectedWarnings.size;
+      }}
+
+      document.querySelectorAll('.js-warning-select').forEach(chk => {{
+        chk.addEventListener('change', updateWarningSelectionUI);
+      }});
+
+      const selectActiveBtn = document.getElementById('selectActiveWarnings');
+      if (selectActiveBtn) {{
+        selectActiveBtn.addEventListener('click', () => {{
+          const activeChecks = Array.from(document.querySelectorAll('.warning-row[data-status="active"] .js-warning-select'));
+          const allSelected = activeChecks.length > 0 && activeChecks.every(chk => chk.checked);
+          activeChecks.forEach(chk => chk.checked = !allSelected);
+          updateWarningSelectionUI();
+          selectActiveBtn.textContent = allSelected ? 'Select active' : 'Unselect active';
+        }});
+      }}
+
+      const clearSelectionBtn = document.getElementById('clearSelectionWarnings');
+      if (clearSelectionBtn) {{
+        clearSelectionBtn.addEventListener('click', () => {{
+          document.querySelectorAll('.js-warning-select').forEach(chk => chk.checked = false);
+          updateWarningSelectionUI();
+        }});
+      }}
+
+      const bulkClearBtn = document.getElementById('bulkClearWarningsBtn');
+      if (bulkClearBtn) {{
+        bulkClearBtn.addEventListener('click', async () => {{
+          updateWarningSelectionUI();
+          const ids = Array.from(selectedWarnings);
+          if (!ids.length) {{ showWarningToast('Select at least one active warning first.', false); return; }}
+          if (!confirm('Clear ' + ids.length + ' selected warnings? They will stay saved as cleared.')) return;
+          const oldText = bulkClearBtn.textContent;
+          bulkClearBtn.disabled = true;
+          bulkClearBtn.textContent = 'Clearing...';
+          try {{
+            const formData = new FormData();
+            ids.forEach(id => formData.append('warning_ids', id));
+            formData.append('reason', (document.getElementById('bulkWarningReason') || {{}}).value || 'Removed from dashboard');
+            formData.append('ajax', '1');
+            const res = await fetch('/dashboard/warnings/clear-selected', {{
+              method: 'POST',
+              body: formData,
+              headers: {{ 'X-Requested-With': 'XMLHttpRequest' }}
+            }});
+            const data = await res.json();
+            if (!data.ok) throw new Error(data.error || 'Failed');
+            (data.cleared_ids || []).forEach(id => {{
+              const row = document.querySelector('.warning-row[data-warning-id="' + id + '"]');
+              if (!row) return;
+              row.dataset.status = 'cleared';
+              row.classList.add('warning-cleared-row');
+              row.classList.remove('is-selected');
+              const chk = row.querySelector('.js-warning-select');
+              if (chk) {{ chk.checked = false; chk.disabled = true; }}
+              const pill = row.querySelector('.pill');
+              if (pill) {{ pill.className = 'pill ok'; pill.textContent = 'cleared'; }}
+              const action = row.querySelector('.warning-action-block');
+              if (action) action.innerHTML = '<span class="muted small">Saved in history</span>';
+              const clearedLine = row.querySelector('.warning-cleared');
+              if (clearedLine) clearedLine.innerHTML = '<b>Cleared:</b> just now • <b>By:</b> Dashboard • <b>Reason:</b> ' + (data.reason || 'Removed from dashboard');
+            }});
+            selectedWarnings.clear();
+            updateWarningSelectionUI();
+            showWarningToast(data.message || 'Selected warnings cleared.');
+          }} catch (err) {{
+            showWarningToast(err.message || 'Could not clear selected warnings.', false);
+          }} finally {{
+            bulkClearBtn.disabled = false;
+            bulkClearBtn.textContent = oldText;
+          }}
+        }});
       }}
 
       document.querySelectorAll('.js-warning-clear').forEach(form => {{
@@ -8253,6 +8428,63 @@ def dashboard_clear_single_warning():
     if wants_json:
         return {"ok": False, "error": "Warning not found or already cleared."}, 404
     return redirect("/dashboard/warnings?status=all&err=" + urllib.parse.quote("Warning not found or already cleared."))
+
+
+@app.route("/dashboard/warnings/clear-selected", methods=["POST"])
+def dashboard_clear_selected_warnings():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+
+    raw_ids = request.form.getlist("warning_ids")
+    reason = request.form.get("reason", "Removed from dashboard").strip() or "Removed from dashboard"
+    wants_json = request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.form.get("ajax") == "1"
+
+    warning_ids = []
+    for item in raw_ids:
+        if str(item).isdigit():
+            warning_ids.append(int(item))
+
+    warning_ids = list(dict.fromkeys(warning_ids))[:100]
+
+    if not warning_ids:
+        if wants_json:
+            return {"ok": False, "error": "No valid warning IDs selected."}, 400
+        return redirect("/dashboard/warnings?err=" + urllib.parse.quote("No valid warning IDs selected."))
+
+    admin = session.get("discord_user") or {}
+    admin_name = admin.get("username", "Dashboard Admin")
+    cleared_ids = []
+    affected_users = set()
+
+    for warning_id in warning_ids:
+        cleared, user_id = clear_single_warning_by_id(
+            int(warning_id),
+            cleared_by=f"{admin_name} ({admin.get('id','0')})",
+            clear_reason=reason
+        )
+        if cleared:
+            cleared_ids.append(int(warning_id))
+            if user_id:
+                affected_users.add(str(user_id))
+
+    dashboard_log_action(
+        "Bulk cleared warnings",
+        f"count={len(cleared_ids)} | ids={','.join(map(str, cleared_ids[:50]))} | reason={reason}",
+        admin
+    )
+
+    if wants_json:
+        return {
+            "ok": True,
+            "cleared": len(cleared_ids),
+            "cleared_ids": cleared_ids,
+            "affected_users": sorted(affected_users),
+            "reason": reason,
+            "message": f"Cleared {len(cleared_ids)} selected warnings and kept them in history."
+        }
+
+    return redirect("/dashboard/warnings?status=all&msg=" + urllib.parse.quote(f"Cleared {len(cleared_ids)} selected warnings and kept them in history."))
 
 
 @app.route("/dashboard/warnings/clear", methods=["POST"])
