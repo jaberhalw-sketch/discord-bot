@@ -529,6 +529,14 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_guild_levels_guild_level ON guild_levels(guild_id, level, xp)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_guild_warning_history_guild_user ON guild_warning_history(guild_id, user_id)")
 
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_protection_settings (
+            guild_id INTEGER PRIMARY KEY,
+            settings_json TEXT DEFAULT '{}',
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
     cur.execute("""
         CREATE TABLE IF NOT EXISTS suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -5472,6 +5480,169 @@ def parse_text_list(value):
         seen.add(text)
         cleaned.append(text[:120])
     return cleaned
+
+# =========================
+# PROTECTION CORE SETTINGS (PER GUILD)
+# =========================
+raid_join_times = {}
+
+PROTECTION_SETTING_KEYS = [
+    "protection_enabled", "bad_words", "links", "invites", "spam", "mass_mentions",
+    "anti_bot_join", "anti_raid", "anti_channel_create", "anti_channel_delete", "anti_channel_rename",
+    "anti_channel_permission_update", "anti_role_create", "anti_role_delete", "anti_role_permission_update",
+    "anti_ban_abuse", "anti_kick_abuse", "anti_webhook_update", "anti_emoji_delete", "anti_guild_update", "anti_invite_delete",
+    "delete_messages", "timeouts", "bypass_admins", "log_only",
+]
+
+
+def protection_default_settings():
+    return {
+        "protection_enabled": True,
+        "bad_words": True,
+        "links": bool(ANTI_LINKS),
+        "invites": True,
+        "spam": True,
+        "mass_mentions": True,
+        "anti_bot_join": False,
+        "anti_raid": False,
+        "anti_channel_create": False,
+        "anti_channel_delete": False,
+        "anti_channel_rename": False,
+        "anti_channel_permission_update": False,
+        "anti_role_create": False,
+        "anti_role_delete": False,
+        "anti_role_permission_update": False,
+        "anti_ban_abuse": False,
+        "anti_kick_abuse": False,
+        "anti_webhook_update": False,
+        "anti_emoji_delete": False,
+        "anti_guild_update": False,
+        "anti_invite_delete": False,
+        "delete_messages": True,
+        "timeouts": True,
+        "bypass_admins": True,
+        "log_only": False,
+        "punishment": "timeout_10m",
+        "spam_limit": int(SPAM_LIMIT),
+        "spam_seconds": int(SPAM_SECONDS),
+        "mass_mention_limit": int(MASS_MENTION_LIMIT),
+        "raid_join_limit": 8,
+        "raid_seconds": 20,
+        "quarantine_role_name": "NM Quarantine",
+        "link_whitelist": [],
+        "ignored_channels": [],
+        "ignored_roles": [],
+    }
+
+
+def ensure_guild_protection_table():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_protection_settings (
+                guild_id INTEGER PRIMARY KEY,
+                settings_json TEXT DEFAULT '{}',
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Protection table ensure error: {e}")
+        return False
+
+
+def normalize_protection_settings(data=None):
+    base = protection_default_settings()
+    if isinstance(data, dict):
+        base.update(data)
+
+    for key in PROTECTION_SETTING_KEYS:
+        base[key] = bool(base.get(key))
+
+    allowed_punishments = {"log_only", "warn", "timeout_10m", "timeout_1h", "quarantine", "kick", "ban"}
+    if base.get("punishment") not in allowed_punishments:
+        base["punishment"] = "timeout_10m"
+
+    base["spam_limit"] = parse_int_field(base.get("spam_limit"), SPAM_LIMIT, 2)
+    base["spam_seconds"] = parse_int_field(base.get("spam_seconds"), SPAM_SECONDS, 1)
+    base["mass_mention_limit"] = parse_int_field(base.get("mass_mention_limit"), MASS_MENTION_LIMIT, 1)
+    base["raid_join_limit"] = parse_int_field(base.get("raid_join_limit"), 8, 2)
+    base["raid_seconds"] = parse_int_field(base.get("raid_seconds"), 20, 5)
+    base["quarantine_role_name"] = str(base.get("quarantine_role_name") or "NM Quarantine")[:80]
+    base["link_whitelist"] = parse_text_list(base.get("link_whitelist", []))
+    base["ignored_channels"] = parse_dashboard_int_list(base.get("ignored_channels", []))
+    base["ignored_roles"] = parse_dashboard_int_list(base.get("ignored_roles", []))
+    return base
+
+
+def get_guild_protection_settings(guild_id):
+    guild_id = int(guild_id or 0)
+    ensure_guild_protection_table()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT settings_json FROM guild_protection_settings WHERE guild_id = ?", (guild_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row and row[0]:
+            try:
+                loaded = json.loads(row[0])
+            except:
+                loaded = {}
+            return normalize_protection_settings(loaded)
+    except Exception as e:
+        print(f"Get guild protection settings error: {e}")
+    return normalize_protection_settings({})
+
+
+def save_guild_protection_settings(guild_id, settings):
+    guild_id = int(guild_id or 0)
+    settings = normalize_protection_settings(settings)
+    ensure_guild_protection_table()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO guild_protection_settings (guild_id, settings_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET
+                settings_json = excluded.settings_json,
+                updated_at = excluded.updated_at
+        """, (guild_id, json.dumps(settings, ensure_ascii=False), int(time.time())))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Save guild protection settings error: {e}")
+        return False
+
+
+def protection_channel_ignored_for(settings, channel_id):
+    try:
+        return int(channel_id or 0) in {int(x) for x in settings.get("ignored_channels", [])}
+    except:
+        return False
+
+
+def protection_member_ignored_by_role(settings, member):
+    try:
+        ignored_roles = {int(x) for x in settings.get("ignored_roles", [])}
+        return any(int(role.id) in ignored_roles for role in getattr(member, "roles", []))
+    except:
+        return False
+
+
+def protection_link_allowed_for(settings, content):
+    text = str(content or "").lower()
+    for allowed in settings.get("link_whitelist", []):
+        allowed = str(allowed).lower().strip()
+        if allowed and allowed in text:
+            return True
+    return False
+
 
 
 def protection_channel_ignored(channel_id):
