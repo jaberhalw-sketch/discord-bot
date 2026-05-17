@@ -4898,14 +4898,14 @@ def nm_multiguild_select_before_request():
         pass
 
 
-@app.route("/dashboard/guild/<int:guild_id>", endpoint="nm_open_guild_dashboard_root")
+@app.route("/dashboard/guild/<int:guild_id>", endpoint="nm_open_guild_dashboard_root_v2")
 def nm_open_guild_dashboard_root(guild_id):
     session["selected_guild_id"] = int(guild_id)
     session["dashboard_active_guild_id"] = int(guild_id)
     return redirect(f"/dashboard?guild_id={int(guild_id)}")
 
 
-@app.route("/dashboard/guild/<int:guild_id>/<path:page>", endpoint="nm_open_guild_dashboard_page")
+@app.route("/dashboard/guild/<int:guild_id>/<path:page>", endpoint="nm_open_guild_dashboard_page_v2")
 def nm_open_guild_dashboard_page(guild_id, page):
     session["selected_guild_id"] = int(guild_id)
     session["dashboard_active_guild_id"] = int(guild_id)
@@ -11954,7 +11954,6 @@ async def on_guild_join(guild):
     )
 
 
-@bot.event
 
 def nm_global_cleanup_audit():
     try:
