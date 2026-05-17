@@ -6554,6 +6554,258 @@ def dashboard_home():
     return render_dashboard_page("Overview", body)
 
 
+
+
+# =========================
+# BOT OWNER GLOBAL MONITOR
+# =========================
+
+def dashboard_owner_guild_permissions_snapshot(guild):
+    """Return important bot permission checks for a guild."""
+    checks = []
+    try:
+        me = getattr(guild, "me", None) or guild.get_member(bot.user.id)
+        perms = me.guild_permissions if me else None
+        checks = [
+            ("View Channels", bool(perms and perms.view_channel)),
+            ("Send Messages", bool(perms and perms.send_messages)),
+            ("Embed Links", bool(perms and perms.embed_links)),
+            ("Manage Channels", bool(perms and perms.manage_channels)),
+            ("Manage Roles", bool(perms and perms.manage_roles)),
+            ("Read Message History", bool(perms and perms.read_message_history)),
+            ("View Audit Log", bool(perms and perms.view_audit_log)),
+            ("Moderate Members", bool(perms and getattr(perms, "moderate_members", False))),
+            ("Manage Messages", bool(perms and perms.manage_messages)),
+        ]
+    except Exception:
+        pass
+    return checks
+
+
+def dashboard_owner_guild_log_status(guild, settings=None):
+    """Count the existing log rooms by configured names, and report missing log rooms."""
+    try:
+        if not guild:
+            return 0, len(LOG_CHANNEL_NAMES), list(LOG_CHANNEL_NAMES.values()), []
+        existing_names = {str(c.name).lower(): c for c in guild.text_channels}
+        missing = []
+        existing = []
+        for key, name in LOG_CHANNEL_NAMES.items():
+            channel = existing_names.get(str(name).lower())
+            if channel:
+                existing.append(channel)
+            else:
+                missing.append(name)
+        outside = []
+        logs_category_id = int((settings or {}).get("logs_category_id") or 0)
+        if logs_category_id:
+            for channel in existing:
+                try:
+                    if not channel.category or int(channel.category.id) != logs_category_id:
+                        outside.append(channel.name)
+                except Exception:
+                    pass
+        return len(existing), len(LOG_CHANNEL_NAMES), missing, outside
+    except Exception:
+        return 0, len(LOG_CHANNEL_NAMES), list(LOG_CHANNEL_NAMES.values()), []
+
+
+def dashboard_owner_guild_health_badges(guild, settings):
+    badges = []
+    try:
+        if settings.get("enabled"):
+            badges.append("<span class='pill ok'>Enabled</span>")
+        else:
+            badges.append("<span class='pill bad'>Disabled</span>")
+
+        if settings.get("setup_done"):
+            badges.append("<span class='pill ok'>Setup Done</span>")
+        else:
+            badges.append("<span class='pill warn'>Needs Setup</span>")
+
+        if settings.get("commands_channel_id"):
+            badges.append("<span class='pill ok'>Commands Set</span>")
+        else:
+            badges.append("<span class='pill warn'>No Commands Room</span>")
+
+        if settings.get("gambling_channel_id"):
+            badges.append("<span class='pill ok'>Gambling Set</span>")
+        else:
+            badges.append("<span class='pill warn'>No Gambling Room</span>")
+
+        log_found, log_total, missing, outside = dashboard_owner_guild_log_status(guild, settings)
+        if log_found >= log_total:
+            badges.append("<span class='pill ok'>Logs Ready</span>")
+        elif log_found > 0:
+            badges.append(f"<span class='pill warn'>Logs {log_found}/{log_total}</span>")
+        else:
+            badges.append("<span class='pill bad'>No Log Rooms</span>")
+    except Exception:
+        badges.append("<span class='pill bad'>Status Error</span>")
+    return " ".join(badges)
+
+
+def dashboard_owner_guild_card(guild):
+    settings = get_guild_settings(guild.id)
+    log_found, log_total, missing_logs, outside_logs = dashboard_owner_guild_log_status(guild, settings)
+    permission_checks = dashboard_owner_guild_permissions_snapshot(guild)
+    ok_perms = sum(1 for _, ok in permission_checks if ok)
+    total_perms = len(permission_checks) or 1
+    bad_perm_names = [name for name, ok in permission_checks if not ok]
+
+    humans = len([m for m in guild.members if not m.bot])
+    bots = len([m for m in guild.members if m.bot])
+    online = len([m for m in guild.members if not m.bot and str(m.status) != "offline"])
+    voice = len([m for m in guild.members if not m.bot and getattr(m, "voice", None) and m.voice and m.voice.channel])
+
+    owner_text = "Unknown"
+    try:
+        owner_text = f"{dash_escape(str(guild.owner), 90)}" if guild.owner else f"Owner ID: {guild.owner_id}"
+    except Exception:
+        owner_text = f"Owner ID: {getattr(guild, 'owner_id', 'Unknown')}"
+
+    icon_html = "🌍"
+    try:
+        if guild.icon:
+            icon_html = f"<img src='{guild.icon.url}' style='width:46px;height:46px;border-radius:16px;object-fit:cover'>"
+    except Exception:
+        pass
+
+    missing_logs_text = ", ".join(missing_logs[:5]) + ("..." if len(missing_logs) > 5 else "") if missing_logs else "None"
+    outside_logs_text = ", ".join(outside_logs[:5]) + ("..." if len(outside_logs) > 5 else "") if outside_logs else "None"
+    bad_perms_text = ", ".join(bad_perm_names[:5]) + ("..." if len(bad_perm_names) > 5 else "") if bad_perm_names else "All important permissions OK"
+
+    commands_text = f"<#{settings.get('commands_channel_id')}>" if settings.get("commands_channel_id") else "<span class='muted'>Not set</span>"
+    gambling_text = f"<#{settings.get('gambling_channel_id')}>" if settings.get("gambling_channel_id") else "<span class='muted'>Not set</span>"
+    logs_text = f"<#{settings.get('logs_category_id')}>" if settings.get("logs_category_id") else "<span class='muted'>Not set</span>"
+
+    created_text = "Unknown"
+    try:
+        created_text = guild.created_at.strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    return f"""
+    <div class="card">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px;">
+        <div style="display:flex;gap:12px;align-items:center;min-width:0;">
+          <div>{icon_html}</div>
+          <div style="min-width:0;">
+            <h3 style="margin:0 0 4px">{dash_escape(guild.name, 120)}</h3>
+            <p class="muted small" style="margin:0">Guild ID: <code>{guild.id}</code> • Owner: {owner_text}</p>
+          </div>
+        </div>
+        <div style="text-align:right;white-space:nowrap">{dashboard_owner_guild_health_badges(guild, settings)}</div>
+      </div>
+
+      <div style="height:12px"></div>
+      <div class="grid3">
+        <div><span class="muted small">Members</span><div class="cc-stat" style="font-size:22px">{humans:,}</div><p class="muted small">Online: {online:,} • Voice: {voice:,} • Bots: {bots:,}</p></div>
+        <div><span class="muted small">Channels</span><div class="cc-stat" style="font-size:22px">{len(guild.text_channels):,} / {len(guild.voice_channels):,}</div><p class="muted small">Text / Voice • Created: {created_text}</p></div>
+        <div><span class="muted small">Bot Permissions</span><div class="cc-stat" style="font-size:22px">{ok_perms}/{total_perms}</div><p class="muted small">{dash_escape(bad_perms_text, 180)}</p></div>
+      </div>
+
+      <div style="height:10px"></div>
+      <div class="grid3">
+        <div><span class="muted small">Commands Room</span><p>{commands_text}</p></div>
+        <div><span class="muted small">Gambling Room</span><p>{gambling_text}</p></div>
+        <div><span class="muted small">Logs Category</span><p>{logs_text}</p></div>
+      </div>
+
+      <div class="card" style="padding:12px;box-shadow:none;background:rgba(255,255,255,.035);margin-top:10px">
+        <p class="muted small" style="margin:0"><b>Logs:</b> {log_found}/{log_total} موجودة • <b>Missing:</b> {dash_escape(missing_logs_text, 180)} • <b>Outside category:</b> {dash_escape(outside_logs_text, 180)}</p>
+      </div>
+
+      <div style="height:12px"></div>
+      <a class="btn primary" href="/dashboard/guild/{guild.id}/setup">Setup</a>
+      <a class="btn" href="/dashboard/guild/{guild.id}/command-center">Command Center</a>
+      <a class="btn" href="/dashboard/guild/{guild.id}/protection">Protection</a>
+      <a class="btn" href="/dashboard/guild/{guild.id}/warnings">Warnings</a>
+      <a class="btn" href="/dashboard/guild/{guild.id}/log-vault">Log Vault</a>
+    </div>
+    """
+
+
+@app.route("/dashboard/owner-console", methods=["GET"])
+def dashboard_owner_console_page():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    init_db()
+
+    guilds = []
+    try:
+        guilds = sorted(list(bot.guilds), key=lambda g: str(g.name).lower())
+    except Exception:
+        guilds = []
+
+    total_guilds = len(guilds)
+    total_members = sum(len(g.members) for g in guilds)
+    total_humans = sum(len([m for m in g.members if not m.bot]) for g in guilds)
+    total_online = sum(len([m for m in g.members if not m.bot and str(m.status) != "offline"]) for g in guilds)
+    total_text = sum(len(g.text_channels) for g in guilds)
+    total_voice = sum(len(g.voice_channels) for g in guilds)
+    setup_done = 0
+    enabled_count = 0
+    logs_ready = 0
+    for g in guilds:
+        st = get_guild_settings(g.id)
+        if st.get("setup_done"):
+            setup_done += 1
+        if st.get("enabled"):
+            enabled_count += 1
+        found, total, _, _ = dashboard_owner_guild_log_status(g, st)
+        if found >= total:
+            logs_ready += 1
+
+    q = str(request.args.get("q", "")).lower().strip()
+    filtered = guilds
+    if q:
+        filtered = [g for g in guilds if q in str(g.name).lower() or q in str(g.id)]
+
+    rows = "".join([dashboard_owner_guild_card(g) for g in filtered])
+    if not rows:
+        rows = "<div class='card warn'><h3>No servers found</h3><p class='muted'>ما لقيت سيرفرات مطابقة للبحث.</p></div>"
+
+    body = f"""
+    {dashboard_toast_html()}
+    <div class="hero">
+      <div class="card">
+        <div class="big">👑 Bot Owner Console</div>
+        <p class="muted">مركز مراقبة خاص لصاحب البوت. هنا تشوف كل السيرفرات اللي دخلها البوت، وتفتح إعدادات أي سيرفر مباشرة بدون الاعتماد على صلاحياتك داخل السيرفر.</p>
+        <p><span class="pill ok">Owner Only</span> <span class="pill">All Bot Guilds</span> <span class="pill">Global Monitoring</span></p>
+      </div>
+      <div class="card">
+        <h3>Quick Search</h3>
+        <form method="get" action="/dashboard/owner-console">
+          <input name="q" value="{dash_escape(q, 80)}" placeholder="Search by server name or guild ID">
+          <div style="height:10px"></div>
+          <button class="btn primary" type="submit">Search</button>
+          <a class="btn" href="/dashboard/owner-console">Reset</a>
+        </form>
+      </div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid">
+      <div class="card"><h3>🌍 Servers</h3><div class="cc-stat">{total_guilds:,}</div><p class="muted small">Enabled: {enabled_count:,} • Setup done: {setup_done:,}</p></div>
+      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{total_humans:,}</div><p class="muted small">Total accounts: {total_members:,} • Online humans: {total_online:,}</p></div>
+      <div class="card"><h3>📡 Channels</h3><div class="cc-stat">{total_text:,} / {total_voice:,}</div><p class="muted small">Text / Voice across all servers</p></div>
+      <div class="card"><h3>🧾 Logs Ready</h3><div class="cc-stat">{logs_ready:,}/{total_guilds:,}</div><p class="muted small">Servers with all log rooms created</p></div>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="card">
+      <h3>صلاحياتك كصاحب البوت</h3>
+      <p class="muted">أنت كـ Owner تقدر تدخل Setup وCommand Center وProtection وWarnings وLog Vault لأي سيرفر البوت داخله، حتى لو ما كنت صاحب السيرفر نفسه. Admin العادي ما يشوف هذه الصفحة.</p>
+    </div>
+
+    <div style="height:14px"></div>
+    <div class="grid2">{rows}</div>
+    """
+    return render_dashboard_page("Bot Owner Console", body)
+
+
 @app.route("/dashboard/guilds", methods=["GET"])
 def dashboard_guild_selector_page():
     denied = dashboard_require_login()
@@ -6588,7 +6840,10 @@ def dashboard_guild_selector_page():
           </div>
           <div style="height:10px"></div>
           <p class="muted small">Commands: {commands_text} • Gambling: {gambling_text}</p>
-          <a class="btn primary" href="/dashboard/guild/{guild_id}/setup">Open Setup</a>
+          <a class="btn primary" href="/dashboard/guild/{guild_id}/setup">Setup</a>
+          <a class="btn" href="/dashboard/guild/{guild_id}/command-center">Command Center</a>
+          <a class="btn" href="/dashboard/guild/{guild_id}/protection">Protection</a>
+          <a class="btn" href="/dashboard/guild/{guild_id}/warnings">Warnings</a>
         </div>
         ''')
 
@@ -6604,8 +6859,8 @@ def dashboard_guild_selector_page():
     body = f'''
     {dashboard_toast_html()}
     <div class="hero">
-      <div class="card"><div class="big">🌍 Guild Selector</div><p class="muted">اختار السيرفر اللي تبي تضبطه. هذي بداية تحويل البوت إلى Multi-Guild Dashboard.</p></div>
-      <div class="card"><h3>Phase 2</h3><p><span class="pill ok">Dashboard Guild Setup</span></p><p class="muted small">كل سيرفر يقدر يكون له روم أوامر، روم قمار، وكاتقوري لوقات خاص فيه.</p></div>
+      <div class="card"><div class="big">🌍 Guild Selector</div><p class="muted">اختار السيرفر اللي تبي تضبطه. Owner يشوف كل السيرفرات اللي دخلها البوت، أما Admin يشوف فقط السيرفرات اللي عنده فيها Manage Server أو Administrator.</p></div>
+      <div class="card"><h3>Global Dashboard</h3><p><span class="pill ok">Multi-Guild Setup</span></p><p class="muted small">لكل سيرفر إعداداته الخاصة: روم الأوامر، روم القمار، وكاتقوري اللوقات.</p></div>
     </div>
     <div style="height:14px"></div>
     <div class="grid2">{''.join(rows)}</div>
