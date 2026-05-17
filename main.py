@@ -11731,6 +11731,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_final_polish_boot()
     nm_v4_boot_balance_sync()
     nm_v4_boot_normalize_brand_coin()
     nm_pg_boot()
@@ -17304,29 +17305,34 @@ def nm_v4_selected_gid_for_settings():
 def nm_v4_normalize_settings_keys(settings):
     settings = dict(settings or {})
 
-    # coin aliases
+    # Preserve owner's exact custom coin name.
+    # Only use NM Coin if there is truly no saved value at all.
     coin = (
         settings.get("coin_name")
         or settings.get("currency_name")
         or settings.get("economy_coin_name")
         or settings.get("money_name")
         or settings.get("coin")
-        or "NM Coin"
     )
-    settings["coin_name"] = coin
-    settings["currency_name"] = coin
-    settings["economy_coin_name"] = coin
+    if coin is None or str(coin).strip() == "":
+        coin = "NM Coin"
 
-    # brand aliases
+    # Important: do not convert custom/old names automatically.
+    settings["coin_name"] = str(coin)
+    settings["currency_name"] = str(coin)
+    settings["economy_coin_name"] = str(coin)
+
     brand = (
         settings.get("bot_brand")
         or settings.get("brand_name")
         or settings.get("bot_name")
-        or "NM System"
     )
-    settings["bot_brand"] = brand
-    settings["brand_name"] = brand
-    settings["bot_name"] = brand
+    if brand is None or str(brand).strip() == "":
+        brand = "NM System"
+
+    settings["bot_brand"] = str(brand)
+    settings["brand_name"] = str(brand)
+    settings["bot_name"] = str(brand)
 
     return settings
 
@@ -17397,46 +17403,29 @@ def nm_fix_brand_coin_route():
     gid = nm_v4_selected_gid_for_settings()
     settings = nm_v4_get_settings(gid)
 
-    # If old dashboard imported NM Coin, replace it with NM Coin once.
-    if str(settings.get("coin_name", "")).lower().strip() in {"retard coin", "retard", "retard coins"}:
-        settings["coin_name"] = "NM Coin"
-        settings["currency_name"] = "NM Coin"
-        settings["economy_coin_name"] = "NM Coin"
-
-    if not settings.get("bot_brand"):
-        settings["bot_brand"] = "NM System"
-
+    # This route now only syncs aliases. It does NOT force the coin name.
+    # If you want the coin name changed, change it from dashboard customization.
     nm_v4_save_settings(gid, settings)
 
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Brand/Coin fixed</h1>
+      <h1>Brand/Coin synced</h1>
       <p>Guild: <b>{int(gid)}</b></p>
       <p>Brand: <b>{dash_escape(settings.get('bot_brand','NM System'),100)}</b></p>
       <p>Coin: <b>{dash_escape(settings.get('coin_name','NM Coin'),100)}</b></p>
+      <p>No forced reset was applied. Custom names are preserved.</p>
       <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
     </div>
     """
 
-
-
 def nm_v4_boot_normalize_brand_coin():
+    # Disabled on purpose.
+    # Do NOT force coin/brand back to NM System or NM Coin on redeploy.
+    # Whatever the dashboard saves in PostgreSQL must remain exactly as the owner set it.
     try:
-        if not NM_V4_POSTGRES_ENABLED:
-            return
-        main_gid = int(globals().get("GUILD_ID", 0) or 0)
-        if main_gid:
-            s = nm_v4_get_settings(main_gid)
-            if str(s.get("coin_name","")).lower().strip() in {"retard coin","retard","retard coins"}:
-                s["coin_name"] = "NM Coin"
-                s["currency_name"] = "NM Coin"
-                s["economy_coin_name"] = "NM Coin"
-            nm_v4_save_settings(main_gid, s)
-            print("✅ NM V4 brand/coin normalized.")
-    except Exception as e:
-        print(f"NM V4 brand/coin normalize failed: {e}")
-
-
+        print("✅ NM V4 brand/coin normalize disabled: custom values are preserved.")
+    except Exception:
+        pass
 
 # =========================
 # NM V4 DASHBOARD <-> DISCORD BALANCE SYNC FIX
@@ -17687,8 +17676,674 @@ def nm_v4_boot_balance_sync():
 
 
 
+
+# =========================
+# NM V4 CUSTOM COIN FORCE SAVE
+# Direct route/POST support for saving custom coin without reset.
+# =========================
+
+@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
+def nm_set_custom_coin_route():
+    gid = nm_v4_selected_gid_for_settings()
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip()
+        if not coin:
+            coin = "NM Coin"
+        settings = nm_v4_get_settings(gid)
+        settings["coin_name"] = coin
+        settings["currency_name"] = coin
+        settings["economy_coin_name"] = coin
+        nm_v4_save_settings(gid, settings)
+        return f"""
+        <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+          <h1>Coin saved</h1>
+          <p>Guild: <b>{int(gid)}</b></p>
+          <p>Coin Name: <b>{dash_escape(coin, 100)}</b></p>
+          <p>This value is now stored in PostgreSQL and will not reset on redeploy.</p>
+          <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+        </div>
+        """
+
+    current = nm_v4_get_settings(gid).get("coin_name", "NM Coin")
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Set Custom Coin</h1>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <label>Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+
+
 nm_pg_boot()
 nm_v4_boot_normalize_brand_coin()
+
+
+@app.after_request
+def nm_v4_coin_after_request_sync(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = request.form.get("coin_name") or request.form.get("currency_name") or request.form.get("economy_coin_name")
+            brand = request.form.get("bot_brand") or request.form.get("brand_name") or request.form.get("bot_name")
+            if coin or brand:
+                gid = nm_v4_selected_gid_for_settings()
+                settings = nm_v4_get_settings(gid)
+                if coin and str(coin).strip():
+                    settings["coin_name"] = str(coin).strip()
+                    settings["currency_name"] = str(coin).strip()
+                    settings["economy_coin_name"] = str(coin).strip()
+                if brand and str(brand).strip():
+                    settings["bot_brand"] = str(brand).strip()
+                    settings["brand_name"] = str(brand).strip()
+                    settings["bot_name"] = str(brand).strip()
+                nm_v4_save_settings(gid, settings)
+    except Exception as e:
+        try:
+            print(f"NM V4 coin after_request sync failed: {e}")
+        except Exception:
+            pass
+    return response
+
+
+
+
+# =====================================================================
+# NM SYSTEM V4 FINAL POLISH SYNC
+# هدفه: مصدر واحد للفلوس واسم العملة بين الداشبورد والديسكورد.
+# - يقرأ الرصيد من PostgreSQL + SQLite القديم + guild_id=0
+# - يكتب نفس الرصيد للسيرفر الحالي
+# - أوامر الديسكورد والداشبورد واليوزر لوك أب تستخدم نفس الدالة
+# - اسم العملة يقرأ من إعدادات السيرفر في PostgreSQL ويُحفظ بدون Reset
+# =====================================================================
+
+def nm_final_safe_int(v, default=0):
+    try:
+        return int(v or default)
+    except Exception:
+        return int(default)
+
+def nm_final_selected_guild_id(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_final_sqlite_table_columns(cur, table):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return [r[1] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+def nm_final_sqlite_table_exists(cur, table):
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+def nm_final_sqlite_paths():
+    seen = []
+    for p in [Path("/data/nm_system.db"), Path("nm_system.db")]:
+        try:
+            if p.exists() and p.stat().st_size > 0 and str(p) not in seen:
+                seen.append(str(p))
+                yield p
+        except Exception:
+            pass
+
+def nm_final_pg_enabled():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL"))
+    except Exception:
+        return False
+
+def nm_final_pg_balance_sources(guild_id, user_id):
+    out = []
+    if not nm_final_pg_enabled():
+        return out
+    try:
+        with nm_pg_conn() as conn:
+            # selected guild
+            row = conn.execute(
+                "SELECT balance FROM economy WHERE guild_id=%s AND user_id=%s",
+                (int(guild_id), int(user_id))
+            ).fetchone()
+            if row:
+                out.append(("pg_selected", int(row["balance"] or 0)))
+
+            # legacy global guild
+            row = conn.execute(
+                "SELECT balance FROM economy WHERE guild_id=0 AND user_id=%s",
+                (int(user_id),)
+            ).fetchone()
+            if row:
+                out.append(("pg_legacy0", int(row["balance"] or 0)))
+
+            # best anywhere for same user; this fixes old migration rows landing on wrong guild_id
+            row = conn.execute(
+                "SELECT guild_id, balance FROM economy WHERE user_id=%s ORDER BY balance DESC LIMIT 1",
+                (int(user_id),)
+            ).fetchone()
+            if row:
+                out.append((f"pg_any_{int(row['guild_id'] or 0)}", int(row["balance"] or 0)))
+    except Exception as e:
+        try: print(f"NM final PG balance source failed: {e}")
+        except Exception: pass
+    return out
+
+def nm_final_sqlite_balance_sources(guild_id, user_id):
+    out = []
+    for path in nm_final_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+
+            # V3 table
+            if nm_final_sqlite_table_exists(cur, "guild_economy"):
+                cols = nm_final_sqlite_table_columns(cur, "guild_economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    for gid in [int(guild_id), 0, int(globals().get("GUILD_ID", 0) or 0)]:
+                        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, int(user_id)))
+                        row = cur.fetchone()
+                        if row:
+                            out.append((f"sqlite_guild_economy_{path.name}_{gid}", int(row[0] or 0)))
+                    cur.execute("SELECT guild_id, balance FROM guild_economy WHERE user_id=? ORDER BY balance DESC LIMIT 1", (int(user_id),))
+                    row = cur.fetchone()
+                    if row:
+                        out.append((f"sqlite_guild_economy_any_{row[0]}", int(row[1] or 0)))
+
+            # Legacy economy table
+            if nm_final_sqlite_table_exists(cur, "economy"):
+                cols = nm_final_sqlite_table_columns(cur, "economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    for gid in [int(guild_id), 0, int(globals().get("GUILD_ID", 0) or 0)]:
+                        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=?", (gid, int(user_id)))
+                        row = cur.fetchone()
+                        if row:
+                            out.append((f"sqlite_economy_{path.name}_{gid}", int(row[0] or 0)))
+                    cur.execute("SELECT guild_id, balance FROM economy WHERE user_id=? ORDER BY balance DESC LIMIT 1", (int(user_id),))
+                    row = cur.fetchone()
+                    if row:
+                        out.append((f"sqlite_economy_any_{row[0]}", int(row[1] or 0)))
+                elif "user_id" in cols and "balance" in cols:
+                    cur.execute("SELECT balance FROM economy WHERE user_id=?", (int(user_id),))
+                    row = cur.fetchone()
+                    if row:
+                        out.append((f"sqlite_legacy_economy_{path.name}", int(row[0] or 0)))
+
+            conn.close()
+        except Exception as e:
+            try: print(f"NM final sqlite balance source failed {path}: {e}")
+            except Exception: pass
+    return out
+
+def nm_final_write_pg_balance(guild_id, user_id, balance):
+    if not nm_final_pg_enabled():
+        return
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO economy (guild_id, user_id, balance, updated_at)
+                VALUES (%s,%s,%s,NOW())
+                ON CONFLICT (guild_id,user_id)
+                DO UPDATE SET balance=GREATEST(economy.balance, EXCLUDED.balance), updated_at=NOW()
+            """, (int(guild_id), int(user_id), int(balance or 0)))
+            conn.commit()
+    except Exception as e:
+        try: print(f"NM final write PG balance failed: {e}")
+        except Exception: pass
+
+def nm_final_write_sqlite_balance(guild_id, user_id, balance):
+    # Keep old dashboard pages from showing zero if they still read SQLite.
+    for path in nm_final_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+
+            # Ensure guild_economy exists in the old shape used by dashboard pages.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS guild_economy (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    balance INTEGER DEFAULT 0,
+                    last_daily INTEGER DEFAULT 0,
+                    last_boost_weekly INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            cur.execute("""
+                INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance)
+                VALUES (?,?,0)
+            """, (int(guild_id), int(user_id)))
+            cur.execute("""
+                UPDATE guild_economy
+                SET balance=MAX(COALESCE(balance,0), ?)
+                WHERE guild_id=? AND user_id=?
+            """, (int(balance or 0), int(guild_id), int(user_id)))
+
+            # Also mirror in economy if it has guild_id/user_id/balance.
+            if nm_final_sqlite_table_exists(cur, "economy"):
+                cols = nm_final_sqlite_table_columns(cur, "economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute("INSERT OR IGNORE INTO economy (guild_id,user_id,balance) VALUES (?,?,0)", (int(guild_id), int(user_id)))
+                    cur.execute("UPDATE economy SET balance=MAX(COALESCE(balance,0), ?) WHERE guild_id=? AND user_id=?", (int(balance or 0), int(guild_id), int(user_id)))
+                elif "user_id" in cols and "balance" in cols:
+                    cur.execute("INSERT OR IGNORE INTO economy (user_id,balance) VALUES (?,0)", (int(user_id),))
+                    cur.execute("UPDATE economy SET balance=MAX(COALESCE(balance,0), ?) WHERE user_id=?", (int(balance or 0), int(user_id)))
+
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            try: print(f"NM final write sqlite balance failed {path}: {e}")
+            except Exception: pass
+
+def nm_final_get_balance(guild_id, user_id):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    if not user_id:
+        return 0
+
+    sources = []
+    sources.extend(nm_final_pg_balance_sources(guild_id, user_id))
+    sources.extend(nm_final_sqlite_balance_sources(guild_id, user_id))
+
+    best = max([int(v or 0) for _, v in sources], default=0)
+
+    # If any source has money, immediately sync all stores to selected guild.
+    if best > 0:
+        nm_final_write_pg_balance(guild_id, user_id, best)
+        nm_final_write_sqlite_balance(guild_id, user_id, best)
+
+    return int(best)
+
+def nm_final_add_money(guild_id, user_id, amount, source_type="system", details="", actor_id=0):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    amount = int(amount or 0)
+
+    current = nm_final_get_balance(guild_id, user_id)
+    new_balance = max(0, current + amount)
+
+    if nm_final_pg_enabled():
+        try:
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO economy (guild_id,user_id,balance)
+                    VALUES (%s,%s,0)
+                    ON CONFLICT DO NOTHING
+                """, (guild_id, user_id))
+                conn.execute("""
+                    UPDATE economy
+                    SET balance=%s, updated_at=NOW()
+                    WHERE guild_id=%s AND user_id=%s
+                """, (new_balance, guild_id, user_id))
+                conn.execute("""
+                    INSERT INTO money_audit
+                    (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (guild_id, user_id, amount, new_balance, str(source_type), str(details), int(actor_id or 0), int(time.time())))
+                conn.commit()
+        except Exception as e:
+            try: print(f"NM final add PG failed: {e}")
+            except Exception: pass
+
+    nm_final_write_sqlite_balance(guild_id, user_id, new_balance)
+    return int(new_balance)
+
+# ---- Override all balance APIs used by Discord commands and dashboard pages ----
+
+def v3_get_balance(guild_id, user_id):
+    return nm_final_get_balance(guild_id, user_id)
+
+def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
+    return nm_final_add_money(guild_id, user_id, amount, source_type, details, actor_id)
+
+def get_balance(user_id, guild_id=None):
+    return nm_final_get_balance(guild_id or nm_final_selected_guild_id(), user_id)
+
+def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_final_add_money(guild_id or nm_final_selected_guild_id(), user_id, amount, source_type, details, admin_id)
+
+def nm_legacy_balance(guild_id, user_id):
+    return nm_final_get_balance(guild_id, user_id)
+
+def nm_legacy_add_money(guild_id, user_id, amount):
+    return nm_final_add_money(guild_id, user_id, amount, "legacy", "legacy synced")
+
+def nm_final_top_balances(guild_id, limit=10):
+    guild_id = int(guild_id or 0)
+    merged = {}
+
+    # PG rows
+    if nm_final_pg_enabled():
+        try:
+            with nm_pg_conn() as conn:
+                rows = conn.execute("""
+                    SELECT user_id, MAX(balance) AS balance
+                    FROM economy
+                    WHERE guild_id IN (%s, 0)
+                    GROUP BY user_id
+                    ORDER BY MAX(balance) DESC
+                    LIMIT %s
+                """, (guild_id, int(limit) * 4)).fetchall()
+                for r in rows:
+                    uid = int(r["user_id"])
+                    merged[uid] = max(int(merged.get(uid, 0)), int(r["balance"] or 0))
+        except Exception as e:
+            try: print(f"NM final PG top failed: {e}")
+            except Exception: pass
+
+    # SQLite rows
+    for path in nm_final_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+            for table in ["guild_economy", "economy"]:
+                if not nm_final_sqlite_table_exists(cur, table):
+                    continue
+                cols = nm_final_sqlite_table_columns(cur, table)
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute(f"""
+                        SELECT user_id, MAX(balance) FROM {table}
+                        WHERE guild_id IN (?,0)
+                        GROUP BY user_id
+                        ORDER BY MAX(balance) DESC
+                        LIMIT ?
+                    """, (guild_id, int(limit) * 4))
+                    for uid, bal in cur.fetchall():
+                        merged[int(uid)] = max(int(merged.get(int(uid), 0)), int(bal or 0))
+                elif table == "economy" and "user_id" in cols and "balance" in cols:
+                    cur.execute("SELECT user_id,balance FROM economy ORDER BY balance DESC LIMIT ?", (int(limit) * 4,))
+                    for uid, bal in cur.fetchall():
+                        merged[int(uid)] = max(int(merged.get(int(uid), 0)), int(bal or 0))
+            conn.close()
+        except Exception as e:
+            try: print(f"NM final sqlite top failed {path}: {e}")
+            except Exception: pass
+
+    items = sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:int(limit)]
+    # Sync top rows into canonical stores
+    for uid, bal in items:
+        if bal > 0:
+            nm_final_write_pg_balance(guild_id, uid, bal)
+            nm_final_write_sqlite_balance(guild_id, uid, bal)
+    return items
+
+def dashboard_total_coins():
+    gid = nm_final_selected_guild_id()
+    return int(sum(bal for _, bal in nm_final_top_balances(gid, 10000)))
+
+def dashboard_count_table(table):
+    if table in ("economy", "guild_economy"):
+        return len([1 for _, bal in nm_final_top_balances(nm_final_selected_guild_id(), 10000) if bal > 0])
+    # fallback generic Postgres count if possible
+    try:
+        if nm_final_pg_enabled():
+            with nm_pg_conn() as conn:
+                return int(conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
+    except Exception:
+        pass
+    return 0
+
+def dashboard_money_rows(limit=10):
+    gid = nm_final_selected_guild_id()
+    rows = []
+    for i, (uid, bal) in enumerate(nm_final_top_balances(gid, limit), start=1):
+        try:
+            name = dashboard_member_name(uid)
+        except Exception:
+            name = f"User {uid}"
+        rows.append({"rank": i, "user_id": int(uid), "name": name, "balance": int(bal)})
+    return rows
+
+# ---- Coin/brand final sync ----
+
+def nm_final_settings_sources(guild_id):
+    data = {}
+    guild_id = int(guild_id or 0)
+
+    # PostgreSQL first
+    if nm_final_pg_enabled():
+        try:
+            with nm_pg_conn() as conn:
+                row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (guild_id,)).fetchone()
+                if row:
+                    data.update(nm_pg_unjson(row["settings"]))
+        except Exception as e:
+            try: print(f"NM final settings PG failed: {e}")
+            except Exception: pass
+
+    # SQLite guild_settings fallback
+    for path in nm_final_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            if nm_final_sqlite_table_exists(cur, "guild_settings"):
+                cols = nm_final_sqlite_table_columns(cur, "guild_settings")
+                if "guild_id" in cols:
+                    cur.execute("SELECT * FROM guild_settings WHERE guild_id=? LIMIT 1", (guild_id,))
+                    row = cur.fetchone()
+                    if row:
+                        for k in row.keys():
+                            if k not in ("guild_id","id","created_at","updated_at") and row[k] not in (None, ""):
+                                data.setdefault(k, row[k])
+            conn.close()
+        except Exception:
+            pass
+
+    # loaded JSON/global fallback
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            for k, v in dashboard_settings.items():
+                if v not in (None, ""):
+                    data.setdefault(k, v)
+    except Exception:
+        pass
+
+    return data
+
+def nm_final_normalize_settings(settings):
+    settings = dict(settings or {})
+    coin = (
+        settings.get("coin_name")
+        or settings.get("currency_name")
+        or settings.get("economy_coin_name")
+        or settings.get("money_name")
+        or settings.get("coin")
+    )
+    if coin is None or str(coin).strip() == "":
+        coin = "NM Coin"
+    coin = str(coin).strip()
+
+    brand = settings.get("bot_brand") or settings.get("brand_name") or settings.get("bot_name")
+    if brand is None or str(brand).strip() == "":
+        brand = "NM System"
+    brand = str(brand).strip()
+
+    settings["coin_name"] = coin
+    settings["currency_name"] = coin
+    settings["economy_coin_name"] = coin
+    settings["bot_brand"] = brand
+    settings["brand_name"] = brand
+    settings["bot_name"] = brand
+    return settings
+
+def nm_final_get_settings(guild_id=None):
+    return nm_final_normalize_settings(nm_final_settings_sources(guild_id or nm_final_selected_guild_id()))
+
+def nm_final_save_settings(guild_id=None, settings=None):
+    gid = int(guild_id or nm_final_selected_guild_id())
+    settings = nm_final_normalize_settings(settings or {})
+
+    # PG save
+    if nm_final_pg_enabled():
+        try:
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO guild_settings (guild_id, settings, updated_at)
+                    VALUES (%s,%s::jsonb,NOW())
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+                """, (gid, nm_pg_json(settings)))
+                conn.commit()
+        except Exception as e:
+            try: print(f"NM final save settings PG failed: {e}")
+            except Exception: pass
+
+    # Global/json runtime mirror so old customization center displays the right value immediately.
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(settings)
+            if "save_dashboard_settings" in globals():
+                save_dashboard_settings()
+    except Exception:
+        pass
+
+    return True
+
+def get_guild_settings(guild_id):
+    return nm_final_get_settings(guild_id)
+
+def save_guild_settings(guild_id, settings):
+    return nm_final_save_settings(guild_id, settings)
+
+def nm_coin_name(guild_id=None):
+    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", "NM Coin")
+
+def nm_legacy_coin(guild_id):
+    return nm_coin_name(guild_id)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_coin_name(guild_id)
+
+def nm_get_brand_name(guild_id=None):
+    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("bot_brand", "NM System")
+
+@app.after_request
+def nm_final_sync_dashboard_forms(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            gid = nm_final_selected_guild_id()
+            settings = nm_final_get_settings(gid)
+
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("money_name")
+                or request.form.get("coin")
+            )
+            brand = request.form.get("bot_brand") or request.form.get("brand_name") or request.form.get("bot_name")
+
+            changed = False
+            if coin is not None and str(coin).strip():
+                coin = str(coin).strip()
+                settings["coin_name"] = coin
+                settings["currency_name"] = coin
+                settings["economy_coin_name"] = coin
+                changed = True
+            if brand is not None and str(brand).strip():
+                brand = str(brand).strip()
+                settings["bot_brand"] = brand
+                settings["brand_name"] = brand
+                settings["bot_name"] = brand
+                changed = True
+
+            if changed:
+                nm_final_save_settings(gid, settings)
+    except Exception as e:
+        try: print(f"NM final after_request form sync failed: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/final-sync")
+def nm_final_sync_route():
+    gid = nm_final_selected_guild_id()
+    moved = 0
+    for uid, bal in nm_final_top_balances(gid, 10000):
+        if bal > 0:
+            nm_final_write_pg_balance(gid, uid, bal)
+            nm_final_write_sqlite_balance(gid, uid, bal)
+            moved += 1
+    settings = nm_final_get_settings(gid)
+    nm_final_save_settings(gid, settings)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Final Sync Done</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Synced balances: <b>{int(moved)}</b></p>
+      <p>Coin now: <b>{dash_escape(nm_coin_name(gid), 100)}</b></p>
+      <p>Now test <code>!رصيدي</code> and refresh User Lookup.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
+def nm_final_set_custom_coin_route():
+    gid = nm_final_selected_guild_id()
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        settings = nm_final_get_settings(gid)
+        settings["coin_name"] = coin
+        settings["currency_name"] = coin
+        settings["economy_coin_name"] = coin
+        nm_final_save_settings(gid, settings)
+        return redirect(f"/dashboard/final-sync?guild_id={int(gid)}")
+
+    current = nm_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Set Custom Coin</h1>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <label>Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+def nm_final_polish_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            settings = nm_final_get_settings(gid)
+            nm_final_save_settings(gid, settings)
+            synced = 0
+            for uid, bal in nm_final_top_balances(gid, 10000):
+                if bal > 0:
+                    nm_final_write_pg_balance(gid, uid, bal)
+                    nm_final_write_sqlite_balance(gid, uid, bal)
+                    synced += 1
+            print(f"✅ NM FINAL POLISH active. synced={synced}, coin={nm_coin_name(gid)}")
+    except Exception as e:
+        try: print(f"NM FINAL POLISH boot failed: {e}")
+        except Exception: pass
+
 
 keep_alive()
 
