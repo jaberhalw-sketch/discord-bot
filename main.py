@@ -5001,45 +5001,103 @@ def dashboard_get_member_in_guild_sync(guild_id, user_id, timeout=4):
         return None
 
 
-def dashboard_member_name_in_guild(user_id, guild_id=0, include_id=True):
+def dashboard_current_guild_id_safe():
+    try:
+        raw = request.args.get("guild_id") or session.get("dashboard_active_guild_id") or GUILD_ID
+        return int(raw)
+    except Exception:
+        return int(GUILD_ID)
+
+
+def dashboard_role_chip_for_role(role, include_id=False, special=None):
+    try:
+        if not role or getattr(role, "name", "@everyone") == "@everyone":
+            return ""
+        color = "#94a3b8"
+        try:
+            if getattr(role, "color", None) and int(role.color.value) != 0:
+                color = str(role.color)
+        except Exception:
+            pass
+        name = html.escape(str(role.name))
+        cls = "rolechip" + (f" {special}" if special else "")
+        title = f"ID: {int(role.id)}"
+        extra = f" <span class='muted small'>#{int(role.id)}</span>" if include_id else ""
+        return f"<span class='{cls}' title='{html.escape(title)}'><span class='role-dot' style='background:{html.escape(color)}'></span><span class='role-name'>@{name}</span>{extra}</span>"
+    except Exception:
+        return ""
+
+
+def dashboard_member_roles_html(member, limit=4):
+    try:
+        roles = [r for r in getattr(member, "roles", []) if getattr(r, "name", "@everyone") != "@everyone"]
+        roles = sorted(roles, key=lambda r: getattr(r, "position", 0), reverse=True)
+        shown = roles[:int(limit)]
+        chips = []
+        for role in shown:
+            special = None
+            try:
+                rid = int(role.id)
+                if rid in (set(DASHBOARD_OWNER_ROLE_IDS) | dashboard_dynamic_owner_role_ids()):
+                    special = "owner"
+                elif rid in (set(DASHBOARD_LIMITED_ADMIN_ROLE_IDS) | set(DASHBOARD_ADMIN_ROLE_IDS) | dashboard_dynamic_admin_role_ids()):
+                    special = "admin"
+            except Exception:
+                pass
+            chips.append(dashboard_role_chip_for_role(role, special=special))
+        if len(roles) > len(shown):
+            chips.append(f"<span class='rolechip more'>+{len(roles)-len(shown)} roles</span>")
+        return "<div class='memberroles'>" + "".join(chips) + "</div>" if chips else "<div class='memberroles'><span class='rolechip more'>No roles</span></div>"
+    except Exception:
+        return ""
+
+
+def dashboard_member_identity_html(user_id, guild_id=0, include_id=True, include_roles=True, compact=False):
     try:
         user_id = int(user_id or 0)
     except Exception:
         user_id = 0
     if not user_id:
-        return "Unknown User"
+        return "<span class='muted'>Unknown User</span>"
 
-    member = dashboard_get_member_in_guild_sync(guild_id, user_id) if guild_id else dashboard_get_member_sync(user_id)
+    try:
+        gid = int(guild_id or 0) or dashboard_current_guild_id_safe()
+    except Exception:
+        gid = int(GUILD_ID)
+
+    member = dashboard_get_member_in_guild_sync(gid, user_id, timeout=2) if gid else dashboard_get_member_sync(user_id)
     if not member:
-        id_part = f"<br><span class='muted small'>ID: {user_id}</span>" if include_id else ""
-        return f"User {user_id}{id_part}"
+        id_html = f"<span class='muted small'>ID: <code>{user_id}</code></span>" if include_id else ""
+        return f"<div class='membercard'><span class='memberavatar blank'>?</span><div class='membermeta'><b>User {user_id}</b>{id_html}</div></div>"
 
     nick = html.escape(str(getattr(member, "display_name", "") or member.name))
     username = html.escape(str(member))
-    if str(getattr(member, "display_name", "") or "") and member.display_name != member.name:
-        main = f"<b>{nick}</b><br><span class='muted small'>@{username}</span>"
-    else:
-        main = f"<b>@{username}</b>"
-    if include_id:
-        main += f"<br><span class='muted small'>ID: {user_id}</span>"
-    return main
+    raw_name = html.escape(str(getattr(member, "name", "") or username))
+    discrim = html.escape(str(getattr(member, "discriminator", "") or ""))
+    avatar = ""
+    try:
+        avatar = member.display_avatar.url
+    except Exception:
+        avatar = ""
+    if compact:
+        img = f"<img src='{html.escape(avatar)}'>" if avatar else ""
+        label = f"{nick} <span class='muted small'>@{username}</span>"
+        return f"<span class='mini-member' title='ID: {user_id}'>{img}<span>{label}</span></span>"
+
+    avatar_html = f"<img class='memberavatar' src='{html.escape(avatar)}'>" if avatar else "<span class='memberavatar blank'>?</span>"
+    id_html = f"<span class='userline'>ID: <code>{user_id}</code></span>" if include_id else ""
+    username_line = f"<span class='userline'>Username: @{username}</span>"
+    nick_line = f"<b>{nick}</b>"
+    roles_html = dashboard_member_roles_html(member) if include_roles else ""
+    return f"<div class='membercard'>{avatar_html}<div class='membermeta'>{nick_line}{username_line}{id_html}{roles_html}</div></div>"
+
+
+def dashboard_member_name_in_guild(user_id, guild_id=0, include_id=True):
+    return dashboard_member_identity_html(user_id, guild_id=guild_id, include_id=include_id, include_roles=True, compact=False)
 
 
 def dashboard_member_chip_in_guild(user_id, guild_id=0):
-    try:
-        user_id = int(user_id or 0)
-    except Exception:
-        return html.escape(str(user_id or "Unknown"))
-    member = dashboard_get_member_in_guild_sync(guild_id, user_id) if guild_id else dashboard_get_member_sync(user_id)
-    if not member:
-        return html.escape(str(user_id))
-    nick = html.escape(str(getattr(member, "display_name", "") or member.name))
-    username = html.escape(str(member))
-    if getattr(member, "display_name", member.name) != member.name:
-        label = f"{nick} (@{username})"
-    else:
-        label = f"@{username}"
-    return f"<span class='user-chip' title='ID: {user_id}'>{label}</span>"
+    return dashboard_member_identity_html(user_id, guild_id=guild_id, include_id=True, include_roles=False, compact=True)
 
 
 def log_vault_enrich_user_ids_html(text, guild_id=0, limit=6000):
@@ -5285,23 +5343,21 @@ def dashboard_set_level_data(user_id, xp=None, level=None):
     return new_xp, new_level
 
 
-def dashboard_role_name(role_id):
+def dashboard_role_name(role_id, guild_id=0):
     try:
-        guild = bot.get_guild(GUILD_ID)
+        gid = int(guild_id or 0) or dashboard_current_guild_id_safe()
+        guild = bot.get_guild(gid) if bot else None
         if guild:
             role = guild.get_role(int(role_id))
             if role:
-                return f"@{role.name}"
-        return f"Role {role_id}"
+                return dashboard_role_chip_for_role(role, include_id=True)
+        return f"<span class='rolechip more'>Role {int(role_id)}</span>"
     except:
-        return f"Role {role_id}"
+        return f"<span class='rolechip more'>Role {role_id}</span>"
 
 
 def dashboard_member_name(user_id):
-    member = dashboard_get_member_sync(user_id)
-    if member:
-        return str(member)
-    return f"User {user_id}"
+    return dashboard_member_identity_html(user_id, guild_id=dashboard_current_guild_id_safe(), include_id=True, include_roles=True, compact=False)
 
 
 def dashboard_money_rows(limit=10):
@@ -5626,17 +5682,18 @@ def dashboard_user_profile(user_id):
     xp, level = get_level_data(int(user_id))
     active_warnings = get_warning_history(user_id=int(user_id), status="active", limit=50)
     warning_history = get_warning_history(user_id=int(user_id), status="all", limit=100)
-    member = dashboard_get_member_sync(user_id)
+    gid = dashboard_current_guild_id_safe()
+    member = dashboard_get_member_in_guild_sync(gid, user_id) or dashboard_get_member_sync(user_id)
     return {
         "user_id": int(user_id),
-        "name": str(member) if member else f"User {user_id}",
+        "name": dashboard_member_identity_html(user_id, guild_id=gid, include_id=True, include_roles=True),
         "avatar": member.display_avatar.url if member else "",
         "balance": balance,
         "xp": xp,
         "level": level,
         "warnings": active_warnings,
         "warning_history": warning_history,
-        "roles": [r.name for r in member.roles if r.name != "@everyone"] if member else [],
+        "roles": [dashboard_role_chip_for_role(r) for r in member.roles if r.name != "@everyone"] if member else [],
         "joined_at": int(member.joined_at.timestamp()) if member and member.joined_at else None,
     }
 
@@ -6010,7 +6067,7 @@ def dashboard_member_card_line(member):
         f"<a class='memberline' href='/dashboard/admin-access/member/{member.id}'>"
         f"{avatar_html}"
         f"<span><b>{dash_escape(member.display_name, 80)}</b>{bot_badge}<br>"
-        f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span></span>"
+        f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span>{dashboard_member_roles_html(member, limit=3)}</span>"
         f"<span class='memberbadge'>{dashboard_member_access_badge(member.id)}</span>"
         f"</a>"
     )
@@ -8081,7 +8138,7 @@ def dashboard_user_page():
             ]) or "<tr><td colspan='6'>No warning history</td></tr>"
             roles = ", ".join(profile['roles'][:18]) if profile['roles'] else "No roles / not cached"
             profile_html = f'''
-            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 {profile['name']}</h3><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Admin Received:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['admin_received'])}</p><p><b>Earned / System:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['earned_received'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Active Warnings:</b> {len(warns)} • <b>Total History:</b> {len(history)}</p><p class="muted small">Roles: {clean_text(roles, 500)}</p></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form><hr><form method="post" action="/dashboard/warnings/clear"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Clear Reason</label><input name="reason" value="Cleared from user profile"><div style="height:10px"></div><button class="btn red">Clear Active Warnings</button></form></div></div>
+            <div style="height:14px"></div><div class="grid2"><div class="card"><h3>👤 Member Profile</h3><div>{profile['name']}</div><p><span class="pill">ID</span> <code>{profile['user_id']}</code></p><p><b>Balance:</b> {fmt_coin(profile['balance'])}</p><p><b>Admin Received:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['admin_received'])}</p><p><b>Earned / System:</b> {fmt_coin(money_audit_member_summary(profile['user_id'])['earned_received'])}</p><p><b>Level:</b> {profile['level']} • <b>XP:</b> {fmt_num(profile['xp'])}</p><p><b>Active Warnings:</b> {len(warns)} • <b>Total History:</b> {len(history)}</p><div class="muted small" style="margin-top:8px">Roles:</div><div class="memberroles">{roles}</div></div><div class="card"><h3>⚡ Quick Edit</h3><form method="post" action="/dashboard/economy"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Money Amount</label><input name="amount" value="1000"><label>Action</label><select name="action"><option value="add">Add</option><option value="remove">Remove</option><option value="set">Set</option></select><div style="height:10px"></div><button class="btn green">Apply Money</button></form><hr><form method="post" action="/dashboard/warnings/clear"><input type="hidden" name="user_id" value="{profile['user_id']}"><label>Clear Reason</label><input name="reason" value="Cleared from user profile"><div style="height:10px"></div><button class="btn red">Clear Active Warnings</button></form></div></div>
             <div style="height:14px"></div><div class="card"><h3>⚠️ Warning History</h3><table class="table"><tr><th>Status</th><th>Time</th><th>Reason</th><th>Message</th><th>By</th><th>Cleared By</th></tr>{warn_rows}</table><p class="muted small">يعرض آخر 20 إنذار، وحتى الإنذارات المتصفرة مستقبلاً.</p></div>
             '''
         except Exception as e:
@@ -8835,7 +8892,7 @@ def dashboard_admin_access_page():
             f"<a class='memberline' href='/dashboard/admin-access/member/{member.id}'>"
             f"{avatar_html}"
             f"<span><b>{dash_escape(member.display_name, 80)}</b><br>"
-            f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span></span>"
+            f"<span class='muted small'>@{dash_escape(str(member), 90)} • ID: <code>{member.id}</code></span>{dashboard_member_roles_html(member, limit=3)}</span>"
             f"<span class='memberbadge'>{fast_access_badge_for_member(member)}</span>"
             f"</a>"
         )
@@ -8857,7 +8914,7 @@ def dashboard_admin_access_page():
         role_rows.append(f"""
         <tr>
           <td>
-            <b>{dash_escape(role.name, 90)}</b>{managed_note}<br>
+            {dashboard_role_chip_for_role(role, include_id=False)}{managed_note}<br>
             <span class="muted small">ID: <code>{role.id}</code> • Position: {role.position} • Members: {len(human_members)}</span>
           </td>
           <td><label class="checkrow ownercheck"><input type="checkbox" name="owner_roles" value="{role.id}" {owner_checked}> Owner</label></td>
@@ -8929,12 +8986,12 @@ def dashboard_admin_access_page():
       <div class="card">
         <h3>👑 Owner Access</h3>
         <p class="muted access-note">صلاحية كاملة: Settings, Control Center, Audit, OAuth Debug, Memory actions, Economy/Levels edit, Admin Access.</p>
-        <div class="access-box">{dash_escape(owner_roles_text, 500)}</div>
+        <div class="access-box">{owner_roles_text}</div>
       </div>
       <div class="card">
         <h3>🧰 Admin Access</h3>
         <p class="muted access-note">صلاحية محدودة: Overview, Command Center, Warnings, User Lookup ومراقبة السيرفر بدون التحكم الخطير.</p>
-        <div class="access-box">{dash_escape(admin_roles_text, 500)}</div>
+        <div class="access-box">{admin_roles_text}</div>
       </div>
     </div>
 
@@ -9550,27 +9607,27 @@ def dashboard_command_center_page():
     ]) or "<tr><td colspan='2'>No channel activity yet.</td></tr>"
 
     top_users_html = "".join([
-        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> messages</td></tr>"
+        f"<tr><td>{dashboard_member_name(uid)}<span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> messages</td></tr>"
         for uid, name, count in cc_top_users_by_event("message", since_24h, 8)
     ]) or "<tr><td colspan='2'>No user activity yet.</td></tr>"
 
     top_commands_html = "".join([
-        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> commands</td></tr>"
+        f"<tr><td>{dashboard_member_name(uid)}<span class='muted small'>{dash_escape(name, 80)}</span></td><td><b>{count}</b> commands</td></tr>"
         for uid, name, count in cc_top_users_by_event("command", since_24h, 8)
     ]) or "<tr><td colspan='2'>No commands yet.</td></tr>"
 
     money_gain_html = "".join([
-        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#22c55e'>+{int(total):,}</b></td></tr>"
+        f"<tr><td>{dashboard_member_name(uid)}<span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#22c55e'>+{int(total):,}</b></td></tr>"
         for uid, name, total in cc_money_movers(since_24h, True, 8)
     ]) or "<tr><td colspan='2'>No money gains tracked yet.</td></tr>"
 
     money_loss_html = "".join([
-        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}<br><span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#ef4444'>{int(total):,}</b></td></tr>"
+        f"<tr><td>{dashboard_member_name(uid)}<span class='muted small'>{dash_escape(name, 80)}</span></td><td><b style='color:#ef4444'>{int(total):,}</b></td></tr>"
         for uid, name, total in cc_money_movers(since_24h, False, 8)
     ]) or "<tr><td colspan='2'>No money losses tracked yet.</td></tr>"
 
     watchlist_html = "".join([
-        f"<tr><td>{dash_escape(dashboard_member_name(uid), 100)}</td><td><span class='pill bad'>{count} active warnings</span></td></tr>"
+        f"<tr><td>{dashboard_member_name(uid)}</td><td><span class='pill bad'>{count} active warnings</span></td></tr>"
         for uid, count in cc_active_warning_rows(10)
     ]) or "<tr><td colspan='2'>No active warning watchlist.</td></tr>"
 
@@ -9585,7 +9642,7 @@ def dashboard_command_center_page():
         <tr>
           <td><code>{cc_time(created_at)}</code></td>
           <td><span class='pill'>{dash_escape(event_type, 60)}</span></td>
-          <td>{dash_escape(dashboard_member_name(user_id), 100) if user_id else "<span class='muted'>System</span>"}<br><span class='muted small'>{dash_escape(user_name, 90)}</span></td>
+          <td>{dashboard_member_name(user_id) if user_id else "<span class='muted'>System</span>"}<br><span class='muted small'>{dash_escape(user_name, 90)}</span></td>
           <td>{dash_escape(channel_name, 90)}</td>
           <td>{int(amount):,}</td>
           <td>{dash_escape(details, 220)}</td>
