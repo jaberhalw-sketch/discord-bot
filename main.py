@@ -6838,6 +6838,57 @@ def cc_guild_snapshot():
         "voice_channels": len(guild.voice_channels),
     }
 
+def dashboard_selected_guild_stats():
+    """Stats shown in the sidebar/top card should be for the currently selected guild only.
+    Global bot network totals stay in Owner Console, not in the selected-server sidebar.
+    """
+    try:
+        guild_id = int(session.get("selected_guild_id") or request.args.get("guild_id") or GUILD_ID)
+    except:
+        guild_id = GUILD_ID
+
+    guild = bot.get_guild(int(guild_id)) if bot else None
+    if not guild:
+        return {
+            "guild_id": int(guild_id or 0),
+            "name": "No server selected",
+            "servers": 1,
+            "users": 0,
+            "members": 0,
+            "humans": 0,
+            "bots": 0,
+            "online": 0,
+            "voice": 0,
+            "text_channels": 0,
+            "voice_channels": 0,
+            "is_selected": True,
+        }
+
+    members = list(getattr(guild, "members", []) or [])
+    humans = [m for m in members if not getattr(m, "bot", False)]
+    bots_count = len([m for m in members if getattr(m, "bot", False)])
+    online = len([m for m in humans if str(getattr(m, "status", "offline")) != "offline"])
+    voice = len([m for m in humans if getattr(m, "voice", None) and m.voice and m.voice.channel])
+
+    # If member cache is incomplete, guild.member_count is usually more accurate for total.
+    total_members = int(getattr(guild, "member_count", 0) or len(members) or 0)
+
+    return {
+        "guild_id": int(guild.id),
+        "name": str(guild.name),
+        "servers": 1,
+        "users": total_members,
+        "members": total_members,
+        "humans": max(0, total_members - bots_count) if total_members else len(humans),
+        "bots": bots_count,
+        "online": online,
+        "voice": voice,
+        "text_channels": len(getattr(guild, "text_channels", []) or []),
+        "voice_channels": len(getattr(guild, "voice_channels", []) or []),
+        "is_selected": True,
+    }
+
+
 
 def dashboard_apply_saved_settings():
     global COMMANDS_CHANNEL_ID, GAMBLING_CHANNEL_ID, MEMORY_BACKUP_CHANNEL_ID
@@ -7173,7 +7224,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
 <div class="layout">
   {{ server_rail|safe }}
   <aside class="sidebar">
-    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Fast global control panel</p></div></div>
+    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Fast selected-server control panel</p></div></div>
     {{ global_stats_compact|safe }}
     <nav class="navlist">
       <div class="navsection">Monitor</div>
