@@ -7,6 +7,7 @@ import json
 import time
 import random
 import sqlite3
+import shutil
 import tempfile
 import zipfile
 import re
@@ -10839,17 +10840,17 @@ def dashboard_log_vault_page():
       .log-actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px; }}
 
       /* NM clean log rendering override */
-      .log-clean-text { line-height:1.75; overflow-wrap:anywhere; word-break:break-word; }
+      .log-clean-text {{ line-height:1.75; overflow-wrap:anywhere; word-break:break-word; }}
       .vault-card .log-clean-text img,
-      .vault-card img:not(.memberavatar):not(.miniavatar):not(.servericon) {
+      .vault-card img:not(.memberavatar):not(.miniavatar):not(.servericon) {{
         display:none !important;
         width:0 !important;
         height:0 !important;
         max-width:0 !important;
         max-height:0 !important;
-      }
-      .log-attachments.compact { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }
-      .log-attachment.compact {
+      }}
+      .log-attachments.compact {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }}
+      .log-attachment.compact {{
         display:inline-flex !important;
         align-items:center;
         gap:7px;
@@ -10863,11 +10864,11 @@ def dashboard_log_vault_page():
         font-size:12px;
         font-weight:900;
         overflow:hidden;
-      }
-      .log-attachment.compact span:last-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-      .log-attachment.compact:hover { border-color:rgba(139,92,246,.55); background:rgba(88,101,242,.18); }
-      .attachment-icon { flex:0 0 auto; }
-      .vault-details .log-attachments .log-attachment.compact { max-width:260px; }
+      }}
+      .log-attachment.compact span:last-child {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+      .log-attachment.compact:hover {{ border-color:rgba(139,92,246,.55); background:rgba(88,101,242,.18); }}
+      .attachment-icon {{ flex:0 0 auto; }}
+      .vault-details .log-attachments .log-attachment.compact {{ max-width:260px; }}
 
       .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
       .vault-status.saved {{ color:#86efac; background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.25); }}
