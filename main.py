@@ -3038,6 +3038,33 @@ def rebuild_warnings_json_from_active_history():
         return False
 
 
+def schedule_memory_backup_after_warning_change(reason="Warnings updated"):
+    """
+    Railway storage is ephemeral. If a warning is cleared from the dashboard and the bot is redeployed
+    before the next hourly auto-backup, startup restore can bring back the old Discord backup.
+    This schedules an immediate backup after warning changes so cleared warnings stay cleared after redeploys.
+    """
+    try:
+        if not bot or not getattr(bot, "loop", None):
+            return False
+
+        async def _backup_later():
+            try:
+                await bot.wait_until_ready()
+                await asyncio.sleep(2)
+                guild = bot.get_guild(GUILD_ID)
+                if guild:
+                    await create_memory_backup(guild, reason=reason)
+            except Exception as e:
+                print(f"Warning-change backup error: {e}")
+
+        bot.loop.call_soon_threadsafe(lambda: bot.loop.create_task(_backup_later()))
+        return True
+    except Exception as e:
+        print(f"Schedule warning-change backup error: {e}")
+        return False
+
+
 def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manual clear"):
     user_id = int(user_id)
     active_before = get_active_warning_count(user_id)
@@ -3054,6 +3081,7 @@ def clear_warnings_for_user(user_id, cleared_by="Dashboard", clear_reason="Manua
         conn.commit()
         conn.close()
         rebuild_warnings_json_from_active_history()
+        schedule_memory_backup_after_warning_change(reason=f"Warnings cleared for user {user_id}")
     except Exception as e:
         print(f"Clear warning history error: {e}")
     return active_before
@@ -3094,6 +3122,8 @@ def clear_single_warning_by_id(warning_id, cleared_by="Dashboard", clear_reason=
         conn.commit()
         conn.close()
         rebuild_warnings_json_from_active_history()
+        if changed:
+            schedule_memory_backup_after_warning_change(reason=f"Warning #{warning_id} cleared")
 
     except Exception as e:
         print(f"Clear single warning error: {e}")
@@ -3120,6 +3150,7 @@ def add_warning(member, reason, message_text, moderator):
     warnings[user_id].append(warn_record)
     save_warnings()
     record_warning_history(member.id, reason, message_text, moderator, source="bot")
+    schedule_memory_backup_after_warning_change(reason=f"Warning added for user {member.id}")
     return get_active_warning_count(member.id)
 
 
