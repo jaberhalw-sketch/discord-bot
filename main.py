@@ -8110,6 +8110,16 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <div class="navsection">Systems</div>
       <a class="navitem" href="/dashboard/economy"><span class="navicon">🪙</span><span>Economy</span></a>
       {% if access_level == 'owner' %}<a class="navitem" href="/dashboard/money-audit"><span class="navicon">🏦</span><span>Money Audit</span><span class="ownerlock">Owner</span></a>{% endif %}
+      {% if access_level == 'owner' %}
+      <div class="navsection">Financial Control</div>
+      <a class="navitem" href="/dashboard/money-tracker"><span class="navicon">💰</span><span>Money Tracker</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/financial-audit-pro"><span class="navicon">🧾</span><span>Financial Audit Pro</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/trace-status"><span class="navicon">🧬</span><span>Trace Status</span><span class="ownerlock">Owner</span></a>
+      <div class="navsection">Real Estate</div>
+      <a class="navitem" href="/dashboard/real-estate-monitor"><span class="navicon">🏘️</span><span>Real Estate Monitor</span><span class="ownerlock">Owner</span></a>
+      <a class="navitem" href="/dashboard/real-estate-audit-pro"><span class="navicon">🏠</span><span>Real Estate Audit Pro</span><span class="ownerlock">Owner</span></a>
+      {% endif %}
+      <div class="navsection">Systems</div>
       <a class="navitem" href="/dashboard/levels"><span class="navicon">📊</span><span>Levels</span></a>
       <a class="navitem" href="/dashboard/casino"><span class="navicon">🎰</span><span>Casino</span></a>
       <a class="navitem" href="/dashboard/shop"><span class="navicon">🛒</span><span>Shop</span></a>
@@ -25414,6 +25424,139 @@ def nm_v5_economy_strict_status():
     """
 
 
+
+
+# =====================================================================
+# NM V5 EXTRA FULL-AUDIT FIXES
+# Added after deeper static audit:
+# - get_money_rank was still legacy/global in wallet embeds.
+# - booster weekly loop was still single-guild/hard-coded channel.
+# These overrides must stay before keep_alive()/bot.run().
+# =====================================================================
+
+def get_money_rank(user_id, guild_id=None):
+    try:
+        gid = nm_v5_final_gid(fallback=guild_id)
+        uid = nm_v5_safe_int(user_id, 0)
+        if gid <= 0 or uid <= 0:
+            return None
+        bal = nm_v5_eco_get_balance(gid, uid)
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT COUNT(*) + 1 AS rank
+            FROM guild_economy
+            WHERE guild_id = ? AND balance > ?
+            """,
+            (int(gid), int(bal)),
+        )
+        row = cur.fetchone()
+        conn.close()
+        return int((row["rank"] if hasattr(row, "keys") else row[0]) or 1)
+    except Exception as e:
+        try: nm_v5_log_runtime_error("get_money_rank_extra_fix", e)
+        except Exception: pass
+        return None
+
+
+def economy_status_text(user_id, guild_id=None):
+    gid = nm_v5_final_gid(fallback=guild_id)
+    balance = nm_v5_eco_get_balance(gid, user_id) if gid else 0
+    rank = get_money_rank(user_id, gid) if gid else None
+    return balance, (f"#{rank}" if rank else "غير معروف")
+
+
+def get_booster_last_claim(user_id, guild_id=None):
+    """Per-guild booster cooldown reader. Old version used the global economy table."""
+    try:
+        gid = nm_v5_final_gid(fallback=guild_id)
+        uid = nm_v5_safe_int(user_id, 0)
+        if gid <= 0 or uid <= 0:
+            return 0
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (int(gid), int(uid)))
+        cur.execute("SELECT COALESCE(last_boost_weekly, 0) AS last_boost_weekly FROM guild_economy WHERE guild_id=? AND user_id=?", (int(gid), int(uid)))
+        row = cur.fetchone()
+        conn.commit(); conn.close()
+        return int((row["last_boost_weekly"] if hasattr(row, "keys") else row[0]) or 0) if row else 0
+    except Exception:
+        return 0
+
+
+def claim_booster_weekly(user_id, guild_id=None):
+    """Per-guild booster reward. Prevents cross-server booster economy mixing."""
+    gid = nm_v5_final_gid(fallback=guild_id)
+    uid = nm_v5_safe_int(user_id, 0)
+    now = int(time.time())
+    cooldown = int(globals().get("BOOSTER_WEEKLY_COOLDOWN_SECONDS", 7 * 24 * 60 * 60))
+    reward = int(globals().get("BOOSTER_WEEKLY_REWARD", 5000))
+    if gid <= 0 or uid <= 0:
+        return False, cooldown, 0, 0
+    try:
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (int(gid), int(uid)))
+        cur.execute("SELECT balance, COALESCE(last_boost_weekly,0) FROM guild_economy WHERE guild_id=? AND user_id=?", (int(gid), int(uid)))
+        row = cur.fetchone()
+        balance = int(row[0] or 0) if row else 0
+        last_boost = int(row[1] or 0) if row else 0
+        if now - last_boost < cooldown:
+            conn.close()
+            return False, max(0, cooldown - (now - last_boost)), balance, 0
+        new_balance = balance + reward
+        cur.execute("UPDATE guild_economy SET balance=?, last_boost_weekly=? WHERE guild_id=? AND user_id=?", (int(new_balance), int(now), int(gid), int(uid)))
+        conn.commit(); conn.close()
+        try:
+            nm_v5_eco_audit(gid, uid, reward, new_balance, "booster_weekly", "Booster weekly reward", 0)
+        except Exception:
+            try: money_audit_record(guild_id=gid, user_id=uid, amount=reward, new_balance=new_balance, source_type="booster_weekly", details=f"Guild {gid} | Booster weekly reward")
+            except Exception: pass
+        return True, 0, new_balance, reward
+    except Exception as e:
+        try: nm_v5_log_runtime_error("claim_booster_weekly_extra_fix", e)
+        except Exception: pass
+        return False, cooldown, nm_v5_eco_get_balance(gid, uid), 0
+
+
+async def booster_weekly_loop():
+    """Global multi-guild booster loop. Checks every server instead of only first/default guild."""
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            role_id = int(globals().get("SERVER_BOOSTER_ROLE_ID", 0) or 0)
+            if role_id > 0:
+                for guild in list(getattr(bot, "guilds", []) or []):
+                    try:
+                        role = guild.get_role(role_id)
+                        if not role:
+                            continue
+                        channel_id = get_effective_commands_channel_id(guild.id) if "get_effective_commands_channel_id" in globals() else 0
+                        channel = guild.get_channel(int(channel_id)) if channel_id else None
+                        for member in list(role.members):
+                            if getattr(member, "bot", False):
+                                continue
+                            success, remaining, balance_amount, reward = claim_booster_weekly(member.id, guild.id)
+                            if success and channel:
+                                embed = discord.Embed(
+                                    title="🚀 Booster Weekly Auto Reward",
+                                    description=f"{member.mention} استلم مكافأة البوست الأسبوعية تلقائيًا.",
+                                    color=COLOR_PURPLE,
+                                    timestamp=discord.utils.utcnow(),
+                                )
+                                embed.add_field(name="🎁 Reward", value=money_delta(reward, guild.id), inline=True)
+                                embed.add_field(name="💼 New Balance", value=coin_line(balance_amount, guild.id), inline=True)
+                                embed.set_footer(text=f"{BOT_BRAND} • Auto Booster Weekly • Guild {guild.id}")
+                                await channel.send(embed=embed)
+                    except Exception as guild_error:
+                        try: nm_v5_log_runtime_error("booster_weekly_loop_guild", guild_error)
+                        except Exception: pass
+        except Exception as e:
+            try: nm_v5_log_runtime_error("booster_weekly_loop_extra_fix", e)
+            except Exception: print(f"Booster weekly auto reward error: {e}")
+        await asyncio.sleep(int(globals().get("BOOSTER_WEEKLY_CHECK_INTERVAL_SECONDS", 3600)))
+
 try:
     nm_v5_eco_init()
     print("✅ NM V5 strict economy patch active: per-guild ledger, migrated money_audit, casino unified, coin sync fixed")
@@ -25919,6 +26062,1873 @@ except Exception as e:
         print(f"❌ NM V5 final broad audit guard boot error: {e}")
     except Exception:
         pass
+
+
+# =====================================================================
+# NM V6 ULTRA MONEY + REAL ESTATE TRACE SYSTEM
+# هدفه: تعرف كل فلوس العضو من وين جات ووين راحت، والعقارات كذلك.
+# يجب أن يكون هذا الباتش قبل keep_alive()/bot.run().
+# =====================================================================
+
+import uuid as _nm_v6_uuid
+
+NM_V6_TRACE_VERSION = "NM V6 ULTRA_TRACE_2026_05_17"
+
+def nm_v6_now():
+    return int(time.time())
+
+def nm_v6_safe_int(value, default=0):
+    try:
+        if value is None:
+            return int(default)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+def nm_v6_json(data):
+    try:
+        return json.dumps(data or {}, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return "{}"
+
+def nm_v6_tx_id(prefix="TX"):
+    try:
+        return f"{prefix}-{int(time.time())}-{_nm_v6_uuid.uuid4().hex[:12]}"
+    except Exception:
+        return f"{prefix}-{int(time.time())}-{random.randint(100000,999999)}"
+
+def nm_v6_gid(source=None):
+    gid = 0
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        gid = int(NM_V5_ACTIVE_GUILD_ID.get() or 0)
+        if gid:
+            return gid
+    except Exception:
+        pass
+    try:
+        gid = int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or 0
+        )
+        if gid:
+            return gid
+    except Exception:
+        pass
+    try:
+        gid = int(nm_v5_find_runtime_guild_id())
+        if gid:
+            return gid
+    except Exception:
+        pass
+    try:
+        g = nm_global_first_guild()
+        if g:
+            return int(g.id)
+    except Exception:
+        pass
+    return 0
+
+def nm_v6_coin(guild_id=None):
+    try:
+        return str(nm_v5_get_coin_name(int(guild_id or nm_v6_gid()) or 0))
+    except Exception:
+        try:
+            return str(nm_coin_name(int(guild_id or 0)))
+        except Exception:
+            return "NM Coin"
+
+def nm_v6_money(amount, guild_id=None):
+    try:
+        return f"{int(amount):,} {nm_v6_coin(guild_id)}"
+    except Exception:
+        return f"0 {nm_v6_coin(guild_id)}"
+
+def nm_v6_member_name(user_id, guild_id=0):
+    user_id = nm_v6_safe_int(user_id)
+    guild_id = nm_v6_safe_int(guild_id)
+    try:
+        guild = bot.get_guild(guild_id) if guild_id else None
+        member = guild.get_member(user_id) if guild else None
+        if member:
+            return str(member.display_name)
+    except Exception:
+        pass
+    try:
+        u = bot.get_user(user_id)
+        if u:
+            return str(getattr(u, "display_name", None) or getattr(u, "name", None) or user_id)
+    except Exception:
+        pass
+    return f"User {user_id}"
+
+def nm_v6_ctx_ids(source=None):
+    data = {"channel_id": 0, "message_id": 0, "actor_id": 0, "actor_name": ""}
+    try:
+        if source is not None:
+            author = getattr(source, "author", None) or getattr(source, "user", None)
+            channel = getattr(source, "channel", None)
+            message = getattr(source, "message", None)
+            if author:
+                data["actor_id"] = nm_v6_safe_int(getattr(author, "id", 0))
+                data["actor_name"] = str(getattr(author, "display_name", "") or getattr(author, "name", "") or "")
+            if channel:
+                data["channel_id"] = nm_v6_safe_int(getattr(channel, "id", 0))
+            if message:
+                data["message_id"] = nm_v6_safe_int(getattr(message, "id", 0))
+    except Exception:
+        pass
+    return data
+
+def nm_v6_db():
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def nm_v6_column_exists(cur, table, column):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return str(column) in {str(r[1]) for r in cur.fetchall()}
+    except Exception:
+        return False
+
+def nm_v6_add_column(cur, table, column, coltype):
+    try:
+        if not nm_v6_column_exists(cur, table, column):
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+    except Exception:
+        pass
+
+def nm_v6_trace_init():
+    conn = nm_v6_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_economy (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            balance INTEGER DEFAULT 0,
+            last_daily INTEGER DEFAULT 0,
+            last_boost_weekly INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS money_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER DEFAULT 0,
+            user_id INTEGER DEFAULT 0,
+            user_name TEXT DEFAULT '',
+            amount INTEGER DEFAULT 0,
+            new_balance INTEGER DEFAULT 0,
+            source_type TEXT DEFAULT 'system',
+            source_label TEXT DEFAULT '',
+            admin_id INTEGER DEFAULT 0,
+            admin_name TEXT DEFAULT '',
+            batch_id TEXT DEFAULT '',
+            details TEXT DEFAULT '',
+            actor_id INTEGER DEFAULT 0,
+            actor_name TEXT DEFAULT '',
+            balance_before INTEGER DEFAULT 0,
+            balance_after INTEGER DEFAULT 0,
+            tx_id TEXT DEFAULT '',
+            reference_type TEXT DEFAULT '',
+            reference_id TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '{}',
+            channel_id INTEGER DEFAULT 0,
+            message_id INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT 0
+        )
+    """)
+    for col, typ in [
+        ("guild_id", "INTEGER DEFAULT 0"),
+        ("user_name", "TEXT DEFAULT ''"),
+        ("source_label", "TEXT DEFAULT ''"),
+        ("admin_id", "INTEGER DEFAULT 0"),
+        ("admin_name", "TEXT DEFAULT ''"),
+        ("batch_id", "TEXT DEFAULT ''"),
+        ("actor_id", "INTEGER DEFAULT 0"),
+        ("actor_name", "TEXT DEFAULT ''"),
+        ("balance_before", "INTEGER DEFAULT 0"),
+        ("balance_after", "INTEGER DEFAULT 0"),
+        ("tx_id", "TEXT DEFAULT ''"),
+        ("reference_type", "TEXT DEFAULT ''"),
+        ("reference_id", "TEXT DEFAULT ''"),
+        ("metadata_json", "TEXT DEFAULT '{}'"),
+        ("channel_id", "INTEGER DEFAULT 0"),
+        ("message_id", "INTEGER DEFAULT 0"),
+        ("created_at", "INTEGER DEFAULT 0"),
+    ]:
+        nm_v6_add_column(cur, "money_audit", col, typ)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nm_money_ledger_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_id TEXT DEFAULT '',
+            guild_id INTEGER DEFAULT 0,
+            user_id INTEGER DEFAULT 0,
+            user_name TEXT DEFAULT '',
+            actor_id INTEGER DEFAULT 0,
+            actor_name TEXT DEFAULT '',
+            amount INTEGER DEFAULT 0,
+            balance_before INTEGER DEFAULT 0,
+            balance_after INTEGER DEFAULT 0,
+            direction TEXT DEFAULT '',
+            source_type TEXT DEFAULT '',
+            source_label TEXT DEFAULT '',
+            reason TEXT DEFAULT '',
+            reference_type TEXT DEFAULT '',
+            reference_id TEXT DEFAULT '',
+            related_user_id INTEGER DEFAULT 0,
+            channel_id INTEGER DEFAULT 0,
+            message_id INTEGER DEFAULT 0,
+            metadata_json TEXT DEFAULT '{}',
+            created_at INTEGER DEFAULT 0
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS nm_property_ledger_v6 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_id TEXT DEFAULT '',
+            guild_id INTEGER DEFAULT 0,
+            property_id INTEGER DEFAULT 0,
+            action TEXT DEFAULT '',
+            actor_id INTEGER DEFAULT 0,
+            actor_name TEXT DEFAULT '',
+            old_owner_id INTEGER DEFAULT 0,
+            new_owner_id INTEGER DEFAULT 0,
+            amount INTEGER DEFAULT 0,
+            tax INTEGER DEFAULT 0,
+            seller_gets INTEGER DEFAULT 0,
+            level_before INTEGER DEFAULT 0,
+            level_after INTEGER DEFAULT 0,
+            sale_price_before INTEGER DEFAULT 0,
+            sale_price_after INTEGER DEFAULT 0,
+            details TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '{}',
+            created_at INTEGER DEFAULT 0
+        )
+    """)
+
+    # Make the old real estate table server scoped without deleting old data.
+    try:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS real_estate_properties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
+                type_key TEXT,
+                unit_number INTEGER,
+                display_name TEXT,
+                owner_id INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                last_rent_claim INTEGER DEFAULT 0,
+                for_sale_price INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        nm_v6_add_column(cur, "real_estate_properties", "guild_id", "INTEGER DEFAULT 0")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS real_estate_auctions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
+                property_id INTEGER,
+                seller_id INTEGER,
+                start_price INTEGER,
+                highest_bid INTEGER DEFAULT 0,
+                highest_bidder INTEGER DEFAULT 0,
+                ends_at INTEGER,
+                status TEXT DEFAULT 'active',
+                created_at INTEGER
+            )
+        """)
+        nm_v6_add_column(cur, "real_estate_auctions", "guild_id", "INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_nm_money_v6_guild_user_time ON nm_money_ledger_v6(guild_id, user_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_nm_money_v6_source ON nm_money_ledger_v6(guild_id, source_type, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_nm_money_v6_ref ON nm_money_ledger_v6(guild_id, reference_type, reference_id)",
+        "CREATE INDEX IF NOT EXISTS idx_nm_money_v6_tx ON nm_money_ledger_v6(tx_id)",
+        "CREATE INDEX IF NOT EXISTS idx_money_audit_v6_guild_user ON money_audit(guild_id, user_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_money_audit_v6_tx ON money_audit(tx_id)",
+        "CREATE INDEX IF NOT EXISTS idx_prop_v6_guild_prop ON nm_property_ledger_v6(guild_id, property_id, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_prop_v6_guild_action ON nm_property_ledger_v6(guild_id, action, id DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_real_estate_guild_owner ON real_estate_properties(guild_id, owner_id)",
+        "CREATE INDEX IF NOT EXISTS idx_real_estate_guild_type ON real_estate_properties(guild_id, type_key, owner_id)",
+        "CREATE INDEX IF NOT EXISTS idx_auctions_guild_status ON real_estate_auctions(guild_id, status)",
+    ]:
+        try:
+            cur.execute(sql)
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
+
+def nm_v6_source_label(source_type):
+    source_type = str(source_type or "system")
+    labels = {
+        "salary": "راتب",
+        "booster_salary": "راتب بوستر",
+        "transfer_in": "تحويل داخل",
+        "transfer_out": "تحويل خارج",
+        "admin_give": "إضافة إدارية",
+        "admin_take": "سحب إداري",
+        "dashboard_set": "تعديل من الداشبورد",
+        "casino_bet": "رهان قمار",
+        "casino_win": "ربح قمار",
+        "casino_push": "تعادل/استرجاع قمار",
+        "property_buy_system": "شراء عقار من النظام",
+        "property_buy_listing": "شراء عقار من لاعب",
+        "property_sell_income": "دخل بيع عقار",
+        "property_sale_tax": "ضريبة بيع عقار",
+        "property_rent": "دخل إيجار عقار",
+        "property_upgrade": "تطوير عقار",
+        "auction_buy": "شراء مزاد عقار",
+        "auction_sell_income": "دخل مزاد عقار",
+        "shop": "متجر",
+        "lootbox": "صندوق",
+    }
+    if source_type.startswith("casino_") and source_type.endswith("_bet"):
+        return "رهان قمار"
+    if source_type.startswith("casino_") and source_type.endswith("_win"):
+        return "ربح قمار"
+    if source_type.startswith("casino_") and source_type.endswith("_push"):
+        return "استرجاع رهان"
+    return labels.get(source_type, source_type)
+
+def nm_v6_log_money_tx(cur, *, tx_id, guild_id, user_id, amount, balance_before, balance_after,
+                       source_type, reason="", actor_id=0, actor_name="", reference_type="",
+                       reference_id="", related_user_id=0, channel_id=0, message_id=0, metadata=None):
+    guild_id = nm_v6_safe_int(guild_id)
+    user_id = nm_v6_safe_int(user_id)
+    amount = nm_v6_safe_int(amount)
+    balance_before = nm_v6_safe_int(balance_before)
+    balance_after = nm_v6_safe_int(balance_after)
+    actor_id = nm_v6_safe_int(actor_id)
+    related_user_id = nm_v6_safe_int(related_user_id)
+    channel_id = nm_v6_safe_int(channel_id)
+    message_id = nm_v6_safe_int(message_id)
+    created_at = nm_v6_now()
+    source_type = str(source_type or "system")[:100]
+    source_label = nm_v6_source_label(source_type)[:160]
+    direction = "in" if amount > 0 else "out" if amount < 0 else "neutral"
+    user_name = nm_v6_member_name(user_id, guild_id)
+    actor_name = str(actor_name or (nm_v6_member_name(actor_id, guild_id) if actor_id else ""))[:180]
+    reason = str(reason or source_label)[:800]
+    reference_type = str(reference_type or "")[:80]
+    reference_id = str(reference_id or "")[:160]
+    meta_json = nm_v6_json(metadata or {})
+
+    cur.execute("""
+        INSERT INTO nm_money_ledger_v6
+        (tx_id,guild_id,user_id,user_name,actor_id,actor_name,amount,balance_before,balance_after,direction,
+         source_type,source_label,reason,reference_type,reference_id,related_user_id,channel_id,message_id,metadata_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (tx_id, guild_id, user_id, user_name, actor_id, actor_name, amount, balance_before, balance_after,
+          direction, source_type, source_label, reason, reference_type, reference_id, related_user_id, channel_id,
+          message_id, meta_json, created_at))
+
+    # Keep old dashboard pages alive too.
+    cur.execute("""
+        INSERT INTO money_audit
+        (guild_id,user_id,user_name,amount,new_balance,source_type,source_label,admin_id,admin_name,batch_id,details,
+         actor_id,actor_name,balance_before,balance_after,tx_id,reference_type,reference_id,metadata_json,channel_id,message_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (guild_id, user_id, user_name, amount, balance_after, source_type, source_label, actor_id, actor_name,
+          tx_id, reason, actor_id, actor_name, balance_before, balance_after, tx_id, reference_type, reference_id,
+          meta_json, channel_id, message_id, created_at))
+
+def nm_v6_log_property_tx(cur, *, tx_id, guild_id, property_id, action, actor_id=0,
+                          old_owner_id=0, new_owner_id=0, amount=0, tax=0, seller_gets=0,
+                          level_before=0, level_after=0, sale_price_before=0, sale_price_after=0,
+                          details="", metadata=None):
+    guild_id = nm_v6_safe_int(guild_id)
+    property_id = nm_v6_safe_int(property_id)
+    actor_id = nm_v6_safe_int(actor_id)
+    cur.execute("""
+        INSERT INTO nm_property_ledger_v6
+        (tx_id,guild_id,property_id,action,actor_id,actor_name,old_owner_id,new_owner_id,amount,tax,seller_gets,
+         level_before,level_after,sale_price_before,sale_price_after,details,metadata_json,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        str(tx_id), guild_id, property_id, str(action or "")[:100], actor_id, nm_v6_member_name(actor_id, guild_id) if actor_id else "",
+        nm_v6_safe_int(old_owner_id), nm_v6_safe_int(new_owner_id), nm_v6_safe_int(amount),
+        nm_v6_safe_int(tax), nm_v6_safe_int(seller_gets), nm_v6_safe_int(level_before),
+        nm_v6_safe_int(level_after), nm_v6_safe_int(sale_price_before), nm_v6_safe_int(sale_price_after),
+        str(details or "")[:1000], nm_v6_json(metadata or {}), nm_v6_now()
+    ))
+
+def nm_v6_ensure_user(cur, guild_id, user_id):
+    cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance,last_daily,last_boost_weekly) VALUES (?,?,0,0,0)", (int(guild_id), int(user_id)))
+
+def nm_v6_get_balance(guild_id, user_id):
+    nm_v6_trace_init()
+    gid, uid = nm_v6_safe_int(guild_id), nm_v6_safe_int(user_id)
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    nm_v6_ensure_user(cur, gid, uid)
+    cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+    row = cur.fetchone()
+    conn.commit()
+    conn.close()
+    return nm_v6_safe_int(row["balance"] if row else 0)
+
+def nm_v6_change_balance(guild_id, user_id, amount, source_type="system", reason="", actor_id=0,
+                         actor_name="", reference_type="", reference_id="", related_user_id=0,
+                         channel_id=0, message_id=0, metadata=None, allow_negative=False, tx_id=None):
+    nm_v6_trace_init()
+    gid, uid = nm_v6_safe_int(guild_id), nm_v6_safe_int(user_id)
+    amount = nm_v6_safe_int(amount)
+    if uid <= 0:
+        return False, 0
+    tx_id = tx_id or nm_v6_tx_id("MNY")
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old = nm_v6_safe_int((cur.fetchone() or {"balance": 0})["balance"])
+        new = old + amount
+        if new < 0 and not allow_negative:
+            conn.rollback()
+            conn.close()
+            return False, old
+        new = max(0, new)
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=uid, amount=amount,
+                           balance_before=old, balance_after=new, source_type=source_type, reason=reason,
+                           actor_id=actor_id, actor_name=actor_name, reference_type=reference_type,
+                           reference_id=reference_id, related_user_id=related_user_id, channel_id=channel_id,
+                           message_id=message_id, metadata=metadata)
+        conn.commit()
+        conn.close()
+        return True, int(new)
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        try:
+            print(f"NM V6 money change error: {e}")
+        except Exception:
+            pass
+        return False, nm_v6_get_balance(gid, uid)
+
+def nm_v6_set_balance(guild_id, user_id, new_balance, source_type="dashboard_set", reason="", actor_id=0, metadata=None):
+    gid, uid = nm_v6_safe_int(guild_id), nm_v6_safe_int(user_id)
+    current = nm_v6_get_balance(gid, uid)
+    delta = max(0, nm_v6_safe_int(new_balance)) - current
+    ok, bal = nm_v6_change_balance(gid, uid, delta, source_type=source_type, reason=reason or f"Set balance from {current} to {new_balance}",
+                                   actor_id=actor_id, reference_type="balance_set", metadata=metadata)
+    return bal
+
+def nm_v6_transfer(guild_id, from_user_id, to_user_id, amount, reason="transfer", actor_id=0, source=None):
+    nm_v6_trace_init()
+    gid = nm_v6_safe_int(guild_id)
+    src = nm_v6_safe_int(from_user_id)
+    dst = nm_v6_safe_int(to_user_id)
+    amount = abs(nm_v6_safe_int(amount))
+    if amount <= 0 or src <= 0 or dst <= 0 or src == dst:
+        return False, nm_v6_get_balance(gid, src), nm_v6_get_balance(gid, dst)
+    ctx = nm_v6_ctx_ids(source)
+    tx_id = nm_v6_tx_id("TRF")
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        nm_v6_ensure_user(cur, gid, src)
+        nm_v6_ensure_user(cur, gid, dst)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, src))
+        src_old = nm_v6_safe_int(cur.fetchone()["balance"])
+        if src_old < amount:
+            conn.rollback()
+            conn.close()
+            return False, src_old, nm_v6_get_balance(gid, dst)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, dst))
+        dst_old = nm_v6_safe_int(cur.fetchone()["balance"])
+        src_new, dst_new = src_old - amount, dst_old + amount
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (src_new, gid, src))
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (dst_new, gid, dst))
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=src, amount=-amount,
+                           balance_before=src_old, balance_after=src_new, source_type="transfer_out",
+                           reason=reason, actor_id=actor_id or src, reference_type="transfer",
+                           reference_id=tx_id, related_user_id=dst, channel_id=ctx["channel_id"],
+                           message_id=ctx["message_id"], metadata={"to_user_id": dst})
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=dst, amount=amount,
+                           balance_before=dst_old, balance_after=dst_new, source_type="transfer_in",
+                           reason=reason, actor_id=actor_id or src, reference_type="transfer",
+                           reference_id=tx_id, related_user_id=src, channel_id=ctx["channel_id"],
+                           message_id=ctx["message_id"], metadata={"from_user_id": src})
+        conn.commit()
+        conn.close()
+        return True, src_new, dst_new
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        print(f"NM V6 transfer error: {e}")
+        return False, nm_v6_get_balance(gid, src), nm_v6_get_balance(gid, dst)
+
+def nm_v6_game_result(guild_id, user_id, game, bet, outcome, multiplier=2.0, details="", source=None):
+    gid, uid, bet = nm_v6_safe_int(guild_id), nm_v6_safe_int(user_id), abs(nm_v6_safe_int(bet))
+    if bet <= 0:
+        return {"ok": False, "reason": "invalid_bet", "balance": nm_v6_get_balance(gid, uid), "delta": 0}
+    ctx = nm_v6_ctx_ids(source)
+    tx_id = nm_v6_tx_id("CAS")
+    ok, bal_after_debit = nm_v6_change_balance(
+        gid, uid, -bet, source_type=f"casino_{game}_bet", reason=f"{game} bet locked before result",
+        actor_id=uid, reference_type="casino_round", reference_id=tx_id, channel_id=ctx["channel_id"],
+        message_id=ctx["message_id"], metadata={"game": game, "bet": bet, "stage": "bet"}, tx_id=tx_id
+    )
+    if not ok:
+        return {"ok": False, "reason": "insufficient", "balance": bal_after_debit, "delta": 0}
+    if outcome == "win":
+        payout = int(round(bet * float(multiplier)))
+        ok2, bal = nm_v6_change_balance(
+            gid, uid, payout, source_type=f"casino_{game}_win", reason=details or f"{game} win payout",
+            actor_id=uid, reference_type="casino_round", reference_id=tx_id, channel_id=ctx["channel_id"],
+            message_id=ctx["message_id"], metadata={"game": game, "bet": bet, "outcome": "win", "payout": payout}, tx_id=tx_id
+        )
+        return {"ok": True, "outcome": "win", "balance": bal, "delta": payout - bet, "payout": payout, "tx_id": tx_id}
+    if outcome == "push":
+        ok2, bal = nm_v6_change_balance(
+            gid, uid, bet, source_type=f"casino_{game}_push", reason=details or f"{game} push refund",
+            actor_id=uid, reference_type="casino_round", reference_id=tx_id, channel_id=ctx["channel_id"],
+            message_id=ctx["message_id"], metadata={"game": game, "bet": bet, "outcome": "push", "payout": bet}, tx_id=tx_id
+        )
+        return {"ok": True, "outcome": "push", "balance": bal, "delta": 0, "payout": bet, "tx_id": tx_id}
+    return {"ok": True, "outcome": "lose", "balance": bal_after_debit, "delta": -bet, "payout": 0, "tx_id": tx_id}
+
+# Override public economy APIs so every old command writes the precise ledger too.
+def nm_v5_eco_get_balance(guild_id, user_id):
+    return nm_v6_get_balance(guild_id, user_id)
+
+def nm_v5_eco_set_balance(guild_id, user_id, new_balance, source_type="set_balance", details="", actor_id=0):
+    return nm_v6_set_balance(guild_id, user_id, new_balance, source_type=source_type, reason=details, actor_id=actor_id)
+
+def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="change", details="", actor_id=0, allow_negative=False):
+    return nm_v6_change_balance(guild_id, user_id, amount, source_type=source_type, reason=details, actor_id=actor_id, allow_negative=allow_negative)
+
+def nm_v5_eco_debit(guild_id, user_id, amount, source_type="debit", details="", actor_id=0):
+    return nm_v6_change_balance(guild_id, user_id, -abs(nm_v6_safe_int(amount)), source_type=source_type, reason=details, actor_id=actor_id)
+
+def nm_v5_eco_credit(guild_id, user_id, amount, source_type="credit", details="", actor_id=0):
+    return nm_v6_change_balance(guild_id, user_id, abs(nm_v6_safe_int(amount)), source_type=source_type, reason=details, actor_id=actor_id)
+
+def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, details="transfer"):
+    return nm_v6_transfer(guild_id, from_user_id, to_user_id, amount, reason=details)
+
+def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome, multiplier=2.0, details=""):
+    return nm_v6_game_result(guild_id, user_id, game, bet, outcome, multiplier, details)
+
+def get_balance(user_id, guild_id=None):
+    return nm_v6_get_balance(guild_id or nm_v6_gid(), user_id)
+
+def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    ok, bal = nm_v6_change_balance(guild_id or nm_v6_gid(), user_id, abs(nm_v6_safe_int(amount)), source_type=source_type,
+                                   reason=details or "Money added", actor_id=admin_id, actor_name=admin_name,
+                                   reference_type="legacy_add", reference_id=batch_id, metadata={"batch_id": batch_id})
+    return bal
+
+def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v6_change_balance(guild_id or nm_v6_gid(), user_id, -abs(nm_v6_safe_int(amount)), source_type=source_type,
+                                reason=details or "Money removed", actor_id=admin_id, actor_name=admin_name,
+                                reference_type="legacy_remove", reference_id=batch_id, metadata={"batch_id": batch_id})
+
+def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v6_set_balance(guild_id or nm_v6_gid(), user_id, amount, source_type=source_type,
+                             reason=details or "Balance set", actor_id=admin_id, metadata={"batch_id": batch_id})
+
+def v3_get_balance(guild_id, user_id):
+    return nm_v6_get_balance(guild_id, user_id)
+
+def v3_add_money(guild_id, user_id, amount, source_type="v3_system_earned", admin_id=0, admin_name="", details="", batch_id="", actor_id=0):
+    ok, bal = nm_v6_change_balance(guild_id, user_id, abs(nm_v6_safe_int(amount)), source_type=source_type,
+                                   reason=details or "V3 add", actor_id=actor_id or admin_id, actor_name=admin_name,
+                                   reference_id=batch_id)
+    return bal
+
+def v3_remove_money(guild_id, user_id, amount, source_type="v3_system_spend", admin_id=0, admin_name="", details="", batch_id="", actor_id=0):
+    return nm_v6_change_balance(guild_id, user_id, -abs(nm_v6_safe_int(amount)), source_type=source_type,
+                                reason=details or "V3 remove", actor_id=actor_id or admin_id, actor_name=admin_name,
+                                reference_id=batch_id)
+
+def get_top_money(limit=10, guild_id=None):
+    nm_v6_trace_init()
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, balance FROM guild_economy
+        WHERE guild_id=?
+        ORDER BY balance DESC, user_id ASC
+        LIMIT ?
+    """, (nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(limit, 10)))
+    rows = [(int(r["user_id"]), int(r["balance"] or 0)) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def get_money_rank(user_id, guild_id=None):
+    try:
+        gid, uid = nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(user_id)
+        nm_v6_trace_init()
+        conn = nm_v6_db()
+        cur = conn.cursor()
+        nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("""
+            SELECT COUNT(*) + 1 AS rank
+            FROM guild_economy
+            WHERE guild_id=? AND balance > (
+                SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?
+            )
+        """, (gid, gid, uid))
+        rank = nm_v6_safe_int(cur.fetchone()["rank"], 1)
+        conn.commit()
+        conn.close()
+        return rank
+    except Exception:
+        return None
+
+def economy_status_text(user_id, guild_id=None):
+    gid = guild_id or nm_v6_gid()
+    balance = nm_v6_get_balance(gid, user_id)
+    rank = get_money_rank(user_id, gid)
+    return balance, f"#{rank}" if rank else "غير معروف"
+
+# -------- server scoped real estate with property ledger --------
+
+def nm_v6_seed_real_estate_for_guild(guild_id):
+    nm_v6_trace_init()
+    gid = nm_v6_safe_int(guild_id)
+    if gid <= 0:
+        return
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    now = nm_v6_now()
+    try:
+        for type_key, cfg in PROPERTY_TYPES.items():
+            target = nm_v6_safe_int(cfg.get("count", 0))
+            cur.execute("SELECT COUNT(*) AS c FROM real_estate_properties WHERE guild_id=? AND type_key=?", (gid, str(type_key)))
+            existing = nm_v6_safe_int(cur.fetchone()["c"])
+            existing_units = set()
+            cur.execute("SELECT unit_number FROM real_estate_properties WHERE guild_id=? AND type_key=?", (gid, str(type_key)))
+            for r in cur.fetchall():
+                existing_units.add(nm_v6_safe_int(r["unit_number"]))
+            for unit in range(1, target + 1):
+                if unit in existing_units:
+                    continue
+                cur.execute("""
+                    INSERT INTO real_estate_properties
+                    (guild_id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price,created_at)
+                    VALUES (?,?,?,?,0,1,0,0,?)
+                """, (gid, str(type_key), unit, str(cfg.get("name", type_key)), now))
+                prop_id = cur.lastrowid
+                nm_v6_log_property_tx(cur, tx_id=nm_v6_tx_id("PRP"), guild_id=gid, property_id=prop_id,
+                                      action="seed", details=f"Seeded {type_key} #{unit}",
+                                      metadata={"type_key": type_key, "unit": unit})
+        conn.commit()
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        print(f"NM V6 seed real estate error: {e}")
+    finally:
+        conn.close()
+
+def seed_real_estate_properties():
+    try:
+        for g in list(getattr(bot, "guilds", []) or []):
+            nm_v6_seed_real_estate_for_guild(g.id)
+    except Exception:
+        pass
+    try:
+        gid = nm_v6_gid()
+        if gid:
+            nm_v6_seed_real_estate_for_guild(gid)
+    except Exception:
+        pass
+
+def get_property_by_id(property_id, guild_id=None):
+    nm_v6_trace_init()
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price
+        FROM real_estate_properties
+        WHERE id=? AND (guild_id=? OR guild_id=0)
+        ORDER BY CASE WHEN guild_id=? THEN 0 ELSE 1 END
+        LIMIT 1
+    """, (nm_v6_safe_int(property_id), gid, gid))
+    row = cur.fetchone()
+    conn.close()
+    return tuple(row) if row else None
+
+def get_available_property(type_key, guild_id=None):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    nm_v6_seed_real_estate_for_guild(gid)
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price
+        FROM real_estate_properties
+        WHERE guild_id=? AND type_key=? AND owner_id=0
+        ORDER BY unit_number ASC
+        LIMIT 1
+    """, (gid, str(type_key)))
+    row = cur.fetchone()
+    conn.close()
+    return tuple(row) if row else None
+
+def get_user_properties(user_id, limit=25, guild_id=None):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    nm_v6_seed_real_estate_for_guild(gid)
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price
+        FROM real_estate_properties
+        WHERE guild_id=? AND owner_id=?
+        ORDER BY type_key ASC, unit_number ASC
+        LIMIT ?
+    """, (gid, nm_v6_safe_int(user_id), nm_v6_safe_int(limit, 25)))
+    rows = [tuple(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def get_for_sale_properties(limit=10, guild_id=None):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    nm_v6_seed_real_estate_for_guild(gid)
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price
+        FROM real_estate_properties
+        WHERE guild_id=? AND for_sale_price > 0 AND owner_id > 0
+        ORDER BY for_sale_price ASC
+        LIMIT ?
+    """, (gid, nm_v6_safe_int(limit, 10)))
+    rows = [tuple(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def real_estate_counts(guild_id=None):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    nm_v6_seed_real_estate_for_guild(gid)
+    data = {}
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        for type_key, cfg in PROPERTY_TYPES.items():
+            cur.execute("SELECT COUNT(*) AS c FROM real_estate_properties WHERE guild_id=? AND type_key=?", (gid, str(type_key)))
+            total = nm_v6_safe_int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM real_estate_properties WHERE guild_id=? AND type_key=? AND owner_id=0", (gid, str(type_key)))
+            available = nm_v6_safe_int(cur.fetchone()["c"])
+            data[type_key] = {"total": total, "available": available, "owned": max(0, total - available)}
+    finally:
+        conn.close()
+    return data
+
+def set_property_owner(property_id, owner_id, guild_id=None, actor_id=0, tx_id=None, details="owner change"):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    prop_id = nm_v6_safe_int(property_id)
+    owner_id = nm_v6_safe_int(owner_id)
+    tx_id = tx_id or nm_v6_tx_id("PRP")
+    nm_v6_trace_init()
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT owner_id, level, for_sale_price FROM real_estate_properties WHERE id=? AND guild_id=?", (prop_id, gid))
+        row = cur.fetchone()
+        old_owner = nm_v6_safe_int(row["owner_id"] if row else 0)
+        level = nm_v6_safe_int(row["level"] if row else 1)
+        sale_price = nm_v6_safe_int(row["for_sale_price"] if row else 0)
+        cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=? AND guild_id=?", (owner_id, prop_id, gid))
+        nm_v6_log_property_tx(cur, tx_id=tx_id, guild_id=gid, property_id=prop_id, action="owner_change",
+                              actor_id=actor_id or owner_id, old_owner_id=old_owner, new_owner_id=owner_id,
+                              level_before=level, level_after=level, sale_price_before=sale_price, sale_price_after=0,
+                              details=details)
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except Exception:
+            pass
+        print(f"NM V6 set_property_owner error: {e}")
+        return False
+
+def set_property_for_sale(property_id, owner_id, price, guild_id=None):
+    gid = nm_v6_safe_int(guild_id or nm_v6_gid())
+    prop_id = nm_v6_safe_int(property_id)
+    owner_id = nm_v6_safe_int(owner_id)
+    price = nm_v6_safe_int(price)
+    if price <= 0:
+        return False, "السعر لازم يكون أكبر من صفر."
+    nm_v6_trace_init()
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("SELECT owner_id, level, for_sale_price FROM real_estate_properties WHERE id=? AND guild_id=?", (prop_id, gid))
+        row = cur.fetchone()
+        if not row:
+            conn.rollback(); conn.close()
+            return False, "ما لقيت العقار."
+        if nm_v6_safe_int(row["owner_id"]) != owner_id:
+            conn.rollback(); conn.close()
+            return False, "هذا العقار مب ملكك."
+        old_sale = nm_v6_safe_int(row["for_sale_price"])
+        cur.execute("UPDATE real_estate_properties SET for_sale_price=? WHERE id=? AND guild_id=?", (price, prop_id, gid))
+        nm_v6_log_property_tx(cur, tx_id=nm_v6_tx_id("PRP"), guild_id=gid, property_id=prop_id,
+                              action="list_for_sale", actor_id=owner_id, old_owner_id=owner_id, new_owner_id=owner_id,
+                              level_before=nm_v6_safe_int(row["level"]), level_after=nm_v6_safe_int(row["level"]),
+                              sale_price_before=old_sale, sale_price_after=price,
+                              details=f"Listed for sale at {price}")
+        conn.commit(); conn.close()
+        return True, "تم عرض العقار للبيع."
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False, str(e)
+
+def buy_property_from_system(user_id, type_key, guild_id=None):
+    gid, uid = nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(user_id)
+    nm_v6_seed_real_estate_for_guild(gid)
+    cfg = property_config(type_key)
+    if not cfg:
+        return False, "نوع العقار غير معروف.", None, 0
+    row = get_available_property(type_key, gid)
+    if not row:
+        return False, "Sold Out — هذا النوع خلص من السوق الأساسي. اشترِ من لاعب أو ادخل مزاد.", None, 0
+    prop_id = nm_v6_safe_int(row[0])
+    price = nm_v6_safe_int(cfg.get("price", 0))
+    tx_id = nm_v6_tx_id("PRB")
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old_bal = nm_v6_safe_int(cur.fetchone()["balance"])
+        if old_bal < price:
+            conn.rollback(); conn.close()
+            return False, f"رصيدك ما يكفي. تحتاج {nm_v6_money(price, gid)}.", row, price
+        new_bal = old_bal - price
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_bal, gid, uid))
+        cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=? AND guild_id=? AND owner_id=0", (uid, prop_id, gid))
+        if cur.rowcount != 1:
+            conn.rollback(); conn.close()
+            return False, "العقار انباع قبل لحظة. جرّب عقار ثاني.", row, price
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=uid, amount=-price, balance_before=old_bal,
+                           balance_after=new_bal, source_type="property_buy_system", reason=f"Bought property #{prop_id} from system",
+                           actor_id=uid, reference_type="property", reference_id=str(prop_id),
+                           metadata={"property_id": prop_id, "type_key": type_key, "price": price})
+        nm_v6_log_property_tx(cur, tx_id=tx_id, guild_id=gid, property_id=prop_id, action="buy_from_system",
+                              actor_id=uid, old_owner_id=0, new_owner_id=uid, amount=price,
+                              level_before=nm_v6_safe_int(row[5]), level_after=nm_v6_safe_int(row[5]),
+                              sale_price_before=0, sale_price_after=0, details=f"System sale for {price}",
+                              metadata={"type_key": type_key})
+        conn.commit(); conn.close()
+        return True, "تم شراء العقار بنجاح.", get_property_by_id(prop_id, gid), price
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False, str(e), row, price
+
+def buy_property_listing(buyer_id, property_id, guild_id=None):
+    gid, buyer_id, prop_id = nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(buyer_id), nm_v6_safe_int(property_id)
+    row = get_property_by_id(prop_id, gid)
+    if not row:
+        return False, "ما لقيت العقار.", None
+    owner_id = nm_v6_safe_int(row[4])
+    price = nm_v6_safe_int(row[7])
+    if owner_id <= 0 or price <= 0:
+        return False, "العقار مب معروض للبيع حالياً.", row
+    if owner_id == buyer_id:
+        return False, "ما تقدر تشتري عقارك من نفسك.", row
+    tax = int(price * (REAL_ESTATE_SALE_TAX_PERCENT / 100))
+    seller_gets = price - tax
+    tx_id = nm_v6_tx_id("PRS")
+    conn = nm_v6_db(); cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        for uid in (buyer_id, owner_id):
+            nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, buyer_id))
+        buyer_old = nm_v6_safe_int(cur.fetchone()["balance"])
+        if buyer_old < price:
+            conn.rollback(); conn.close()
+            return False, f"رصيدك ما يكفي. السعر: {nm_v6_money(price, gid)}", row
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, owner_id))
+        seller_old = nm_v6_safe_int(cur.fetchone()["balance"])
+        buyer_new = buyer_old - price
+        seller_new = seller_old + seller_gets
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (buyer_new, gid, buyer_id))
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (seller_new, gid, owner_id))
+        cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=? AND guild_id=? AND owner_id=? AND for_sale_price=?", (buyer_id, prop_id, gid, owner_id, price))
+        if cur.rowcount != 1:
+            conn.rollback(); conn.close()
+            return False, "العقار تغيرت حالته قبل الشراء. حدث الصفحة وجرب.", row
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=buyer_id, amount=-price, balance_before=buyer_old,
+                           balance_after=buyer_new, source_type="property_buy_listing", reason=f"Bought property #{prop_id}",
+                           actor_id=buyer_id, reference_type="property", reference_id=str(prop_id),
+                           related_user_id=owner_id, metadata={"tax": tax, "seller_gets": seller_gets})
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=owner_id, amount=seller_gets, balance_before=seller_old,
+                           balance_after=seller_new, source_type="property_sell_income", reason=f"Sold property #{prop_id}",
+                           actor_id=buyer_id, reference_type="property", reference_id=str(prop_id),
+                           related_user_id=buyer_id, metadata={"gross_price": price, "tax": tax})
+        if tax:
+            nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=owner_id, amount=-tax, balance_before=seller_new + tax,
+                               balance_after=seller_new, source_type="property_sale_tax", reason=f"Sale tax for property #{prop_id}",
+                               actor_id=buyer_id, reference_type="property", reference_id=str(prop_id),
+                               related_user_id=buyer_id, metadata={"gross_price": price})
+        nm_v6_log_property_tx(cur, tx_id=tx_id, guild_id=gid, property_id=prop_id, action="buy_from_player",
+                              actor_id=buyer_id, old_owner_id=owner_id, new_owner_id=buyer_id, amount=price, tax=tax,
+                              seller_gets=seller_gets, level_before=nm_v6_safe_int(row[5]), level_after=nm_v6_safe_int(row[5]),
+                              sale_price_before=price, sale_price_after=0, details=f"Player sale {owner_id} -> {buyer_id}")
+        conn.commit(); conn.close()
+        return True, f"تم الشراء. البائع استلم {nm_v6_money(seller_gets, gid)} بعد ضريبة {REAL_ESTATE_SALE_TAX_PERCENT}%.", get_property_by_id(prop_id, gid)
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False, str(e), row
+
+def collect_rent_for_user(user_id, guild_id=None):
+    gid, uid = nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(user_id)
+    rows = get_user_properties(uid, limit=500, guild_id=gid)
+    now = nm_v6_now()
+    ready, total, next_remaining = [], 0, None
+    for row in rows:
+        prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
+        elapsed = now - nm_v6_safe_int(last_claim)
+        if nm_v6_safe_int(last_claim) == 0 or elapsed >= REAL_ESTATE_RENT_COOLDOWN_SECONDS:
+            rent = property_rent_amount(type_key, level)
+            total += rent
+            ready.append((prop_id, type_key, unit_number, level, rent))
+        else:
+            remaining = REAL_ESTATE_RENT_COOLDOWN_SECONDS - elapsed
+            next_remaining = remaining if next_remaining is None else min(next_remaining, remaining)
+    if total <= 0:
+        return False, 0, next_remaining or REAL_ESTATE_RENT_COOLDOWN_SECONDS, len(rows)
+    tx_id = nm_v6_tx_id("RNT")
+    conn = nm_v6_db(); cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old = nm_v6_safe_int(cur.fetchone()["balance"])
+        new = old + total
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
+        for prop_id, type_key, unit_number, level, rent in ready:
+            cur.execute("UPDATE real_estate_properties SET last_rent_claim=? WHERE id=? AND guild_id=?", (now, prop_id, gid))
+            nm_v6_log_property_tx(cur, tx_id=tx_id, guild_id=gid, property_id=prop_id, action="rent_claim",
+                                  actor_id=uid, old_owner_id=uid, new_owner_id=uid, amount=rent,
+                                  level_before=level, level_after=level, details=f"Rent claim property #{prop_id}")
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=uid, amount=total, balance_before=old,
+                           balance_after=new, source_type="property_rent", reason=f"Collected rent from {len(ready)} properties",
+                           actor_id=uid, reference_type="rent_batch", reference_id=tx_id,
+                           metadata={"properties": [{"id": p, "rent": r} for p, _, _, _, r in ready]})
+        conn.commit(); conn.close()
+        return True, total, 0, len(rows)
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        print(f"NM V6 rent error: {e}")
+        return False, 0, REAL_ESTATE_RENT_COOLDOWN_SECONDS, len(rows)
+
+def upgrade_property(user_id, property_id, guild_id=None):
+    gid, uid, prop_id = nm_v6_safe_int(guild_id or nm_v6_gid()), nm_v6_safe_int(user_id), nm_v6_safe_int(property_id)
+    row = get_property_by_id(prop_id, gid)
+    if not row:
+        return False, "ما لقيت العقار.", None
+    prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
+    if nm_v6_safe_int(owner_id) != uid:
+        return False, "هذا العقار مب ملكك.", row
+    cfg = property_config(type_key) or {}
+    max_level = nm_v6_safe_int(cfg.get("max_level", 5), 5)
+    level = nm_v6_safe_int(level, 1)
+    if level >= max_level:
+        return False, f"العقار وصل أعلى تطوير Level {max_level}.", row
+    cost = property_upgrade_cost(type_key, level)
+    tx_id = nm_v6_tx_id("UPG")
+    conn = nm_v6_db(); cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        nm_v6_ensure_user(cur, gid, uid)
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        old = nm_v6_safe_int(cur.fetchone()["balance"])
+        if old < cost:
+            conn.rollback(); conn.close()
+            return False, f"رصيدك ما يكفي. تكلفة التطوير: {nm_v6_money(cost, gid)}", row
+        new = old - cost
+        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
+        cur.execute("UPDATE real_estate_properties SET level=? WHERE id=? AND guild_id=? AND owner_id=?", (level + 1, prop_id, gid, uid))
+        nm_v6_log_money_tx(cur, tx_id=tx_id, guild_id=gid, user_id=uid, amount=-cost, balance_before=old,
+                           balance_after=new, source_type="property_upgrade", reason=f"Upgraded property #{prop_id} from L{level} to L{level+1}",
+                           actor_id=uid, reference_type="property", reference_id=str(prop_id),
+                           metadata={"old_level": level, "new_level": level + 1})
+        nm_v6_log_property_tx(cur, tx_id=tx_id, guild_id=gid, property_id=prop_id, action="upgrade",
+                              actor_id=uid, old_owner_id=uid, new_owner_id=uid, amount=cost,
+                              level_before=level, level_after=level+1, details=f"Upgrade cost {cost}")
+        conn.commit(); conn.close()
+        return True, f"تم تطوير العقار إلى Level {level + 1}. الدخل الجديد: {nm_v6_money(property_rent_amount(type_key, level + 1), gid)}", get_property_by_id(prop_id, gid)
+    except Exception as e:
+        try:
+            conn.rollback(); conn.close()
+        except Exception:
+            pass
+        return False, f"فشل التطوير: {e}", row
+
+# -------- dashboard tracking pages --------
+
+def nm_v6_html_escape(x):
+    try:
+        return html.escape(str(x))
+    except Exception:
+        return ""
+
+def nm_v6_dashboard_shell(title, body, guild_id=0):
+    """Render V6 pages inside the real dashboard shell so the sidebar shows all trace tools.
+    Falls back to a small standalone page only if the dashboard template is unavailable.
+    """
+    guild_id = nm_v6_safe_int(guild_id or nm_v6_gid())
+    try:
+        enhanced_body = f"""
+        <div class="card" style="margin-bottom:14px">
+          <span class="pill cyan">V6 Trace</span>
+          <span class="pill">Guild <code>{guild_id}</code></span>
+          <div style="height:10px"></div>
+          <a class="btn" href="/dashboard/money-tracker?guild_id={guild_id}">💰 Money Tracker</a>
+          <a class="btn" href="/dashboard/financial-audit-pro?guild_id={guild_id}">🧾 Financial Audit Pro</a>
+          <a class="btn" href="/dashboard/real-estate-audit-pro?guild_id={guild_id}">🏠 Real Estate Audit</a>
+          <a class="btn" href="/dashboard/real-estate-monitor?guild_id={guild_id}">🏘️ Real Estate Monitor</a>
+          <a class="btn" href="/dashboard/trace-status?guild_id={guild_id}">🧬 Trace Status</a>
+        </div>
+        {body}
+        """
+        return render_dashboard_page(str(title), enhanced_body)
+    except Exception:
+        return f"""
+        <html><head><meta charset="utf-8"><title>{nm_v6_html_escape(title)}</title>
+        <style>
+        body{{font-family:Inter,Arial,sans-serif;background:#0b1020;color:#e5e7eb;margin:0;padding:24px}}
+        .wrap{{max-width:1250px;margin:0 auto}}
+        .card{{background:#111827;border:1px solid #263244;border-radius:18px;padding:18px;margin:14px 0;box-shadow:0 10px 30px rgba(0,0,0,.25)}}
+        .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}}
+        .stat{{background:#0f172a;border:1px solid #334155;border-radius:16px;padding:14px}}
+        .muted{{color:#94a3b8}} .good{{color:#34d399}} .bad{{color:#fb7185}} .warn{{color:#fbbf24}}
+        table{{width:100%;border-collapse:collapse;font-size:14px}} th,td{{border-bottom:1px solid #263244;padding:10px;text-align:left;vertical-align:top}}
+        th{{color:#cbd5e1;background:#0f172a;position:sticky;top:0}} a{{color:#93c5fd;text-decoration:none}}
+        input,select,button{{background:#0f172a;color:#e5e7eb;border:1px solid #334155;border-radius:10px;padding:9px}}
+        code{{background:#020617;border:1px solid #334155;border-radius:8px;padding:2px 6px}}
+        </style></head><body><div class="wrap">
+        <h1>{nm_v6_html_escape(title)}</h1>
+        <p class="muted">Guild ID: <code>{guild_id}</code> • {NM_V6_TRACE_VERSION}</p>
+        <div class="card"><a href="/dashboard/money-tracker?guild_id={guild_id}">Money Tracker</a> • <a href="/dashboard/real-estate-audit-pro?guild_id={guild_id}">Real Estate Audit</a> • <a href="/dashboard/trace-status?guild_id={guild_id}">Trace Status</a></div>
+        {body}
+        </div></body></html>
+        """
+
+def nm_v6_rows(sql, params=()):
+    nm_v6_trace_init()
+    conn = nm_v6_db()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return rows
+
+def nm_v6_one(sql, params=()):
+    rows = nm_v6_rows(sql, params)
+    return rows[0] if rows else {}
+
+def nm_v6_money_tracker_page():
+    gid = nm_v6_safe_int(request.args.get("guild_id") or nm_v6_gid())
+    uid = nm_v6_safe_int(request.args.get("user_id") or 0)
+    q_source = str(request.args.get("source") or "").strip()
+    limit = max(20, min(nm_v6_safe_int(request.args.get("limit"), 100), 500))
+
+    where = ["guild_id=?"]
+    params = [gid]
+    if uid:
+        where.append("user_id=?"); params.append(uid)
+    if q_source:
+        where.append("source_type LIKE ?"); params.append(f"%{q_source}%")
+    where_sql = " AND ".join(where)
+
+    totals = nm_v6_one(f"""
+        SELECT COUNT(*) AS tx_count,
+               COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) AS money_in,
+               COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) AS money_out,
+               COALESCE(SUM(amount),0) AS net
+        FROM nm_money_ledger_v6 WHERE {where_sql}
+    """, tuple(params))
+
+    by_source = nm_v6_rows(f"""
+        SELECT source_type, source_label, COUNT(*) AS c,
+               COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) AS money_in,
+               COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) AS money_out,
+               COALESCE(SUM(amount),0) AS net
+        FROM nm_money_ledger_v6 WHERE {where_sql}
+        GROUP BY source_type, source_label
+        ORDER BY ABS(net) DESC, c DESC
+        LIMIT 40
+    """, tuple(params))
+
+    latest = nm_v6_rows(f"""
+        SELECT * FROM nm_money_ledger_v6 WHERE {where_sql}
+        ORDER BY id DESC LIMIT ?
+    """, tuple(params + [limit]))
+
+    suspicious = nm_v6_rows("""
+        SELECT * FROM nm_money_ledger_v6
+        WHERE guild_id=? AND (ABS(amount) >= 1000000 OR balance_after < 0 OR source_type LIKE '%admin%' OR source_type LIKE '%set%')
+        ORDER BY id DESC LIMIT 80
+    """, (gid,))
+
+    form = f"""
+    <div class="card">
+      <form method="get">
+        <input name="guild_id" value="{gid}" placeholder="guild_id">
+        <input name="user_id" value="{uid if uid else ''}" placeholder="user_id optional">
+        <input name="source" value="{nm_v6_html_escape(q_source)}" placeholder="source e.g. casino/property/admin">
+        <input name="limit" value="{limit}" placeholder="limit">
+        <button>Filter</button>
+        <a href="/dashboard/real-estate-audit-pro?guild_id={gid}">Real Estate Audit</a>
+      </form>
+    </div>
+    """
+
+    stats = f"""
+    <div class="grid">
+      <div class="stat"><div class="muted">Transactions</div><h2>{nm_v6_safe_int(totals.get('tx_count')):,}</h2></div>
+      <div class="stat"><div class="muted">Money In</div><h2 class="good">{nm_v6_money(totals.get('money_in',0), gid)}</h2></div>
+      <div class="stat"><div class="muted">Money Out</div><h2 class="bad">{nm_v6_money(totals.get('money_out',0), gid)}</h2></div>
+      <div class="stat"><div class="muted">Net</div><h2>{nm_v6_money(totals.get('net',0), gid)}</h2></div>
+    </div>
+    """
+
+    src_rows = "".join(
+        f"<tr><td>{nm_v6_html_escape(r.get('source_label') or r.get('source_type'))}<br><code>{nm_v6_html_escape(r.get('source_type'))}</code></td>"
+        f"<td>{r.get('c')}</td><td class='good'>{nm_v6_money(r.get('money_in',0),gid)}</td><td class='bad'>{nm_v6_money(r.get('money_out',0),gid)}</td><td>{nm_v6_money(r.get('net',0),gid)}</td></tr>"
+        for r in by_source
+    ) or "<tr><td colspan='5' class='muted'>No data yet.</td></tr>"
+
+    latest_rows = "".join(
+        f"<tr><td>#{r.get('id')}<br><code>{nm_v6_html_escape(r.get('tx_id'))}</code></td>"
+        f"<td><a href='/dashboard/user-money-trace?guild_id={gid}&user_id={r.get('user_id')}'>{nm_v6_html_escape(r.get('user_name'))}</a><br><code>{r.get('user_id')}</code></td>"
+        f"<td class={'good' if nm_v6_safe_int(r.get('amount'))>0 else 'bad' if nm_v6_safe_int(r.get('amount'))<0 else 'muted'}>{nm_v6_money(r.get('amount'),gid)}</td>"
+        f"<td>{nm_v6_money(r.get('balance_before'),gid)} → <b>{nm_v6_money(r.get('balance_after'),gid)}</b></td>"
+        f"<td>{nm_v6_html_escape(r.get('source_label'))}<br><code>{nm_v6_html_escape(r.get('source_type'))}</code></td>"
+        f"<td>{nm_v6_html_escape(r.get('reason'))}<br><span class='muted'>{nm_v6_html_escape(r.get('reference_type'))}:{nm_v6_html_escape(r.get('reference_id'))}</span></td>"
+        f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(nm_v6_safe_int(r.get('created_at'))))}</td></tr>"
+        for r in latest
+    ) or "<tr><td colspan='7' class='muted'>No transactions found.</td></tr>"
+
+    susp_rows = "".join(
+        f"<tr><td>{r.get('id')}</td><td>{nm_v6_html_escape(r.get('user_name'))}<br><code>{r.get('user_id')}</code></td>"
+        f"<td>{nm_v6_money(r.get('amount'),gid)}</td><td>{nm_v6_html_escape(r.get('source_type'))}</td><td>{nm_v6_html_escape(r.get('reason'))}</td></tr>"
+        for r in suspicious
+    ) or "<tr><td colspan='5' class='muted'>No suspicious transactions.</td></tr>"
+
+    body = form + stats + f"""
+    <div class="card"><h2>By Source</h2><table><tr><th>Source</th><th>Count</th><th>In</th><th>Out</th><th>Net</th></tr>{src_rows}</table></div>
+    <div class="card"><h2>Latest Money Ledger</h2><table><tr><th>ID / TX</th><th>User</th><th>Amount</th><th>Before → After</th><th>Source</th><th>Reason / Ref</th><th>Time</th></tr>{latest_rows}</table></div>
+    <div class="card"><h2>Suspicious / High Risk</h2><table><tr><th>ID</th><th>User</th><th>Amount</th><th>Source</th><th>Reason</th></tr>{susp_rows}</table></div>
+    """
+    return nm_v6_dashboard_shell("💰 Ultra Money Tracker", body, gid)
+
+def nm_v6_user_money_trace_page():
+    gid = nm_v6_safe_int(request.args.get("guild_id") or nm_v6_gid())
+    uid = nm_v6_safe_int(request.args.get("user_id") or 0)
+    if uid <= 0:
+        return nm_v6_dashboard_shell("User Money Trace", "<div class='card bad'>Missing user_id.</div>", gid)
+    bal = nm_v6_get_balance(gid, uid)
+    totals = nm_v6_one("""
+        SELECT COUNT(*) AS c,
+               COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) AS money_in,
+               COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) AS money_out,
+               COALESCE(SUM(amount),0) AS net
+        FROM nm_money_ledger_v6 WHERE guild_id=? AND user_id=?
+    """, (gid, uid))
+    rows = nm_v6_rows("""
+        SELECT * FROM nm_money_ledger_v6 WHERE guild_id=? AND user_id=?
+        ORDER BY id DESC LIMIT 300
+    """, (gid, uid))
+    tr = "".join(
+        f"<tr><td>#{r.get('id')}<br><code>{nm_v6_html_escape(r.get('tx_id'))}</code></td>"
+        f"<td class={'good' if nm_v6_safe_int(r.get('amount'))>0 else 'bad' if nm_v6_safe_int(r.get('amount'))<0 else 'muted'}>{nm_v6_money(r.get('amount'),gid)}</td>"
+        f"<td>{nm_v6_money(r.get('balance_before'),gid)} → {nm_v6_money(r.get('balance_after'),gid)}</td>"
+        f"<td>{nm_v6_html_escape(r.get('source_label'))}<br><code>{nm_v6_html_escape(r.get('source_type'))}</code></td>"
+        f"<td>{nm_v6_html_escape(r.get('reason'))}</td>"
+        f"<td>{nm_v6_html_escape(r.get('actor_name'))}<br><code>{r.get('actor_id')}</code></td>"
+        f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(nm_v6_safe_int(r.get('created_at'))))}</td></tr>"
+        for r in rows
+    ) or "<tr><td colspan='7'>No transactions.</td></tr>"
+    body = f"""
+    <div class="card"><a href="/dashboard/money-tracker?guild_id={gid}">← Back to Money Tracker</a></div>
+    <div class="grid">
+      <div class="stat"><div class="muted">User</div><h2>{nm_v6_html_escape(nm_v6_member_name(uid,gid))}</h2><code>{uid}</code></div>
+      <div class="stat"><div class="muted">Current Balance</div><h2>{nm_v6_money(bal,gid)}</h2></div>
+      <div class="stat"><div class="muted">Money In</div><h2 class="good">{nm_v6_money(totals.get('money_in',0),gid)}</h2></div>
+      <div class="stat"><div class="muted">Money Out</div><h2 class="bad">{nm_v6_money(totals.get('money_out',0),gid)}</h2></div>
+    </div>
+    <div class="card"><h2>Full User Ledger</h2><table><tr><th>ID/TX</th><th>Amount</th><th>Before → After</th><th>Source</th><th>Reason</th><th>Actor</th><th>Time</th></tr>{tr}</table></div>
+    """
+    return nm_v6_dashboard_shell("👤 User Money Trace", body, gid)
+
+def nm_v6_real_estate_audit_page():
+    gid = nm_v6_safe_int(request.args.get("guild_id") or nm_v6_gid())
+    nm_v6_seed_real_estate_for_guild(gid)
+    summary = nm_v6_rows("""
+        SELECT type_key,
+               COUNT(*) AS total,
+               SUM(CASE WHEN owner_id=0 THEN 1 ELSE 0 END) AS empty_count,
+               SUM(CASE WHEN owner_id>0 THEN 1 ELSE 0 END) AS owned_count,
+               SUM(CASE WHEN for_sale_price>0 THEN 1 ELSE 0 END) AS for_sale_count
+        FROM real_estate_properties WHERE guild_id=?
+        GROUP BY type_key ORDER BY type_key
+    """, (gid,))
+    actions = nm_v6_rows("""
+        SELECT action, COUNT(*) AS c, COALESCE(SUM(amount),0) AS total_amount, COALESCE(SUM(tax),0) AS tax
+        FROM nm_property_ledger_v6 WHERE guild_id=?
+        GROUP BY action ORDER BY c DESC
+    """, (gid,))
+    props = nm_v6_rows("""
+        SELECT * FROM real_estate_properties WHERE guild_id=?
+        ORDER BY type_key, unit_number LIMIT 300
+    """, (gid,))
+    latest = nm_v6_rows("""
+        SELECT * FROM nm_property_ledger_v6 WHERE guild_id=?
+        ORDER BY id DESC LIMIT 150
+    """, (gid,))
+    summary_rows = "".join(
+        f"<tr><td>{nm_v6_html_escape(r.get('type_key'))}</td><td>{r.get('total')}</td><td>{r.get('empty_count')}</td><td>{r.get('owned_count')}</td><td>{r.get('for_sale_count')}</td></tr>"
+        for r in summary
+    )
+    action_rows = "".join(
+        f"<tr><td>{nm_v6_html_escape(r.get('action'))}</td><td>{r.get('c')}</td><td>{nm_v6_money(r.get('total_amount'),gid)}</td><td>{nm_v6_money(r.get('tax'),gid)}</td></tr>"
+        for r in actions
+    ) or "<tr><td colspan='4'>No property actions yet.</td></tr>"
+    prop_rows = "".join(
+        f"<tr><td><a href='/dashboard/property-trace?guild_id={gid}&property_id={r.get('id')}'>#{r.get('id')}</a></td><td>{nm_v6_html_escape(r.get('type_key'))} #{r.get('unit_number')}</td>"
+        f"<td>{nm_v6_html_escape(nm_v6_member_name(r.get('owner_id'),gid))}<br><code>{r.get('owner_id')}</code></td><td>L{r.get('level')}</td><td>{nm_v6_money(r.get('for_sale_price'),gid) if nm_v6_safe_int(r.get('for_sale_price')) else '-'}</td></tr>"
+        for r in props
+    )
+    latest_rows = "".join(
+        f"<tr><td>#{r.get('id')}<br><code>{nm_v6_html_escape(r.get('tx_id'))}</code></td><td>{nm_v6_html_escape(r.get('action'))}</td>"
+        f"<td><a href='/dashboard/property-trace?guild_id={gid}&property_id={r.get('property_id')}'>#{r.get('property_id')}</a></td>"
+        f"<td>{nm_v6_money(r.get('amount'),gid)}</td><td>{nm_v6_html_escape(r.get('details'))}</td>"
+        f"<td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(nm_v6_safe_int(r.get('created_at'))))}</td></tr>"
+        for r in latest
+    ) or "<tr><td colspan='6'>No property ledger yet.</td></tr>"
+    body = f"""
+    <div class="card"><a href="/dashboard/money-tracker?guild_id={gid}">Money Tracker</a> • <a href="/dashboard/real-estate-monitor?guild_id={gid}">Old Real Estate Monitor</a></div>
+    <div class="card"><h2>Property Summary</h2><table><tr><th>Type</th><th>Total</th><th>Empty</th><th>Owned</th><th>For Sale</th></tr>{summary_rows}</table></div>
+    <div class="card"><h2>Actions Summary</h2><table><tr><th>Action</th><th>Count</th><th>Amount</th><th>Tax</th></tr>{action_rows}</table></div>
+    <div class="card"><h2>Properties</h2><table><tr><th>ID</th><th>Property</th><th>Owner</th><th>Level</th><th>Sale Price</th></tr>{prop_rows}</table></div>
+    <div class="card"><h2>Latest Property Ledger</h2><table><tr><th>ID/TX</th><th>Action</th><th>Property</th><th>Amount</th><th>Details</th><th>Time</th></tr>{latest_rows}</table></div>
+    """
+    return nm_v6_dashboard_shell("🏙️ Real Estate Audit Pro", body, gid)
+
+def nm_v6_property_trace_page():
+    gid = nm_v6_safe_int(request.args.get("guild_id") or nm_v6_gid())
+    prop_id = nm_v6_safe_int(request.args.get("property_id") or 0)
+    row = get_property_by_id(prop_id, gid)
+    if not row:
+        return nm_v6_dashboard_shell("Property Trace", "<div class='card bad'>Property not found.</div>", gid)
+    ledger = nm_v6_rows("SELECT * FROM nm_property_ledger_v6 WHERE guild_id=? AND property_id=? ORDER BY id DESC LIMIT 300", (gid, prop_id))
+    money = nm_v6_rows("SELECT * FROM nm_money_ledger_v6 WHERE guild_id=? AND reference_type='property' AND reference_id=? ORDER BY id DESC LIMIT 300", (gid, str(prop_id)))
+    led_rows = "".join(
+        f"<tr><td>#{r.get('id')}<br><code>{nm_v6_html_escape(r.get('tx_id'))}</code></td><td>{nm_v6_html_escape(r.get('action'))}</td><td>{r.get('old_owner_id')} → {r.get('new_owner_id')}</td><td>{nm_v6_money(r.get('amount'),gid)}</td><td>{nm_v6_html_escape(r.get('details'))}</td></tr>"
+        for r in ledger
+    ) or "<tr><td colspan='5'>No property ledger.</td></tr>"
+    money_rows = "".join(
+        f"<tr><td>#{r.get('id')}</td><td>{nm_v6_html_escape(r.get('user_name'))}<br><code>{r.get('user_id')}</code></td><td>{nm_v6_money(r.get('amount'),gid)}</td><td>{nm_v6_html_escape(r.get('source_label'))}</td><td>{nm_v6_html_escape(r.get('reason'))}</td></tr>"
+        for r in money
+    ) or "<tr><td colspan='5'>No money linked to this property.</td></tr>"
+    body = f"""
+    <div class="card"><a href="/dashboard/real-estate-audit-pro?guild_id={gid}">← Back to Real Estate Audit</a></div>
+    <div class="grid">
+      <div class="stat"><div class="muted">Property</div><h2>#{row[0]} {nm_v6_html_escape(row[1])} #{row[2]}</h2></div>
+      <div class="stat"><div class="muted">Owner</div><h2>{nm_v6_html_escape(nm_v6_member_name(row[4],gid))}</h2><code>{row[4]}</code></div>
+      <div class="stat"><div class="muted">Level</div><h2>{row[5]}</h2></div>
+      <div class="stat"><div class="muted">For Sale</div><h2>{nm_v6_money(row[7],gid) if nm_v6_safe_int(row[7]) else '-'}</h2></div>
+    </div>
+    <div class="card"><h2>Property Events</h2><table><tr><th>ID/TX</th><th>Action</th><th>Owner Change</th><th>Amount</th><th>Details</th></tr>{led_rows}</table></div>
+    <div class="card"><h2>Money Linked to Property</h2><table><tr><th>ID</th><th>User</th><th>Amount</th><th>Source</th><th>Reason</th></tr>{money_rows}</table></div>
+    """
+    return nm_v6_dashboard_shell("🏠 Property Trace", body, gid)
+
+def nm_v6_trace_status_page():
+    gid = nm_v6_safe_int(request.args.get("guild_id") or nm_v6_gid())
+    nm_v6_trace_init()
+    nm_v6_seed_real_estate_for_guild(gid)
+    tables = {}
+    for table in ["guild_economy", "money_audit", "nm_money_ledger_v6", "real_estate_properties", "nm_property_ledger_v6", "real_estate_auctions"]:
+        try:
+            tables[table] = nm_v6_one(f"SELECT COUNT(*) AS c FROM {table}", {}).get("c", 0)
+        except Exception:
+            tables[table] = "ERR"
+    rows = "".join(f"<tr><td>{nm_v6_html_escape(k)}</td><td>{v}</td></tr>" for k, v in tables.items())
+    body = f"""
+    <div class="card good"><b>NM V6 Ultra Trace is loaded before bot.run.</b></div>
+    <div class="card"><h2>Tables</h2><table><tr><th>Table</th><th>Rows</th></tr>{rows}</table></div>
+    <div class="card">
+      <a href="/dashboard/money-tracker?guild_id={gid}">Money Tracker</a> •
+      <a href="/dashboard/real-estate-audit-pro?guild_id={gid}">Real Estate Audit</a> •
+      <a href="/dashboard/financial-audit-pro?guild_id={gid}">Financial Audit Pro</a>
+    </div>
+    """
+    return nm_v6_dashboard_shell("✅ NM V6 Trace Status", body, gid)
+
+try:
+    app.add_url_rule("/dashboard/money-tracker", "nm_v6_money_tracker_page", nm_v6_money_tracker_page)
+    app.add_url_rule("/dashboard/user-money-trace", "nm_v6_user_money_trace_page", nm_v6_user_money_trace_page)
+    app.add_url_rule("/dashboard/real-estate-audit-pro", "nm_v6_real_estate_audit_page", nm_v6_real_estate_audit_page)
+    app.add_url_rule("/dashboard/property-trace", "nm_v6_property_trace_page", nm_v6_property_trace_page)
+    app.add_url_rule("/dashboard/trace-status", "nm_v6_trace_status_page", nm_v6_trace_status_page)
+except Exception as e:
+    try:
+        print(f"NM V6 route register warning: {e}")
+    except Exception:
+        pass
+
+try:
+    nm_v6_trace_init()
+    print("✅ NM V6 Ultra Money + Real Estate Trace loaded before bot.run")
+except Exception as e:
+    try:
+        print(f"❌ NM V6 Ultra Trace boot error: {e}")
+    except Exception:
+        pass
+
+
+
+
+# ============================================================
+# NM V6 CASINO ANTI-INFLATION GUARD + STRICT BALANCE HOTFIX
+# هدفه يمنع اللعب بمبالغ مجنونة ويحمي الاقتصاد العالمي لكل سيرفر.
+# MUST stay before keep_alive()/bot.run().
+# ============================================================
+NM_CASINO_MIN_BET_V6 = int(os.getenv("NM_CASINO_MIN_BET", "1"))
+NM_CASINO_MAX_BET_V6 = int(os.getenv("NM_CASINO_MAX_BET", "250000"))          # سقف مطلق لكل رهان
+NM_CASINO_MAX_BALANCE_PERCENT_V6 = float(os.getenv("NM_CASINO_MAX_BALANCE_PERCENT", "0.10"))  # 10% من الرصيد
+NM_CASINO_WINDOW_SECONDS_V6 = int(os.getenv("NM_CASINO_WINDOW_SECONDS", "600")) # 10 دقائق
+NM_CASINO_WINDOW_MAX_TOTAL_V6 = int(os.getenv("NM_CASINO_WINDOW_MAX_TOTAL", "1000000")) # مجموع الرهانات في النافذة
+
+
+def nm_v6_casino_guard_init():
+    try:
+        conn = nm_v5_eco_conn() if "nm_v5_eco_conn" in globals() else db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_casino_guard_v6 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
+                user_id INTEGER DEFAULT 0,
+                game TEXT DEFAULT '',
+                bet INTEGER DEFAULT 0,
+                balance_before INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_casino_guard_v6_user_time ON nm_casino_guard_v6(guild_id,user_id,created_at)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        try: print(f"NM V6 casino guard init error: {e}")
+        except Exception: pass
+
+
+def nm_v6_strict_balance(guild_id, user_id):
+    """Strict per-guild balance. No MAX(balance), no economy fallback, no copying money between servers."""
+    gid, uid = int(guild_id or 0), int(user_id or 0)
+    try:
+        nm_v5_eco_init()
+    except Exception:
+        pass
+    try:
+        conn = nm_v5_eco_conn() if "nm_v5_eco_conn" in globals() else db_connect()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance,last_daily,last_boost_weekly) VALUES (?,?,0,0,0)", (gid, uid))
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        row = cur.fetchone()
+        bal = int((row["balance"] if row else 0) or 0)
+        if bal < 0:
+            bal = 0
+            cur.execute("UPDATE guild_economy SET balance=0 WHERE guild_id=? AND user_id=?", (gid, uid))
+        conn.commit()
+        conn.close()
+        return bal
+    except Exception:
+        return 0
+
+# override dangerous previous version that used MAX(balance) from other tables/guilds
+try:
+    nm_v5_eco_get_balance = nm_v6_strict_balance
+    v3_get_balance = nm_v6_strict_balance
+except Exception:
+    pass
+
+
+def nm_v6_casino_window_total(guild_id, user_id):
+    nm_v6_casino_guard_init()
+    now = int(time.time())
+    cutoff = now - int(NM_CASINO_WINDOW_SECONDS_V6)
+    try:
+        conn = nm_v5_eco_conn() if "nm_v5_eco_conn" in globals() else db_connect()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("DELETE FROM nm_casino_guard_v6 WHERE created_at < ?", (now - 86400,))
+        cur.execute("SELECT COALESCE(SUM(bet),0) AS total FROM nm_casino_guard_v6 WHERE guild_id=? AND user_id=? AND created_at >= ?", (int(guild_id), int(user_id), cutoff))
+        row = cur.fetchone()
+        total = int((row["total"] if row else 0) or 0)
+        conn.commit()
+        conn.close()
+        return total
+    except Exception:
+        return 0
+
+
+def nm_v6_casino_record_bet(guild_id, user_id, game, bet, balance_before):
+    nm_v6_casino_guard_init()
+    try:
+        conn = nm_v5_eco_conn() if "nm_v5_eco_conn" in globals() else db_connect()
+        cur = conn.cursor()
+        cur.execute("INSERT INTO nm_casino_guard_v6 (guild_id,user_id,game,bet,balance_before,created_at) VALUES (?,?,?,?,?,?)", (int(guild_id), int(user_id), str(game or 'casino'), int(bet), int(balance_before), int(time.time())))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def nm_v6_casino_limit_check(guild_id, user_id, bet, game="casino"):
+    gid, uid, bet = int(guild_id or 0), int(user_id or 0), int(bet or 0)
+    balance = nm_v6_strict_balance(gid, uid)
+    if bet < NM_CASINO_MIN_BET_V6:
+        return False, f"❌ أقل رهان هو **{NM_CASINO_MIN_BET_V6:,}** {nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else COIN_NAME}", balance
+    if balance < bet:
+        return False, f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(balance, gid) if 'nm_v5_eco_money' in globals() else balance}", balance
+
+    percent_cap = max(NM_CASINO_MIN_BET_V6, int(balance * NM_CASINO_MAX_BALANCE_PERCENT_V6))
+    allowed_max = max(NM_CASINO_MIN_BET_V6, min(NM_CASINO_MAX_BET_V6, percent_cap))
+    if bet > allowed_max:
+        return False, (
+            f"🛑 الرهان كبير جدًا على اقتصاد السيرفر.\n"
+            f"أقصى رهان لك الآن: **{allowed_max:,}** {nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else COIN_NAME}\n"
+            f"الحد محسوب من: سقف السيرفر **{NM_CASINO_MAX_BET_V6:,}** أو **{int(NM_CASINO_MAX_BALANCE_PERCENT_V6*100)}%** من رصيدك، الأقل بينهم."
+        ), balance
+
+    window_total = nm_v6_casino_window_total(gid, uid)
+    if window_total + bet > NM_CASINO_WINDOW_MAX_TOTAL_V6:
+        remaining = max(0, NM_CASINO_WINDOW_MAX_TOTAL_V6 - window_total)
+        return False, (
+            f"🛑 وصلت حد القمار المؤقت.\n"
+            f"مجموع رهاناتك آخر {int(NM_CASINO_WINDOW_SECONDS_V6/60)} دقائق: **{window_total:,}**\n"
+            f"تقدر تراهن الآن بحد أقصى: **{remaining:,}**"
+        ), balance
+
+    nm_v6_casino_record_bet(gid, uid, game, bet, balance)
+    return True, "OK", balance
+
+
+# Prefix commands guard. Existing casino callbacks call this global function at runtime.
+async def nm_v5_bet_or_reply(ctx, amount):
+    if not getattr(ctx, "guild", None):
+        return None
+    try:
+        if "require_gambling_channel" in globals():
+            ok = await require_gambling_channel(ctx)
+            if not ok:
+                return None
+    except Exception:
+        pass
+    bet = nm_v5_parse_bet(amount) if "nm_v5_parse_bet" in globals() else None
+    if bet is None or int(bet) <= 0:
+        await ctx.send("❌ مبلغ الرهان غير صحيح. مثال: `!حظ 500` أو `!bj 10k`")
+        return None
+    ok, msg, bal = nm_v6_casino_limit_check(ctx.guild.id, ctx.author.id, int(bet), getattr(getattr(ctx, 'command', None), 'name', 'casino'))
+    if not ok:
+        await ctx.send(msg)
+        return None
+    return int(bet)
+
+
+# Slash commands guard.
+async def v3_gamble_check(interaction, amount):
+    try:
+        if not await v3_require_gambling_interaction(interaction):
+            return None
+    except Exception:
+        pass
+    if not interaction.guild:
+        try: await interaction.response.send_message("❌ هذا الأمر داخل السيرفر فقط.", ephemeral=True)
+        except Exception: pass
+        return None
+    try:
+        ok, remaining = can_gamble_now(interaction.user.id)
+        if not ok:
+            await interaction.response.send_message(f"⏳ انتظر {remaining} ثانية قبل اللعب مرة ثانية.", ephemeral=True)
+            return None
+    except Exception:
+        pass
+    bet = int(amount or 0)
+    ok, msg, bal = nm_v6_casino_limit_check(interaction.guild.id, interaction.user.id, bet, "slash_casino")
+    if not ok:
+        try: await interaction.response.send_message(msg, ephemeral=True)
+        except Exception: pass
+        return None
+    return bet
+
+
+@app.route("/dashboard/casino-guard-status")
+def nm_v6_casino_guard_status_page():
+    gid = int(request.args.get("guild_id") or (nm_v5_eco_gid() if "nm_v5_eco_gid" in globals() else 0) or 0)
+    nm_v6_casino_guard_init()
+    rows = []
+    try:
+        conn = nm_v5_eco_conn() if "nm_v5_eco_conn" in globals() else db_connect()
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT user_id, COUNT(*) AS rounds, COALESCE(SUM(bet),0) AS total_bet, MAX(bet) AS max_bet, MAX(created_at) AS last_time
+            FROM nm_casino_guard_v6
+            WHERE guild_id=? AND created_at >= ?
+            GROUP BY user_id
+            ORDER BY total_bet DESC
+            LIMIT 50
+        """, (gid, int(time.time()) - 86400))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        rows = [{"user_id":"ERROR", "rounds":0, "total_bet":str(e), "max_bet":0, "last_time":0}]
+    trs = "".join(
+        f"<tr><td><code>{html.escape(str(r.get('user_id')))}</code></td><td>{int(r.get('rounds') or 0):,}</td><td>{html.escape(str(r.get('total_bet')))}</td><td>{int(r.get('max_bet') or 0):,}</td><td>{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(int(r.get('last_time') or 0))) if int(r.get('last_time') or 0) else '-'}</td></tr>"
+        for r in rows
+    )
+    return render_template_string(f"""
+    <html><head><title>Casino Guard</title><style>
+    body{{background:#080812;color:#f6f6fb;font-family:Arial;padding:24px}} .card{{background:#121224;border:1px solid #2b2b44;border-radius:18px;padding:18px;margin:14px 0}} table{{width:100%;border-collapse:collapse}} td,th{{padding:10px;border-bottom:1px solid #2b2b44;text-align:left}} code{{color:#a78bfa}}
+    </style></head><body>
+    <h1>🛡️ Casino Guard V6</h1>
+    <div class="card">
+      <b>Guild:</b> <code>{gid}</code><br>
+      <b>Max bet:</b> {NM_CASINO_MAX_BET_V6:,}<br>
+      <b>Max balance percent:</b> {int(NM_CASINO_MAX_BALANCE_PERCENT_V6*100)}%<br>
+      <b>Window:</b> {int(NM_CASINO_WINDOW_SECONDS_V6/60)} minutes / {NM_CASINO_WINDOW_MAX_TOTAL_V6:,} total bets
+    </div>
+    <div class="card"><h2>Top casino exposure last 24h</h2><table><tr><th>User</th><th>Rounds</th><th>Total Bet</th><th>Max Bet</th><th>Last</th></tr>{trs or '<tr><td colspan="5">No casino bets recorded yet.</td></tr>'}</table></div>
+    <p><a style="color:#a78bfa" href="/dashboard/money-tracker?guild_id={gid}">Money Tracker</a> · <a style="color:#a78bfa" href="/dashboard/financial-audit-pro?guild_id={gid}">Financial Audit</a></p>
+    </body></html>
+    """)
+
+try:
+    nm_v6_casino_guard_init()
+    print("✅ NM V6 Casino Anti-Inflation Guard loaded before bot.run")
+except Exception as e:
+    try: print(f"NM V6 Casino Guard load error: {e}")
+    except Exception: pass
+
+
+# ============================================================
+# NM V6 CASINO ALL-IN LOSS FIX + LEGACY ! COMMAND ROUTER
+# السبب: on_message كان يمسك أوامر !حظ/!دبل/!سلوت قبل discord.py commands
+# ويشغل nm_legacy_luck/nm_legacy_slot على جدول/منطق قديم.
+# هذا الباتش يستبدل nm_handle_legacy_bang قبل bot.run بحيث كل أوامر !
+# تمر على ledger الصارم: خصم الرهان أولاً، الخسارة تبقى مخصومة، الفوز يدفع فقط.
+# ============================================================
+
+async def nm_v6_send_money_line(channel, title, member, gid, bet, delta, balance, color=None, extra=""):
+    try:
+        coin = nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else nm_v5_get_coin_name(gid)
+    except Exception:
+        coin = COIN_NAME
+    before = int(balance) - int(delta)
+    sign = "+" if int(delta) >= 0 else ""
+    desc = (
+        f"{title}\n"
+        f"🎲 الرهان: **{int(bet):,} {coin}**\n"
+        f"📉/📈 الصافي: **{sign}{int(delta):,} {coin}**\n"
+        f"💼 قبل: **{max(0, before):,} {coin}**\n"
+        f"💼 بعد: **{int(balance):,} {coin}**"
+    )
+    if extra:
+        desc += f"\n{extra}"
+    try:
+        embed = discord.Embed(
+            title="🎰 NM Casino Ledger",
+            description=desc,
+            color=color or (COLOR_GREEN if int(delta) > 0 else COLOR_RED if int(delta) < 0 else COLOR_ORANGE),
+            timestamp=discord.utils.utcnow()
+        )
+        try:
+            embed.set_author(name=f"{member.display_name}", icon_url=member.display_avatar.url)
+        except Exception:
+            pass
+        embed.set_footer(text="Debit-first ledger • الخسارة تخصم فعليًا")
+        return await channel.send(embed=embed)
+    except Exception:
+        return await channel.send(desc)
+
+
+def nm_v6_parse_legacy_bet(raw):
+    try:
+        if raw is None:
+            return None
+        if 'nm_v5_parse_bet' in globals():
+            v = nm_v5_parse_bet(raw)
+            if v is not None:
+                return int(v)
+        if 'parse_bet_amount' in globals():
+            v = parse_bet_amount(str(raw))
+            if v is not None:
+                return int(v)
+        return int(str(raw).replace(',', '').strip())
+    except Exception:
+        return None
+
+
+async def nm_v6_legacy_bet_or_reply(message, raw_amount, game='casino'):
+    gid = int(message.guild.id)
+    uid = int(message.author.id)
+    bet = nm_v6_parse_legacy_bet(raw_amount)
+    if bet is None or int(bet) <= 0:
+        await message.channel.send("❌ اكتب مبلغ صحيح. مثال: `!حظ 1000`")
+        return None
+    try:
+        ok, msg, bal = nm_v6_casino_limit_check(gid, uid, int(bet), game)
+        if not ok:
+            await message.channel.send(msg)
+            return None
+    except Exception:
+        bal = nm_v5_eco_get_balance(gid, uid) if 'nm_v5_eco_get_balance' in globals() else get_balance(uid, guild_id=gid)
+        if int(bal) < int(bet):
+            await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{int(bal):,}**")
+            return None
+    return int(bet)
+
+
+async def nm_v6_legacy_luck_strict(message, raw_amount, game_name='luck', win_chance=0.50, label='🎲 حظ'):
+    gid = int(message.guild.id)
+    bet = await nm_v6_legacy_bet_or_reply(message, raw_amount, game_name)
+    if bet is None:
+        return True
+    win = random.random() < float(win_chance)
+    result = nm_v5_eco_game_result(gid, message.author.id, game_name, bet, 'win' if win else 'lose', 2.0, f'Legacy {game_name} debit-first')
+    if not result.get('ok'):
+        return await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{int(result.get('balance',0)):,}**")
+    if win:
+        return await nm_v6_send_money_line(message.channel, f"{label} ✅ فزت. انخصم الرهان ثم اندفع الفوز.", message.author, gid, bet, result['delta'], result['balance'], COLOR_GREEN)
+    return await nm_v6_send_money_line(message.channel, f"{label} 💀 خسرت. الرهان انخصم نهائيًا.", message.author, gid, bet, result['delta'], result['balance'], COLOR_RED)
+
+
+async def nm_v6_legacy_slot_strict(message, raw_amount):
+    gid = int(message.guild.id)
+    bet = await nm_v6_legacy_bet_or_reply(message, raw_amount, 'slot')
+    if bet is None:
+        return True
+    icons = ["🍒", "🍋", "🍇", "🔔", "💎", "7️⃣"]
+    roll = [random.choice(icons), random.choice(icons), random.choice(icons)]
+    if roll[0] == roll[1] == roll[2]:
+        outcome, mult, title, color = 'win', 5.0, '🎰 🔥 جاكبوت! ثلاث رموز.', COLOR_GREEN
+    elif len(set(roll)) == 2:
+        outcome, mult, title, color = 'win', 2.0, '🎰 ✅ رمزين متشابهين.', COLOR_GREEN
+    else:
+        outcome, mult, title, color = 'lose', 0.0, '🎰 💀 خسرت. الرهان انخصم نهائيًا.', COLOR_RED
+    result = nm_v5_eco_game_result(gid, message.author.id, 'slot', bet, outcome, mult, 'Legacy slot debit-first')
+    if not result.get('ok'):
+        return await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{int(result.get('balance',0)):,}**")
+    machine = " | ".join(roll)
+    return await nm_v6_send_money_line(message.channel, title, message.author, gid, bet, result['delta'], result['balance'], color, f"🎰 النتيجة: **{machine}**")
+
+
+async def nm_v6_legacy_flip_strict(message, raw_amount, raw_choice=None):
+    gid = int(message.guild.id)
+    bet = await nm_v6_legacy_bet_or_reply(message, raw_amount, 'flip')
+    if bet is None:
+        return True
+    normalized = str(raw_choice or '').strip().lower()
+    heads_words = {'ملك','وجه','heads','head','h'}
+    tails_words = {'كتابة','كتابه','tails','tail','t'}
+    if normalized not in heads_words and normalized not in tails_words:
+        await message.channel.send("❌ اكتب اختيارك: `!وجه 1000 ملك` أو `!وجه 1000 كتابة`")
+        return True
+    picked = 'ملك' if normalized in heads_words else 'كتابة'
+    result_face = random.choice(['ملك','كتابة'])
+    win = picked == result_face
+    result = nm_v5_eco_game_result(gid, message.author.id, 'flip', bet, 'win' if win else 'lose', 2.0, 'Legacy flip debit-first')
+    if not result.get('ok'):
+        return await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{int(result.get('balance',0)):,}**")
+    title = f"🪙 {'✅ فزت' if win else '💀 خسرت'} — اخترت {picked} وطلعت {result_face}"
+    return await nm_v6_send_money_line(message.channel, title, message.author, gid, bet, result['delta'], result['balance'], COLOR_GREEN if win else COLOR_RED)
+
+
+async def nm_v6_legacy_balance_strict(message):
+    gid = int(message.guild.id)
+    member = message.mentions[0] if getattr(message, 'mentions', None) else message.author
+    bal = nm_v5_eco_get_balance(gid, member.id)
+    coin = nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else nm_v5_get_coin_name(gid)
+    embed = discord.Embed(title=f"{member.display_name} • Wallet", description=f"🪙 **{bal:,} {coin}**", color=0x8b5cf6)
+    try: embed.set_thumbnail(url=member.display_avatar.url)
+    except Exception: pass
+    return await message.channel.send(embed=embed)
+
+
+async def nm_v6_legacy_top_strict(message):
+    gid = int(message.guild.id)
+    coin = nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else nm_v5_get_coin_name(gid)
+    rows = nm_v5_eco_top_money(gid, 10) if 'nm_v5_eco_top_money' in globals() else []
+    if not rows:
+        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
+    lines = []
+    for i, (uid, bal) in enumerate(rows, 1):
+        m = message.guild.get_member(int(uid)) if message.guild else None
+        lines.append(f"**#{i}** {(m.mention if m else f'`{uid}`')} — 🪙 **{int(bal):,} {coin}**")
+    return await message.channel.send(embed=discord.Embed(title="🏆 أغنى الأعضاء", description="\n".join(lines), color=0xf59e0b))
+
+
+async def nm_v6_legacy_salary_strict(message):
+    gid = int(message.guild.id)
+    uid = int(message.author.id)
+    level = 1
+    try:
+        if 'v3_get_level_data' in globals():
+            _xp, level = v3_get_level_data(gid, uid)
+        elif 'nm_v5_get_level_data' in globals():
+            _xp, level = nm_v5_get_level_data(gid, uid)
+    except Exception:
+        level = 1
+    # Use strict guild salary if available; otherwise credit manually.
+    try:
+        if 'v3_claim_salary' in globals():
+            ok, remaining, bal, reward = v3_claim_salary(gid, uid, level)
+        else:
+            ok, remaining, bal, reward = claim_daily(uid, level)
+    except Exception:
+        reward = int(DAILY_REWARD_BASE + (int(level) * 25))
+        ok, bal = nm_v5_eco_credit(gid, uid, reward, 'salary', 'Legacy strict salary')
+        remaining = 0
+    coin = nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else nm_v5_get_coin_name(gid)
+    if not ok:
+        return await message.channel.send(f"⏳ {message.author.mention} تقدر تستلم راتب جديد بعد **{max(1, int(remaining)//60)} دقيقة**.")
+    return await message.channel.send(f"💸 تم استلام الراتب: **+{int(reward):,} {coin}**\n💼 رصيدك: **{int(bal):,} {coin}**")
+
+
+async def nm_handle_legacy_bang(message):
+    """Final strict legacy router. This replaces the old on_message casino path.
+    Returns True only when it handles a command, otherwise False so bot.process_commands still runs.
+    """
+    if not message.guild or message.author.bot:
+        return False
+    content = (message.content or '').strip()
+    if not content.startswith('!'):
+        return False
+    parts = content.split()
+    if not parts:
+        return False
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    if cmd in {'!حظ','!luck'}:
+        await nm_v6_legacy_luck_strict(message, args[0] if args else None, 'luck', 0.50, '🎲 حظ')
+        return True
+    if cmd in {'!دبل','!double'}:
+        await nm_v6_legacy_luck_strict(message, args[0] if args else None, 'double', 0.45, '💎 دبل')
+        return True
+    if cmd in {'!سلوت','!slot','!slots'}:
+        await nm_v6_legacy_slot_strict(message, args[0] if args else None)
+        return True
+    if cmd in {'!وجه','!flip','!coinflip'}:
+        await nm_v6_legacy_flip_strict(message, args[0] if args else None, args[1] if len(args) > 1 else None)
+        return True
+    if cmd in {'!رصيدي','!رصيد','!balance','!wallet','!فلوسي'}:
+        await nm_v6_legacy_balance_strict(message)
+        return True
+    if cmd in {'!اغنى','!الغني','!top','!توب','!rich'}:
+        await nm_v6_legacy_top_strict(message)
+        return True
+    if cmd in {'!راتب','!salary'}:
+        await nm_v6_legacy_salary_strict(message)
+        return True
+    if cmd in {'!شرح','!اقتصاد','!help','!مساعدة'}:
+        gid = int(message.guild.id)
+        coin = nm_v5_eco_coin(gid) if 'nm_v5_eco_coin' in globals() else nm_v5_get_coin_name(gid)
+        return await message.channel.send(embed=discord.Embed(
+            title='📘 NM System',
+            description=f'`!راتب`\n`!رصيدي`\n`!اغنى`\n`!حظ 100`\n`!دبل 100`\n`!سلوت 100`\n`!وجه 100 ملك`\n\nالعملة: **{coin}**\nالنظام: **Debit-first ledger**',
+            color=0x5865F2
+        ))
+    return False
+
+
+@app.route('/dashboard/casino-allin-loss-test')
+def nm_v6_casino_allin_loss_test_page():
+    denied = dashboard_require_owner() if 'dashboard_require_owner' in globals() else None
+    if denied:
+        return denied
+    gid = int(request.args.get('guild_id') or (nm_v5_eco_gid() if 'nm_v5_eco_gid' in globals() else 0) or 0)
+    test_uid = 99000000000666
+    try:
+        nm_v5_eco_set_balance(gid, test_uid, 1000, 'selftest_set', 'Set all-in test balance')
+        before = nm_v5_eco_get_balance(gid, test_uid)
+        result = nm_v5_eco_game_result(gid, test_uid, 'allin_selftest', 1000, 'lose', 2.0, 'All-in loss test')
+        after = nm_v5_eco_get_balance(gid, test_uid)
+        ok = before == 1000 and result.get('ok') and after == 0 and int(result.get('delta', 0)) == -1000
+        status = '✅ PASS' if ok else '❌ FAIL'
+        color = '#22c55e' if ok else '#ef4444'
+        details = html.escape(str({'before': before, 'result': result, 'after': after}))
+    except Exception as e:
+        status = '❌ ERROR'; color = '#ef4444'; details = html.escape(str(e))
+    return f"""
+    <div style='font-family:Arial;background:#080812;color:white;min-height:100vh;padding:30px'>
+      <h1 style='color:{color}'>Casino All-In Loss Test: {status}</h1>
+      <p>Guild: <code>{gid}</code></p>
+      <pre style='background:#111827;padding:16px;border-radius:12px;white-space:pre-wrap'>{details}</pre>
+      <p><a style='color:#a78bfa' href='/dashboard/casino-guard-status?guild_id={gid}'>Casino Guard</a> · <a style='color:#a78bfa' href='/dashboard/money-tracker?guild_id={gid}'>Money Tracker</a></p>
+    </div>
+    """
+
+try:
+    print('✅ NM V6 Casino all-in loss fix loaded: legacy ! commands now use strict debit-first ledger')
+except Exception:
+    pass
 
 keep_alive()
 
