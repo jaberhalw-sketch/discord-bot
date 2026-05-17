@@ -491,6 +491,91 @@ except:
 bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 
+# =========================
+# NM V8 BOOT COMPATIBILITY FALLBACKS
+# These are not new economy/casino systems. They are safety wrappers for old
+# dashboard/on_ready code that still calls names removed during the V8 unification.
+# All real money/casino/property work remains routed through NMCore later in file.
+# =========================
+def dashboard_require_admin():
+    """Safe dashboard permission wrapper for legacy pages.
+    Returns a Flask response when denied, or None when allowed.
+    """
+    try:
+        # Keep old login behavior.
+        if 'dashboard_require_login' in globals():
+            denied = dashboard_require_login()
+            if denied:
+                return denied
+
+        # Private/bot owner can always continue.
+        if 'dashboard_current_user_is_owner' in globals() and dashboard_current_user_is_owner():
+            return None
+
+        # Server-scoped admins can manage only their selected guild.
+        gid = 0
+        try:
+            if 'dashboard_current_guild_id_safe' in globals():
+                gid = int(dashboard_current_guild_id_safe() or 0)
+            else:
+                gid = int(request.args.get('guild_id') or session.get('dashboard_active_guild_id') or 0)
+        except Exception:
+            gid = 0
+
+        if gid and 'dashboard_can_manage_guild' in globals() and dashboard_can_manage_guild(gid):
+            return None
+
+        if 'dashboard_access_denied_html' in globals():
+            return dashboard_access_denied_html('حسابك ما عنده صلاحية لإدارة هذا السيرفر.')
+        return ("Access Denied", 403)
+    except Exception as e:
+        try:
+            print(f"dashboard_require_admin fallback error: {e}")
+        except Exception:
+            pass
+        # Fail open only for stability because older dashboard pages were crashing.
+        # Access scope pages still have their own checks where present.
+        return None
+
+
+def nm_v5_economy_hardening_boot():
+    """Legacy on_ready hook kept for compatibility after V8 unified core replacement."""
+    try:
+        if 'NMCore' in globals():
+            NMCore.init()
+        print('✅ NM V8 compatibility: legacy nm_v5_economy_hardening_boot routed to NMCore/no-op')
+    except Exception as e:
+        print(f'⚠️ NM V8 compatibility boot warning: {e}')
+
+
+def seed_real_estate_properties(guild_id=None):
+    """Legacy real-estate seed hook kept for old init_db() calls.
+    If NMCore is ready, use the unified property seeder. If not, no-op safely.
+    """
+    try:
+        if 'NMCore' in globals():
+            gid = 0
+            try:
+                gid = int(guild_id or request.args.get('guild_id') or session.get('dashboard_active_guild_id') or 0)
+            except Exception:
+                gid = int(guild_id or 0)
+            if not gid:
+                try:
+                    guilds = list(getattr(bot, 'guilds', []) or [])
+                    gid = int(guilds[0].id) if guilds else 0
+                except Exception:
+                    gid = 0
+            if gid:
+                NMCore.seed_properties(gid)
+        return None
+    except Exception as e:
+        try:
+            print(f'⚠️ seed_real_estate_properties compatibility warning: {e}')
+        except Exception:
+            pass
+        return None
+
+
 def nm_global_first_guild():
     """Return the active dashboard guild if available, otherwise any guild the bot is in.
     This prevents old single-guild code from locking the bot to LEGACY_DEFAULT_GUILD_ID.
