@@ -25438,3 +25438,159 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
+
+# =====================================================================
+# NM V5 FINANCIAL AUDIT PRO SAFE ROW FIX - 2026-05-17
+# Fixes ValueError when old/corrupt money_audit rows or sqlite index names
+# are read as user_id values (example: idx_money_audit_source).
+# =====================================================================
+
+def nm_v5_fin_audit_safe_int(value, default=0):
+    try:
+        if value is None:
+            return int(default)
+        if isinstance(value, str):
+            value = value.strip()
+            if not re.fullmatch(r"-?\d+", value):
+                return int(default)
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def nm_v5_fin_audit_valid_row(row):
+    try:
+        uid_raw = row.get("user_id")
+        amount_raw = row.get("amount")
+        # Drop impossible/schema garbage rows such as sqlite index names.
+        if isinstance(uid_raw, str) and not re.fullmatch(r"\d+", uid_raw.strip()):
+            return False
+        if isinstance(amount_raw, str) and not re.fullmatch(r"-?\d+", amount_raw.strip()):
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def nm_v5_financial_audit_pro_page_safe_final():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+
+    gid = nm_v5_eco_gid()
+    coin = nm_v5_eco_coin(gid)
+    rows = []
+    schema_warning = ""
+
+    try:
+        nm_v5_eco_init()
+        conn = nm_v5_eco_conn()
+        cur = conn.cursor()
+
+        # Use explicit columns only. Never read sqlite_master/index metadata as audit rows.
+        cur.execute("PRAGMA table_info(money_audit)")
+        existing_cols = {str(r[1]) for r in cur.fetchall()}
+        needed_cols = ["id", "guild_id", "user_id", "amount", "new_balance", "source_type", "details", "actor_id", "created_at"]
+        select_cols = []
+        for col in needed_cols:
+            if col in existing_cols:
+                select_cols.append(col)
+            else:
+                if col in {"id", "guild_id", "user_id", "amount", "new_balance", "actor_id", "created_at"}:
+                    select_cols.append(f"0 AS {col}")
+                else:
+                    select_cols.append(f"'' AS {col}")
+                schema_warning += f" Missing column: {col}."
+
+        cur.execute(f"""
+            SELECT {', '.join(select_cols)}
+            FROM money_audit
+            WHERE COALESCE(CAST(guild_id AS INTEGER), 0) = ?
+            ORDER BY CAST(id AS INTEGER) DESC
+            LIMIT 1000
+        """, (int(gid),))
+
+        raw_rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        rows = [r for r in raw_rows if nm_v5_fin_audit_valid_row(r)]
+    except Exception as e:
+        try:
+            nm_v5_log_runtime_error("financial_audit_safe_final", e)
+        except Exception:
+            pass
+        rows = []
+        schema_warning += f" Read error: {dash_escape(str(e), 240)}"
+
+    created = sum(max(0, nm_v5_fin_audit_safe_int(r.get("amount"))) for r in rows)
+    removed = sum(abs(min(0, nm_v5_fin_audit_safe_int(r.get("amount")))) for r in rows)
+    casino_in = sum(max(0, nm_v5_fin_audit_safe_int(r.get("amount"))) for r in rows if "casino" in str(r.get("source_type", "")).lower())
+    casino_out = sum(abs(min(0, nm_v5_fin_audit_safe_int(r.get("amount")))) for r in rows if "casino" in str(r.get("source_type", "")).lower())
+    suspicious = [r for r in rows if abs(nm_v5_fin_audit_safe_int(r.get("amount"))) >= 1000000]
+
+    tr = []
+    for r in rows[:150]:
+        uid = nm_v5_fin_audit_safe_int(r.get("user_id"))
+        amt = nm_v5_fin_audit_safe_int(r.get("amount"))
+        new_bal = nm_v5_fin_audit_safe_int(r.get("new_balance"))
+        created_at = nm_v5_fin_audit_safe_int(r.get("created_at"))
+        cls = "pos" if amt >= 0 else "neg"
+        try:
+            uname = dashboard_member_name(uid) if uid > 0 else "System"
+        except Exception:
+            uname = f"User {uid}" if uid > 0 else "System"
+        time_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at)) if created_at > 100000 else str(r.get("created_at", ""))
+        tr.append(
+            f"<tr><td>{dash_escape(time_text,80)}</td>"
+            f"<td>{dash_escape(uname,100)}<br><code>{uid}</code></td>"
+            f"<td class='{cls}'>{amt:,} {dash_escape(coin,60)}</td>"
+            f"<td>{new_bal:,}</td>"
+            f"<td>{dash_escape(r.get('source_type',''),120)}</td>"
+            f"<td>{dash_escape(r.get('details',''),220)}</td></tr>"
+        )
+
+    sus = "".join([
+        f"<li>{nm_v5_fin_audit_safe_int(r.get('amount')):,} {dash_escape(coin,60)} — "
+        f"<code>{nm_v5_fin_audit_safe_int(r.get('user_id'))}</code> — "
+        f"{dash_escape(r.get('source_type',''),80)}</li>"
+        for r in suspicious[:30]
+    ]) or "<li>No suspicious large movements.</li>"
+
+    warning_box = ""
+    if schema_warning:
+        warning_box = f"<div class='card warn'><b>⚠️ Schema note:</b>{schema_warning}</div>"
+
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>
+        .grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}} .card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}}
+        .num{{font-size:26px;font-weight:1000}} .muted{{color:#94a3b8}} .pos{{color:#86efac;font-weight:900}} .neg{{color:#fca5a5;font-weight:900}} .warn{{border-color:#f59e0b;color:#fde68a}}
+        table{{width:100%;border-collapse:collapse;background:#0b1224;border-radius:18px;overflow:hidden}} th,td{{border-bottom:1px solid #1e293b;padding:12px;text-align:left;vertical-align:top}} th{{color:#94a3b8}} a{{color:#8b5cf6}}
+        @media(max-width:900px){{.grid{{grid-template-columns:1fr}}}}
+      </style>
+      <h1>💰 Financial Audit Pro</h1>
+      <p class="muted">Strict per-guild audit. يعرض فقط حركات السيرفر الحالي ويتجاهل أي rows تالفة أو metadata من SQLite.</p>
+      <p><a href="/dashboard?guild_id={int(gid)}">Dashboard</a> • <a href="/dashboard/casino-self-test?guild_id={int(gid)}">Casino Self-Test</a> • <a href="/dashboard/economy-strict-status?guild_id={int(gid)}">Economy Strict Status</a></p>
+      {warning_box}
+      <div class="grid">
+        <div class="card"><div class="muted">Created</div><div class="num pos">{created:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Removed</div><div class="num neg">{removed:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Net</div><div class="num">{created-removed:,}</div><div>{dash_escape(coin,60)}</div></div>
+        <div class="card"><div class="muted">Rows</div><div class="num">{len(rows)}</div></div>
+      </div>
+      <div class="grid">
+        <div class="card"><div class="muted">Casino Paid</div><div class="num pos">{casino_in:,}</div></div>
+        <div class="card"><div class="muted">Casino Took</div><div class="num neg">{casino_out:,}</div></div>
+      </div>
+      <div class="card"><h2>🚨 Suspicious Large Movements</h2><ul>{sus}</ul></div>
+      <div class="card"><h2>Latest Money Audit</h2><table><tr><th>Time</th><th>User</th><th>Amount</th><th>New Balance</th><th>Source</th><th>Details</th></tr>{''.join(tr) or '<tr><td colspan="6">No audit rows for this guild yet.</td></tr>'}</table></div>
+    </div>
+    """
+
+try:
+    app.view_functions["nm_v5_financial_audit_pro_page_final"] = nm_v5_financial_audit_pro_page_safe_final
+    print("✅ NM V5 Financial Audit Pro safe route override active")
+except Exception as e:
+    try:
+        print(f"NM V5 Financial Audit Pro safe route override failed: {e}")
+    except Exception:
+        pass
