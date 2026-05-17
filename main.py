@@ -1,3 +1,9 @@
+# ============================================================
+# NM SYSTEM V6 FULL CLEANED PASS 1
+# Generated from the full 26k+ line bot, preserving systems while
+# removing duplicate plain function definitions and exact duplicate
+# Flask routes that caused shadowing / old code to run.
+# ============================================================
 import threading
 import discord
 from discord.ext import commands
@@ -36,11 +42,7 @@ import shutil as _nmshutil
 import sqlite3 as _nmsqlite3
 
 # NM EARLY SAFE FALLBACKS - must exist before constants
-def nm_coin_name(guild_id=None):
-    return "NM Coin"
 
-def nm_get_coin_name(guild_id=None):
-    return "NM Coin"
 
 
 NM_DATA_DIR = _NMPath(_nmos.getenv("NM_DATA_DIR", "/data"))
@@ -851,65 +853,10 @@ def init_db():
     conn.close()
 
 
-def get_level_data(user_id):
-    conn = db_connect()
-    cur = conn.cursor()
-
-    cur.execute("SELECT xp, level FROM levels WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-
-    if not row:
-        cur.execute(
-            "INSERT INTO levels (user_id, xp, level) VALUES (?, ?, ?)",
-            (user_id, 0, 1)
-        )
-        conn.commit()
-        conn.close()
-        return 0, 1
-
-    conn.close()
-    return row[0], row[1]
 
 
-def add_xp(user_id, amount):
-    xp, level = get_level_data(user_id)
-
-    xp += amount
-    needed = level * 100
-    leveled_up = False
-
-    while xp >= needed:
-        xp -= needed
-        level += 1
-        needed = level * 100
-        leveled_up = True
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE levels SET xp = ?, level = ? WHERE user_id = ?",
-        (xp, level, user_id)
-    )
-    conn.commit()
-    conn.close()
-
-    return xp, level, leveled_up
 
 
-def get_top_levels(limit=10):
-    conn = db_connect()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, xp, level
-        FROM levels
-        ORDER BY level DESC, xp DESC
-        LIMIT ?
-    """, (limit,))
-
-    rows = cur.fetchall()
-    conn.close()
-    return rows
 
 
 def get_money_data(user_id):
@@ -932,72 +879,12 @@ def get_money_data(user_id):
     return row[0], row[1]
 
 
-def get_balance(user_id):
-    balance, last_daily = get_money_data(user_id)
-    return balance
 
 
-def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id=""):
-    balance, last_daily = get_money_data(user_id)
-    balance += int(amount)
-
-    if balance < 0:
-        balance = 0
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE economy SET balance = ? WHERE user_id = ?",
-        (balance, user_id)
-    )
-    conn.commit()
-    conn.close()
-    cc_record_event("money", user_id=user_id, amount=int(amount), details=details or f"Money added. New balance: {balance}")
-    money_audit_record(user_id=user_id, amount=int(amount), new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Money added. New balance: {balance}", batch_id=batch_id)
-    return balance
 
 
-def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id=""):
-    amount = int(amount)
-    balance, last_daily = get_money_data(user_id)
-
-    if amount <= 0:
-        return False, balance
-
-    if balance < amount:
-        return False, balance
-
-    balance -= amount
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE economy SET balance = ? WHERE user_id = ?",
-        (balance, user_id)
-    )
-    conn.commit()
-    conn.close()
-    cc_record_event("money", user_id=user_id, amount=-int(amount), details=details or f"Money removed. New balance: {balance}")
-    money_audit_record(user_id=user_id, amount=-int(amount), new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Money removed. New balance: {balance}", batch_id=batch_id)
-    return True, balance
 
 
-def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id=""):
-    old_balance = get_balance(user_id)
-    amount = max(0, int(amount))
-    delta = int(amount) - int(old_balance)
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE economy SET balance = ? WHERE user_id = ?",
-        (amount, user_id)
-    )
-    conn.commit()
-    conn.close()
-    cc_record_event("money_set", user_id=user_id, amount=int(delta), details=details or f"Balance set to: {amount}. Delta: {delta}")
-    money_audit_record(user_id=user_id, amount=int(delta), new_balance=amount, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=details or f"Balance set from {old_balance} to {amount}. Delta: {delta}", batch_id=batch_id)
-    return amount
 
 
 async def get_all_human_members(guild):
@@ -1132,61 +1019,10 @@ def is_server_booster(member):
     return any(role.id == SERVER_BOOSTER_ROLE_ID for role in member.roles)
 
 
-def get_booster_last_claim(user_id):
-    get_money_data(user_id)
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("SELECT last_boost_weekly FROM economy WHERE user_id = ?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
-
-    if not row:
-        return 0
-
-    return int(row[0] or 0)
 
 
-def claim_booster_weekly(user_id):
-    balance, last_daily = get_money_data(user_id)
-    last_boost = get_booster_last_claim(user_id)
-    now = int(time.time())
-
-    if now - last_boost < BOOSTER_WEEKLY_COOLDOWN_SECONDS:
-        remaining = BOOSTER_WEEKLY_COOLDOWN_SECONDS - (now - last_boost)
-        return False, remaining, balance, 0
-
-    reward = int(BOOSTER_WEEKLY_REWARD)
-    balance += reward
-
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute(
-        "UPDATE economy SET balance = ?, last_boost_weekly = ? WHERE user_id = ?",
-        (balance, now, user_id)
-    )
-    conn.commit()
-    conn.close()
-
-    money_audit_record(user_id=user_id, amount=reward, new_balance=balance, source_type="booster_salary", details=f"Booster weekly reward claimed. New balance: {balance}")
-
-    return True, 0, balance, reward
 
 
-def get_top_money(limit=10):
-    conn = db_connect()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT user_id, balance
-        FROM economy
-        ORDER BY balance DESC
-        LIMIT ?
-    """, (limit,))
-
-    rows = cur.fetchall()
-    conn.close()
-    return rows
 
 
 def format_seconds(seconds):
@@ -1252,11 +1088,6 @@ def safe_len_json(file_name):
         return 0
 
 
-def format_money(amount):
-    try:
-        return f"{int(amount):,} {nm_coin_name()}"
-    except:
-        return f"0 {nm_coin_name()}"
 
 
 def short_money(amount):
@@ -1280,28 +1111,8 @@ def short_money(amount):
     return f"{sign}{amount:,}"
 
 
-def coin_line(amount, bold=True):
-    try:
-        value = int(amount)
-    except:
-        value = 0
-
-    short = f" (`{short_money(value)}`)" if abs(value) >= 100_000 else ""
-    if bold:
-        return f"{ECONOMY_EMOJI} **{value:,}** {nm_coin_name()}{short}"
-
-    return f"{ECONOMY_EMOJI} {value:,} {nm_coin_name()}{short}"
 
 
-def money_delta(amount):
-    try:
-        amount = int(amount)
-    except:
-        amount = 0
-
-    sign = "+" if amount >= 0 else ""
-    icon = "📈" if amount > 0 else "📉" if amount < 0 else "➖"
-    return f"{icon} **{sign}{amount:,}** {ECONOMY_EMOJI} {nm_coin_name()}"
 
 
 def casino_status_line(label, value):
@@ -1313,27 +1124,8 @@ def pretty_casino_box(lines):
     return f"```ansi\n{body}\n```"
 
 
-def get_money_rank(user_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*) + 1
-            FROM economy
-            WHERE balance > (SELECT balance FROM economy WHERE user_id = ?)
-        """, (user_id,))
-        rank = cur.fetchone()[0]
-        conn.close()
-        return int(rank or 1)
-    except:
-        return None
 
 
-def economy_status_text(user_id):
-    balance = get_balance(user_id)
-    rank = get_money_rank(user_id)
-    rank_text = f"#{rank}" if rank else "غير معروف"
-    return balance, rank_text
 
 
 def clean_bar(percent, length=12):
@@ -1544,38 +1336,6 @@ def create_default_guild_settings(guild):
         print(f"Create guild settings error: {e}")
 
 
-def get_guild_settings(guild_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT guild_id, guild_name, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done
-            FROM guild_settings WHERE guild_id = ?
-        """, (int(guild_id),))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            return {
-                "guild_id": int(row[0]),
-                "guild_name": row[1] or "",
-                "enabled": bool(row[2]),
-                "commands_channel_id": int(row[3] or 0),
-                "gambling_channel_id": int(row[4] or 0),
-                "logs_category_id": int(row[5] or 0),
-                "setup_done": bool(row[6]),
-            }
-    except Exception as e:
-        print(f"Get guild settings error: {e}")
-
-    return {
-        "guild_id": int(guild_id or 0),
-        "guild_name": "",
-        "enabled": True,
-        "commands_channel_id": 0,
-        "gambling_channel_id": 0,
-        "logs_category_id": 0,
-        "setup_done": False,
-    }
 
 
 def get_effective_commands_channel_id(guild_id):
@@ -1643,8 +1403,6 @@ def v3_get_money_data(guild_id, user_id):
     return (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
 
 
-def v3_get_balance(guild_id, user_id):
-    return v3_get_money_data(guild_id, user_id)[0]
 
 
 def v3_set_balance(guild_id, user_id, amount, source_type="v3_set", admin_id=0, admin_name="", details="", batch_id=""):
@@ -1667,93 +1425,14 @@ def v3_set_balance(guild_id, user_id, amount, source_type="v3_set", admin_id=0, 
     return amount
 
 
-def v3_add_money(guild_id, user_id, amount, source_type="v3_system_earned", admin_id=0, admin_name="", details="", batch_id=""):
-    guild_id = int(guild_id or 0)
-    user_id = int(user_id or 0)
-    amount = int(amount or 0)
-    balance, _ = v3_get_money_data(guild_id, user_id)
-    balance = max(0, balance + amount)
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("UPDATE guild_economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (balance, guild_id, user_id))
-    conn.commit()
-    conn.close()
-    try:
-        cc_record_event("money", user_id=user_id, amount=amount, details=f"Guild {guild_id} | {details or 'V3 money added'}")
-        money_audit_record(user_id=user_id, amount=amount, new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Guild {guild_id} | {details or 'V3 money added'}", batch_id=batch_id)
-    except Exception:
-        pass
-    return balance
 
 
-def v3_remove_money(guild_id, user_id, amount, source_type="v3_system_spend", admin_id=0, admin_name="", details="", batch_id=""):
-    guild_id = int(guild_id or 0)
-    user_id = int(user_id or 0)
-    amount = int(amount or 0)
-    if amount <= 0:
-        return False, v3_get_balance(guild_id, user_id)
-    balance, _ = v3_get_money_data(guild_id, user_id)
-    if balance < amount:
-        return False, balance
-    balance -= amount
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("UPDATE guild_economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (balance, guild_id, user_id))
-    conn.commit()
-    conn.close()
-    try:
-        cc_record_event("money", user_id=user_id, amount=-amount, details=f"Guild {guild_id} | {details or 'V3 money removed'}")
-        money_audit_record(user_id=user_id, amount=-amount, new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Guild {guild_id} | {details or 'V3 money removed'}", batch_id=batch_id)
-    except Exception:
-        pass
-    return True, balance
 
 
-def v3_get_level_data(guild_id, user_id):
-    guild_id = int(guild_id or 0)
-    user_id = int(user_id or 0)
-    v3_ensure_guild_user(guild_id, user_id)
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("SELECT xp, level FROM guild_levels WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-    row = cur.fetchone()
-    conn.close()
-    return (int(row[0] or 0), int(row[1] or 1)) if row else (0, 1)
 
 
-def v3_add_xp(guild_id, user_id, amount):
-    guild_id = int(guild_id or 0)
-    user_id = int(user_id or 0)
-    xp, level = v3_get_level_data(guild_id, user_id)
-    xp += int(amount or 0)
-    needed = level * 100
-    leveled_up = False
-    while xp >= needed:
-        xp -= needed
-        level += 1
-        needed = level * 100
-        leveled_up = True
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("UPDATE guild_levels SET xp = ?, level = ? WHERE guild_id = ? AND user_id = ?", (xp, level, guild_id, user_id))
-    conn.commit()
-    conn.close()
-    return xp, level, leveled_up
 
 
-def v3_get_top_money(guild_id, limit=10):
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT user_id, balance
-        FROM guild_economy
-        WHERE guild_id = ?
-        ORDER BY balance DESC
-        LIMIT ?
-    """, (int(guild_id or 0), int(limit)))
-    rows = cur.fetchall()
-    conn.close()
-    return rows
 
 
 def v3_get_top_levels(guild_id, limit=10):
@@ -1792,32 +1471,6 @@ def v3_get_money_rank(guild_id, user_id):
         return None
 
 
-def v3_claim_salary(guild_id, user_id, level):
-    guild_id = int(guild_id or 0)
-    user_id = int(user_id or 0)
-    now = int(time.time())
-    reward = DAILY_REWARD_BASE + (int(level or 1) * 25)
-    cooldown = HOURLY_REWARD_COOLDOWN_SECONDS
-    v3_ensure_guild_user(guild_id, user_id)
-    conn = db_connect()
-    cur = conn.cursor()
-    cur.execute("SELECT balance, last_daily FROM guild_economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
-    row = cur.fetchone()
-    balance = int(row[0] or 0) if row else 0
-    last_daily = int(row[1] or 0) if row else 0
-    if now - last_daily < cooldown:
-        conn.close()
-        return False, cooldown - (now - last_daily), balance, 0
-    balance += reward
-    cur.execute("UPDATE guild_economy SET balance = ?, last_daily = ? WHERE guild_id = ? AND user_id = ?", (balance, now, guild_id, user_id))
-    conn.commit()
-    conn.close()
-    try:
-        cc_record_event("money", user_id=user_id, amount=reward, details=f"Guild {guild_id} | V3 salary claimed")
-        money_audit_record(user_id=user_id, amount=reward, new_balance=balance, source_type="v3_salary", details=f"Guild {guild_id} | Salary")
-    except Exception:
-        pass
-    return True, 0, balance, reward
 
 
 def v3_parse_bet_amount(amount):
@@ -2909,94 +2562,10 @@ def log_vault_short_text(text, limit=240):
     return one_line or "No details"
 
 
-def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        clauses = []
-        params = []
-        if int(guild_id or 0):
-            clauses.append("(guild_id = ? OR guild_id = 0)")
-            params.append(int(guild_id))
-        if log_type and log_type != "all":
-            clauses.append("log_type = ?")
-            params.append(str(log_type))
-        if channel_id and str(channel_id) != "all":
-            try:
-                clauses.append("discord_channel_id = ?")
-                params.append(int(channel_id))
-            except Exception:
-                pass
-        if deleted_filter == "deleted":
-            clauses.append("deleted_from_discord = 1")
-        elif deleted_filter == "active":
-            clauses.append("deleted_from_discord = 0")
-        if query:
-            clauses.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ? OR log_type LIKE ?)")
-            like = f"%{query}%"
-            params.extend([like, like, like, like, like])
-        where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        cur.execute(f"""
-            SELECT id, guild_id, log_type, title, description, discord_channel_id, discord_channel_name,
-                   discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
-            FROM dashboard_log_vault
-            {where}
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
-        """, tuple(params + [int(limit), int(offset)]))
-        rows = cur.fetchall()
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where}", tuple(params))
-        total_matches = int(cur.fetchone()[0] or 0)
-        conn.close()
-        return rows, total_matches
-    except Exception as e:
-        print(f"Log Vault recent error: {e}")
-        return [], 0
 
 
-def log_vault_counts(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        where = ""
-        params = []
-        if int(guild_id or 0):
-            where = "WHERE (guild_id = ? OR guild_id = 0)"
-            params.append(int(guild_id))
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where}", tuple(params))
-        total = int(cur.fetchone()[0] or 0)
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where + (' AND' if where else 'WHERE')} deleted_from_discord = 1", tuple(params))
-        deleted = int(cur.fetchone()[0] or 0)
-        cur.execute(f"SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault {where}", tuple(params))
-        types = int(cur.fetchone()[0] or 0)
-        since = int(time.time()) - 86400
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where + (' AND' if where else 'WHERE')} created_at >= ?", tuple(params + [since]))
-        today = int(cur.fetchone()[0] or 0)
-        conn.close()
-        return total, deleted, types, today
-    except Exception as e:
-        print(f"Log Vault counts error: {e}")
-        return 0, 0, 0, 0
 
 
-def log_vault_types(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        where = ""
-        params = []
-        if int(guild_id or 0):
-            where = "WHERE (guild_id = ? OR guild_id = 0)"
-            params.append(int(guild_id))
-        cur.execute(f"SELECT log_type, COUNT(*) FROM dashboard_log_vault {where} GROUP BY log_type ORDER BY COUNT(*) DESC")
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except Exception:
-        return []
 
 
 def log_vault_top_channels(guild_id=0, limit=8):
@@ -3024,33 +2593,6 @@ def log_vault_top_channels(guild_id=0, limit=8):
         return []
 
 
-def log_vault_channels(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        clauses = ["discord_channel_id != 0"]
-        params = []
-        if int(guild_id or 0):
-            clauses.append("(guild_id = ? OR guild_id = 0)")
-            params.append(int(guild_id))
-        where = "WHERE " + " AND ".join(clauses)
-        cur.execute(f"""
-            SELECT discord_channel_id, COALESCE(NULLIF(discord_channel_name, ''), 'unknown') AS name,
-                   COUNT(*) AS total,
-                   SUM(CASE WHEN deleted_from_discord = 1 THEN 1 ELSE 0 END) AS deleted_total,
-                   MAX(created_at) AS last_time
-            FROM dashboard_log_vault
-            {where}
-            GROUP BY discord_channel_id, name
-            ORDER BY last_time DESC, total DESC
-        """, tuple(params))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"Log Vault channels error: {e}")
-        return []
 
 
 
@@ -3678,240 +3220,28 @@ def property_upgrade_cost(type_key, level=1):
     return int(base * level)
 
 
-def seed_real_estate_properties():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        now = int(time.time())
-        for type_key, cfg in PROPERTY_TYPES.items():
-            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key = ?", (type_key,))
-            existing = int(cur.fetchone()[0] or 0)
-            target = int(cfg.get("count", 0))
-            for unit in range(existing + 1, target + 1):
-                cur.execute(
-                    """
-                    INSERT INTO real_estate_properties
-                    (type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price, created_at)
-                    VALUES (?, ?, ?, 0, 1, 0, 0, ?)
-                    """,
-                    (type_key, unit, cfg.get("name", type_key), now)
-                )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"seed_real_estate_properties error: {e}")
 
 
-def get_property_by_id(property_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
-            FROM real_estate_properties WHERE id = ?
-        """, (int(property_id),))
-        row = cur.fetchone()
-        conn.close()
-        return row
-    except:
-        return None
 
 
-def get_available_property(type_key):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
-            FROM real_estate_properties
-            WHERE type_key = ? AND owner_id = 0
-            ORDER BY unit_number ASC LIMIT 1
-        """, (str(type_key),))
-        row = cur.fetchone()
-        conn.close()
-        return row
-    except:
-        return None
 
 
-def real_estate_counts():
-    data = {}
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        for type_key, cfg in PROPERTY_TYPES.items():
-            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key=?", (type_key,))
-            total = int(cur.fetchone()[0] or 0)
-            cur.execute("SELECT COUNT(*) FROM real_estate_properties WHERE type_key=? AND owner_id=0", (type_key,))
-            available = int(cur.fetchone()[0] or 0)
-            data[type_key] = {"total": total, "available": available, "owned": max(0, total - available)}
-        conn.close()
-    except Exception as e:
-        print(f"real_estate_counts error: {e}")
-    return data
 
 
-def get_user_properties(user_id, limit=25):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
-            FROM real_estate_properties
-            WHERE owner_id = ?
-            ORDER BY type_key ASC, unit_number ASC
-            LIMIT ?
-        """, (int(user_id), int(limit)))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
 
 
-def get_for_sale_properties(limit=10):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT id, type_key, unit_number, display_name, owner_id, level, last_rent_claim, for_sale_price
-            FROM real_estate_properties
-            WHERE for_sale_price > 0 AND owner_id > 0
-            ORDER BY for_sale_price ASC
-            LIMIT ?
-        """, (int(limit),))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except:
-        return []
 
 
-def set_property_owner(property_id, owner_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE id=?", (int(owner_id), int(property_id)))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"set_property_owner error: {e}")
-        return False
 
 
-def set_property_for_sale(property_id, owner_id, price):
-    row = get_property_by_id(property_id)
-    if not row:
-        return False, "ما لقيت العقار."
-    if int(row[4] or 0) != int(owner_id):
-        return False, "هذا العقار مب ملكك."
-    if int(price) <= 0:
-        return False, "السعر لازم يكون أكبر من صفر."
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("UPDATE real_estate_properties SET for_sale_price=? WHERE id=?", (int(price), int(property_id)))
-        conn.commit()
-        conn.close()
-        return True, "تم عرض العقار للبيع."
-    except Exception as e:
-        return False, str(e)
 
 
-def buy_property_from_system(user_id, type_key):
-    cfg = property_config(type_key)
-    if not cfg:
-        return False, "نوع العقار غير معروف.", None, 0
-    row = get_available_property(type_key)
-    if not row:
-        return False, "Sold Out — هذا النوع خلص من السوق الأساسي. اشترِ من لاعب أو ادخل مزاد.", None, 0
-    price = int(cfg.get("price", 0))
-    ok, balance = remove_money(user_id, price)
-    if not ok:
-        return False, f"رصيدك ما يكفي. تحتاج {coin_line(price)}.", row, price
-    set_property_owner(row[0], user_id)
-    return True, "تم شراء العقار بنجاح.", get_property_by_id(row[0]), price
 
 
-def buy_property_listing(buyer_id, property_id):
-    row = get_property_by_id(property_id)
-    if not row:
-        return False, "ما لقيت العقار.", None
-    owner_id = int(row[4] or 0)
-    price = int(row[7] or 0)
-    if owner_id <= 0 or price <= 0:
-        return False, "العقار مب معروض للبيع حالياً.", row
-    if owner_id == int(buyer_id):
-        return False, "ما تقدر تشتري عقارك من نفسك.", row
-    ok, new_balance = remove_money(buyer_id, price)
-    if not ok:
-        return False, f"رصيدك ما يكفي. السعر: {coin_line(price)}", row
-    tax = int(price * (REAL_ESTATE_SALE_TAX_PERCENT / 100))
-    seller_gets = price - tax
-    add_money(owner_id, seller_gets)
-    set_property_owner(property_id, buyer_id)
-    return True, f"تم الشراء. البائع استلم {coin_line(seller_gets)} بعد ضريبة {REAL_ESTATE_SALE_TAX_PERCENT}%.", get_property_by_id(property_id)
 
 
-def collect_rent_for_user(user_id):
-    rows = get_user_properties(user_id, limit=200)
-    now = int(time.time())
-    total = 0
-    ready = []
-    next_remaining = None
-    for row in rows:
-        prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
-        last_claim = int(last_claim or 0)
-        elapsed = now - last_claim
-        if last_claim == 0 or elapsed >= REAL_ESTATE_RENT_COOLDOWN_SECONDS:
-            rent = property_rent_amount(type_key, level)
-            total += rent
-            ready.append((prop_id, rent))
-        else:
-            remaining = REAL_ESTATE_RENT_COOLDOWN_SECONDS - elapsed
-            next_remaining = remaining if next_remaining is None else min(next_remaining, remaining)
-    if total <= 0:
-        return False, 0, next_remaining or REAL_ESTATE_RENT_COOLDOWN_SECONDS, len(rows)
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        for prop_id, rent in ready:
-            cur.execute("UPDATE real_estate_properties SET last_rent_claim=? WHERE id=?", (now, int(prop_id)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"collect_rent update error: {e}")
-    balance = add_money(user_id, total)
-    return True, total, 0, len(rows)
 
 
-def upgrade_property(user_id, property_id):
-    row = get_property_by_id(property_id)
-    if not row:
-        return False, "ما لقيت العقار.", None
-    prop_id, type_key, unit_number, display_name, owner_id, level, last_claim, sale_price = row
-    if int(owner_id or 0) != int(user_id):
-        return False, "هذا العقار مب ملكك.", row
-    cfg = property_config(type_key) or {}
-    max_level = int(cfg.get("max_level", 5))
-    level = int(level or 1)
-    if level >= max_level:
-        return False, f"العقار وصل أعلى تطوير Level {max_level}.", row
-    cost = property_upgrade_cost(type_key, level)
-    ok, balance = remove_money(user_id, cost)
-    if not ok:
-        return False, f"رصيدك ما يكفي. تكلفة التطوير: {coin_line(cost)}", row
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("UPDATE real_estate_properties SET level=? WHERE id=?", (level + 1, int(property_id)))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        add_money(user_id, cost)
-        return False, f"فشل التطوير ورجعت لك الفلوس: {e}", row
-    return True, f"تم تطوير العقار إلى Level {level + 1}. الدخل الجديد: {coin_line(property_rent_amount(type_key, level + 1))}", get_property_by_id(property_id)
 
 
 def create_property_auction(seller_id, property_id, minutes, start_price):
@@ -5070,16 +4400,7 @@ def nm_int(value, default=0):
 
 
 
-def nm_active_guild_id():
-    return nm_stable_selected_guild_id()
 
-def nm_set_active_guild(guild_id):
-    guild_id = nm_int(guild_id, GUILD_ID)
-    try:
-        session["selected_guild_id"] = guild_id
-    except:
-        pass
-    return guild_id
 
 
 def nm_guild_only_clause(column="guild_id", include_legacy=False):
@@ -5141,20 +4462,6 @@ def nm_safe_selected_guild_settings():
     return {}
 
 
-def nm_coin_name():
-    gid = nm_active_guild_id()
-    try:
-        settings = nm_safe_selected_guild_settings()
-        for key in ("coin_name", "currency_name", "economy_coin_name"):
-            value = settings.get(key)
-            if value:
-                return str(value)
-    except Exception:
-        pass
-    try:
-        return str(dashboard_settings.get("coin_name") or dashboard_settings.get("currency_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
-    except:
-        return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 
 def nm_save_coin_name(name):
@@ -6042,21 +5349,8 @@ def dashboard_access_denied_html(message="حسابك ما عنده صلاحية 
     )
 
 
-def dashboard_require_admin():
-    if not session.get("discord_user"):
-        return redirect("/login")
-    if dashboard_current_access_level() not in ("owner", "admin"):
-        return dashboard_access_denied_html("حسابك داخل Discord ما عنده صلاحية دخول للداشبورد.")
-    return None
 
 
-def dashboard_require_owner():
-    denied = dashboard_require_admin()
-    if denied:
-        return denied
-    if not dashboard_current_user_is_owner():
-        return dashboard_access_denied_html("هذه الصفحة أو العملية مخصصة لرتبة Owner فقط.")
-    return None
 
 
 def dashboard_role_badge_html():
@@ -6068,28 +5362,8 @@ def dashboard_role_badge_html():
     return "<span class='pill bad'>No Access</span>"
 
 
-def dashboard_count_table(table):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute(f"SELECT COUNT(*) FROM {table}")
-        value = cur.fetchone()[0]
-        conn.close()
-        return int(value or 0)
-    except:
-        return 0
 
 
-def dashboard_total_coins():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy")
-        value = cur.fetchone()[0]
-        conn.close()
-        return int(value or 0)
-    except:
-        return 0
 
 
 def dashboard_set_level_data(user_id, xp=None, level=None):
@@ -6121,18 +5395,8 @@ def dashboard_member_name(user_id):
     return dashboard_member_identity_html(user_id, guild_id=dashboard_current_guild_id_safe(), include_id=True, include_roles=True, compact=False)
 
 
-def dashboard_money_rows(limit=10):
-    rows = []
-    for i, (user_id, balance) in enumerate(get_top_money(limit), start=1):
-        rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "balance": int(balance or 0)})
-    return rows
 
 
-def dashboard_level_rows(limit=10):
-    rows = []
-    for i, (user_id, xp, level) in enumerate(get_top_levels(limit), start=1):
-        rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "level": int(level or 1), "xp": int(xp or 0)})
-    return rows
 
 
 def dashboard_memory_summary():
@@ -6502,20 +5766,12 @@ def dashboard_setting_int_set(key):
     return cleaned
 
 
-def dashboard_dynamic_owner_role_ids():
-    return dashboard_setting_int_set("dashboard_owner_role_ids")
 
 
-def dashboard_dynamic_admin_role_ids():
-    return dashboard_setting_int_set("dashboard_admin_role_ids")
 
 
-def dashboard_dynamic_owner_user_ids():
-    return dashboard_setting_int_set("dashboard_owner_user_ids")
 
 
-def dashboard_dynamic_admin_user_ids():
-    return dashboard_setting_int_set("dashboard_admin_user_ids")
 
 
 def parse_dashboard_role_id_list(values):
@@ -6668,46 +5924,8 @@ def normalize_protection_settings(data=None):
     return base
 
 
-def get_guild_protection_settings(guild_id):
-    guild_id = int(guild_id or 0)
-    ensure_guild_protection_table()
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("SELECT settings_json FROM guild_protection_settings WHERE guild_id = ?", (guild_id,))
-        row = cur.fetchone()
-        conn.close()
-        if row and row[0]:
-            try:
-                loaded = json.loads(row[0])
-            except:
-                loaded = {}
-            return normalize_protection_settings(loaded)
-    except Exception as e:
-        print(f"Get guild protection settings error: {e}")
-    return normalize_protection_settings({})
 
 
-def save_guild_protection_settings(guild_id, settings):
-    guild_id = int(guild_id or 0)
-    settings = normalize_protection_settings(settings)
-    ensure_guild_protection_table()
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO guild_protection_settings (guild_id, settings_json, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id) DO UPDATE SET
-                settings_json = excluded.settings_json,
-                updated_at = excluded.updated_at
-        """, (guild_id, json.dumps(settings, ensure_ascii=False), int(time.time())))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Save guild protection settings error: {e}")
-        return False
 
 
 def protection_channel_ignored_for(settings, channel_id):
@@ -7152,51 +6370,6 @@ def cc_since_hours(hours=24):
     return int(time.time()) - (int(hours) * 60 * 60)
 
 
-def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details=""):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS command_center_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_type TEXT,
-                user_id INTEGER DEFAULT 0,
-                user_name TEXT DEFAULT '',
-                channel_id INTEGER DEFAULT 0,
-                channel_name TEXT DEFAULT '',
-                amount INTEGER DEFAULT 0,
-                details TEXT DEFAULT '',
-                created_at INTEGER
-            )
-        """)
-        cur.execute("""
-            INSERT INTO command_center_events
-            (event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            str(event_type)[:80],
-            int(user_id or 0),
-            str(user_name or "")[:120],
-            int(channel_id or 0),
-            str(channel_name or "")[:120],
-            int(amount or 0),
-            str(details or "")[:1200],
-            int(time.time())
-        ))
-
-        cur.execute("""
-            DELETE FROM command_center_events
-            WHERE id NOT IN (
-                SELECT id FROM command_center_events
-                ORDER BY id DESC
-                LIMIT ?
-            )
-        """, (COMMAND_CENTER_EVENT_LIMIT,))
-
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Command Center event error: {e}")
 
 
 def cc_count_events(event_type=None, since=0):
@@ -10455,106 +9628,12 @@ def nm_log_vault_where(guild_id=0, log_type="all", query="", deleted_filter="all
     return where_sql, params
 
 
-def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        include_legacy = bool(request.args.get("legacy") == "1") if request else False
-        where_sql, params = nm_log_vault_where(guild_id, log_type, query, deleted_filter, channel_id, include_legacy)
-
-        cur.execute(f"""
-            SELECT id, guild_id, log_type, title, description, discord_channel_id, discord_channel_name,
-                   discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
-            FROM dashboard_log_vault
-            {where_sql}
-            ORDER BY id DESC
-            LIMIT ? OFFSET ?
-        """, tuple(params + [int(limit), int(offset)]))
-        rows = cur.fetchall()
-
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
-        total = int(cur.fetchone()[0] or 0)
-
-        conn.close()
-        return rows, total
-    except Exception as e:
-        print(f"Log Vault recent error: {e}")
-        return [], 0
 
 
-def log_vault_counts(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        include_legacy = bool(request.args.get("legacy") == "1") if request else False
-        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
-        since = int(time.time()) - 86400
-
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
-        total = int(cur.fetchone()[0] or 0)
-
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql + (' AND' if where_sql else 'WHERE')} deleted_from_discord = 1", tuple(params))
-        deleted = int(cur.fetchone()[0] or 0)
-
-        cur.execute(f"SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault {where_sql}", tuple(params))
-        types = int(cur.fetchone()[0] or 0)
-
-        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql + (' AND' if where_sql else 'WHERE')} created_at >= ?", tuple(params + [since]))
-        today = int(cur.fetchone()[0] or 0)
-
-        conn.close()
-        return total, deleted, types, today
-    except Exception as e:
-        print(f"Log Vault counts error: {e}")
-        return 0, 0, 0, 0
 
 
-def log_vault_types(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        include_legacy = bool(request.args.get("legacy") == "1") if request else False
-        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
-
-        cur.execute(f"""
-            SELECT log_type, COUNT(*)
-            FROM dashboard_log_vault
-            {where_sql}
-            GROUP BY log_type
-            ORDER BY COUNT(*) DESC
-        """, tuple(params))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"Log Vault types error: {e}")
-        return []
 
 
-def log_vault_channels(guild_id=0):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        include_legacy = bool(request.args.get("legacy") == "1") if request else False
-        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
-
-        cur.execute(f"""
-            SELECT discord_channel_id, discord_channel_name, COUNT(*)
-            FROM dashboard_log_vault
-            {where_sql}
-            GROUP BY discord_channel_id, discord_channel_name
-            ORDER BY COUNT(*) DESC
-        """, tuple(params))
-        rows = cur.fetchall()
-        conn.close()
-        return rows
-    except Exception as e:
-        print(f"Log Vault channels error: {e}")
-        return []
 
 
 
@@ -11697,40 +10776,6 @@ def keep_alive():
     Thread(target=run).start()
 
 
-async def booster_weekly_loop():
-    await bot.wait_until_ready()
-
-    while not bot.is_closed():
-        try:
-            guild = nm_global_first_guild()
-
-            if guild:
-                role = guild.get_role(SERVER_BOOSTER_ROLE_ID)
-                channel = guild.get_channel(COMMANDS_CHANNEL_ID)
-
-                if role:
-                    for member in list(role.members):
-                        if member.bot:
-                            continue
-
-                        success, remaining, balance_amount, reward = claim_booster_weekly(member.id)
-
-                        if success and channel:
-                            embed = discord.Embed(
-                                title="🚀 Booster Weekly Auto Reward",
-                                description=f"{member.mention} استلم مكافأة البوست الأسبوعية تلقائيًا.",
-                                color=COLOR_PURPLE,
-                                timestamp=discord.utils.utcnow()
-                            )
-                            embed.add_field(name="🎁 Reward", value=money_delta(reward), inline=True)
-                            embed.add_field(name="💼 New Balance", value=coin_line(balance_amount), inline=True)
-                            embed.set_footer(text=f"{BOT_BRAND} • Auto Booster Weekly")
-                            await channel.send(embed=embed)
-
-        except Exception as e:
-            print(f"Booster weekly auto reward error: {e}")
-
-        await asyncio.sleep(BOOSTER_WEEKLY_CHECK_INTERVAL_SECONDS)
 
 
 # =========================
@@ -11891,14 +10936,6 @@ def nm_legacy_gid(message):
     except Exception:
         return GUILD_ID
 
-def nm_legacy_coin(guild_id):
-    try:
-        if "get_guild_settings" in globals():
-            s = get_guild_settings(int(guild_id))
-            return s.get("coin_name") or s.get("currency_name") or s.get("economy_coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None)
-    except Exception:
-        pass
-    return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 def nm_legacy_ensure_economy(cur):
     cur.execute("CREATE TABLE IF NOT EXISTS economy (guild_id INTEGER DEFAULT 0, user_id INTEGER, balance INTEGER DEFAULT 0)")
@@ -11907,44 +10944,7 @@ def nm_legacy_ensure_economy(cur):
     except Exception:
         pass
 
-def nm_legacy_balance(guild_id, user_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_legacy_ensure_economy(cur)
-        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
-        row = cur.fetchone()
-        if not row:
-            cur.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (?,?,?)", (int(guild_id), int(user_id), 0))
-            conn.commit()
-            bal = 0
-        else:
-            bal = int(row[0] or 0)
-        conn.close()
-        return bal
-    except Exception as e:
-        print(f"legacy balance error: {e}")
-        return 0
 
-def nm_legacy_add_money(guild_id, user_id, amount):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_legacy_ensure_economy(cur)
-        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
-        if not cur.fetchone():
-            cur.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (?,?,?)", (int(guild_id), int(user_id), 0))
-        cur.execute("UPDATE economy SET balance=COALESCE(balance,0)+? WHERE guild_id=? AND user_id=?", (int(amount), int(guild_id), int(user_id)))
-        conn.commit()
-        conn.close()
-        try:
-            nm_persist_dashboard_change("legacy economy change")
-        except Exception:
-            pass
-        return True
-    except Exception as e:
-        print(f"legacy add money error: {e}")
-        return False
 
 def nm_legacy_take_money(guild_id, user_id, amount):
     if nm_legacy_balance(guild_id, user_id) < int(amount):
@@ -11957,22 +10957,6 @@ def nm_legacy_amount(raw):
     except Exception:
         return 0
 
-def nm_legacy_level(guild_id, user_id):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        try:
-            nm_ensure_guild_column(cur, "levels")
-        except Exception:
-            pass
-        cur.execute("SELECT level,xp FROM levels WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
-        row = cur.fetchone()
-        conn.close()
-        if row:
-            return int(row[0] or 1), int(row[1] or 0)
-    except Exception:
-        pass
-    return 1, 0
 
 async def nm_legacy_salary(message):
     gid = nm_legacy_gid(message)
@@ -12045,70 +11029,7 @@ async def nm_legacy_slot(message, amount):
         return await message.channel.send(f"🎰 {' | '.join(roll)}\n🎉 ربحت **{prize:,} {coin}**")
     await message.channel.send(f"🎰 {' | '.join(roll)}\n💀 خسرت **{amount:,} {coin}**")
 
-async def nm_legacy_top(message):
-    gid = nm_legacy_gid(message)
-    coin = nm_legacy_coin(gid)
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_legacy_ensure_economy(cur)
-        cur.execute("SELECT user_id,balance FROM economy WHERE guild_id=? ORDER BY balance DESC LIMIT 10", (gid,))
-        rows = cur.fetchall()
-        conn.close()
-    except Exception:
-        rows = []
-    if not rows:
-        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
-    lines = []
-    for i, (uid, bal) in enumerate(rows, 1):
-        m = message.guild.get_member(int(uid)) if message.guild else None
-        lines.append(f"**#{i}** {(m.mention if m else f'`{uid}`')} — 🪙 **{int(bal):,} {coin}**")
-    await message.channel.send(embed=discord.Embed(title="🏆 أغنى الأعضاء", description="\n".join(lines), color=0xf59e0b))
 
-async def nm_handle_legacy_bang(message):
-    if not message.guild or message.author.bot:
-        return False
-    content = (message.content or "").strip()
-    if not content.startswith("!"):
-        return False
-    if message.id in _nm_legacy_done:
-        return True
-    _nm_legacy_done.add(message.id)
-    if len(_nm_legacy_done) > 5000:
-        _nm_legacy_done.clear()
-
-    parts = content.split()
-    cmd = parts[0].lower()
-    args = parts[1:]
-
-    if cmd in {"!ping","!بنق","!بينق"}:
-        await message.channel.send(f"🏓 Pong! `{round(bot.latency*1000)}ms`")
-        return True
-    if cmd in {"!راتب","!salary"}:
-        await nm_legacy_salary(message)
-        return True
-    if cmd in {"!رصيدي","!رصيد","!balance","!wallet","!فلوسي"}:
-        await nm_legacy_balance_cmd(message)
-        return True
-    if cmd in {"!اغنى","!top","!توب"}:
-        await nm_legacy_top(message)
-        return True
-    if cmd in {"!حظ","!luck","!دبل","!double"}:
-        await nm_legacy_luck(message, args[0] if args else 0)
-        return True
-    if cmd in {"!سلوت","!slot"}:
-        await nm_legacy_slot(message, args[0] if args else 0)
-        return True
-    if cmd in {"!شرح","!اقتصاد","!help","!مساعدة"}:
-        coin = nm_legacy_coin(nm_legacy_gid(message))
-        embed = discord.Embed(
-            title="📘 NM System",
-            description=f"`!راتب` أو `/راتب`\n`!رصيدي` أو `/رصيدي`\n`!اغنى` أو `/اغنى`\n`!حظ 100` أو `/حظ`\n`!سلوت 100` أو `/سلوت`\n\nالعملة: **{coin}**",
-            color=0x5865F2
-        )
-        await message.channel.send(embed=embed)
-        return True
-    return False
 
 @bot.event
 async def on_message(message):
@@ -15747,22 +14668,6 @@ async def slash_levels_ar(interaction: discord.Interaction):
     await slash_levels.callback(interaction)
 
 
-async def v3_gamble_check(interaction, amount):
-    if not await v3_require_gambling_interaction(interaction):
-        return None
-    amount = int(amount or 0)
-    if amount <= 0:
-        await interaction.response.send_message("❌ مبلغ الرهان لازم يكون أكبر من صفر.", ephemeral=True)
-        return None
-    ok, remaining = can_gamble_now(interaction.user.id)
-    if not ok:
-        await interaction.response.send_message(f"⏳ انتظر **{remaining:.1f} ثانية** قبل محاولة القمار التالية.", ephemeral=True)
-        return None
-    balance_before = v3_get_balance(interaction.guild.id, interaction.user.id)
-    if balance_before < amount:
-        await interaction.response.send_message(f"❌ رصيدك ما يكفي. رصيدك الحالي: **{balance_before:,}**", ephemeral=True)
-        return None
-    return amount
 
 
 @bot.tree.command(name="luck", description="50/50 gamble using your bot coins")
@@ -16529,77 +15434,9 @@ def nm_rescue_effective_where(table, guild_id):
     except Exception:
         return "guild_id = ?", [int(guild_id)]
 
-def dashboard_count_table(table):
-    gid = nm_rescue_selected_gid()
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        selected, legacy = nm_rescue_count(cur, table, gid)
-        conn.commit()
-        conn.close()
-        return selected if selected > 0 else legacy
-    except Exception:
-        return 0
 
-def dashboard_total_coins():
-    gid = nm_rescue_selected_gid()
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        selected, legacy = nm_rescue_sum(cur, "economy", "balance", gid)
-        conn.commit()
-        conn.close()
-        return selected if selected > 0 else legacy
-    except Exception:
-        return 0
 
-def dashboard_money_rows(limit=10):
-    gid = nm_rescue_selected_gid()
-    rows = []
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_rescue_ensure_guild_col(cur, "economy")
-        where, params = nm_rescue_effective_where("economy", gid)
-        cur.execute(f"SELECT user_id, balance FROM economy WHERE {where} ORDER BY balance DESC LIMIT ?", tuple(params + [int(limit)]))
-        data = cur.fetchall()
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"NM rescue dashboard_money_rows error: {e}")
-        data = []
 
-    for i, (user_id, balance) in enumerate(data, start=1):
-        try:
-            name = dashboard_member_name(user_id)
-        except Exception:
-            name = f"User {user_id}"
-        rows.append({"rank": i, "user_id": int(user_id), "name": name, "balance": int(balance or 0)})
-    return rows
-
-def dashboard_level_rows(limit=10):
-    gid = nm_rescue_selected_gid()
-    rows = []
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_rescue_ensure_guild_col(cur, "levels")
-        where, params = nm_rescue_effective_where("levels", gid)
-        cur.execute(f"SELECT user_id, xp, level FROM levels WHERE {where} ORDER BY level DESC, xp DESC LIMIT ?", tuple(params + [int(limit)]))
-        data = cur.fetchall()
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"NM rescue dashboard_level_rows error: {e}")
-        data = []
-
-    for i, (user_id, xp, level) in enumerate(data, start=1):
-        try:
-            name = dashboard_member_name(user_id)
-        except Exception:
-            name = f"User {user_id}"
-        rows.append({"rank": i, "user_id": int(user_id), "name": name, "level": int(level or 1), "xp": int(xp or 0)})
-    return rows
 
 @app.route("/dashboard/rescue-legacy-data")
 def nm_rescue_legacy_data_page():
@@ -17452,17 +16289,9 @@ def nm_v4_save_settings(guild_id=None, settings=None):
     return False
 
 # Override generic settings functions again after all old functions exist.
-def get_guild_settings(guild_id):
-    return nm_v4_get_settings(guild_id)
 
-def save_guild_settings(guild_id, settings):
-    return nm_v4_save_settings(guild_id, settings)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_v4_get_settings(guild_id).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
-def nm_get_brand_name(guild_id=None):
-    return nm_v4_get_settings(guild_id).get("bot_brand", "NM System")
 
 @app.route("/dashboard/fix-brand-coin")
 def nm_fix_brand_coin_route():
@@ -17673,23 +16502,11 @@ def nm_v4_add_synced_money(guild_id, user_id, amount, source_type="earned", deta
         return nm_v4_get_synced_balance(guild_id, user_id)
 
 # Override every economy reader/writer the Discord commands may use.
-def v3_get_balance(guild_id, user_id):
-    return nm_v4_get_synced_balance(guild_id, user_id)
 
-def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
-    return nm_v4_add_synced_money(guild_id, user_id, amount, source_type, details, actor_id)
 
-def get_balance(user_id, guild_id=None):
-    return nm_v4_get_synced_balance(guild_id or nm_v4_effective_guild_id_from_source(), user_id)
 
-def add_money(user_id, amount, guild_id=None):
-    return nm_v4_add_synced_money(guild_id or nm_v4_effective_guild_id_from_source(), user_id, amount, "legacy_add_money", "Legacy add_money synced")
 
-def nm_legacy_balance(guild_id, user_id):
-    return nm_v4_get_synced_balance(guild_id, user_id)
 
-def nm_legacy_add_money(guild_id, user_id, amount):
-    return nm_v4_add_synced_money(guild_id, user_id, amount, "legacy", "Legacy economy synced")
 
 def nm_v4_sync_all_legacy_balances_to_guild(guild_id):
     """Manual/dashboard sync: copy every guild_id=0 economy row into selected guild if selected row is empty/lower."""
@@ -17745,40 +16562,6 @@ def nm_v4_boot_balance_sync():
 # Direct route/POST support for saving custom coin without reset.
 # =========================
 
-@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
-def nm_set_custom_coin_route():
-    gid = nm_v4_selected_gid_for_settings()
-    if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip()
-        if not coin:
-            coin = nm_coin_name(guild_id if "guild_id" in locals() else None)
-        settings = nm_v4_get_settings(gid)
-        settings["coin_name"] = coin
-        settings["currency_name"] = coin
-        settings["economy_coin_name"] = coin
-        nm_v4_save_settings(gid, settings)
-        return f"""
-        <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-          <h1>Coin saved</h1>
-          <p>Guild: <b>{int(gid)}</b></p>
-          <p>Coin Name: <b>{dash_escape(coin, 100)}</b></p>
-          <p>This value is now stored in PostgreSQL and will not reset on redeploy.</p>
-          <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
-        </div>
-        """
-
-    current = nm_v4_get_settings(gid).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Set Custom Coin</h1>
-      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
-        <label>Coin Name</label>
-        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
-        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
-      </form>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
-    </div>
-    """
 
 
 
@@ -18078,23 +16861,11 @@ def nm_final_add_money(guild_id, user_id, amount, source_type="system", details=
 
 # ---- Override all balance APIs used by Discord commands and dashboard pages ----
 
-def v3_get_balance(guild_id, user_id):
-    return nm_final_get_balance(guild_id, user_id)
 
-def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
-    return nm_final_add_money(guild_id, user_id, amount, source_type, details, actor_id)
 
-def get_balance(user_id, guild_id=None):
-    return nm_final_get_balance(guild_id or nm_final_selected_guild_id(), user_id)
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_final_add_money(guild_id or nm_final_selected_guild_id(), user_id, amount, source_type, details, admin_id)
 
-def nm_legacy_balance(guild_id, user_id):
-    return nm_final_get_balance(guild_id, user_id)
 
-def nm_legacy_add_money(guild_id, user_id, amount):
-    return nm_final_add_money(guild_id, user_id, amount, "legacy", "legacy synced")
 
 def nm_final_top_balances(guild_id, limit=10):
     guild_id = int(guild_id or 0)
@@ -18155,32 +16926,8 @@ def nm_final_top_balances(guild_id, limit=10):
             nm_final_write_sqlite_balance(guild_id, uid, bal)
     return items
 
-def dashboard_total_coins():
-    gid = nm_final_selected_guild_id()
-    return int(sum(bal for _, bal in nm_final_top_balances(gid, 10000)))
 
-def dashboard_count_table(table):
-    if table in ("economy", "guild_economy"):
-        return len([1 for _, bal in nm_final_top_balances(nm_final_selected_guild_id(), 10000) if bal > 0])
-    # fallback generic Postgres count if possible
-    try:
-        if nm_final_pg_enabled():
-            with nm_pg_conn() as conn:
-                return int(conn.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()["c"])
-    except Exception:
-        pass
-    return 0
 
-def dashboard_money_rows(limit=10):
-    gid = nm_final_selected_guild_id()
-    rows = []
-    for i, (uid, bal) in enumerate(nm_final_top_balances(gid, limit), start=1):
-        try:
-            name = dashboard_member_name(uid)
-        except Exception:
-            name = f"User {uid}"
-        rows.append({"rank": i, "user_id": int(uid), "name": name, "balance": int(bal)})
-    return rows
 
 # ---- Coin/brand final sync ----
 
@@ -18288,23 +17035,11 @@ def nm_final_save_settings(guild_id=None, settings=None):
 
     return True
 
-def get_guild_settings(guild_id):
-    return nm_final_get_settings(guild_id)
 
-def save_guild_settings(guild_id, settings):
-    return nm_final_save_settings(guild_id, settings)
 
-def nm_coin_name(guild_id=None):
-    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
-def nm_legacy_coin(guild_id):
-    return nm_coin_name(guild_id)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
-def nm_get_brand_name(guild_id=None):
-    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("bot_brand", "NM System")
 
 @app.after_request
 def nm_final_sync_dashboard_forms(response):
@@ -18365,30 +17100,6 @@ def nm_final_sync_route():
     </div>
     """
 
-@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
-def nm_final_set_custom_coin_route():
-    gid = nm_final_selected_guild_id()
-    if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
-        settings = nm_final_get_settings(gid)
-        settings["coin_name"] = coin
-        settings["currency_name"] = coin
-        settings["economy_coin_name"] = coin
-        nm_final_save_settings(gid, settings)
-        return redirect(f"/dashboard/final-sync?guild_id={int(gid)}")
-
-    current = nm_coin_name(gid)
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Set Custom Coin</h1>
-      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
-        <label>Coin Name</label>
-        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
-        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
-      </form>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
-    </div>
-    """
 
 def nm_final_polish_boot():
     try:
@@ -18546,26 +17257,12 @@ def nm_save_settings_unified(guild_id=None, settings=None):
         pass
     return True
 
-def get_guild_settings(guild_id):
-    return nm_get_settings_unified(guild_id)
 
-def save_guild_settings(guild_id, settings):
-    return nm_save_settings_unified(guild_id, settings)
 
-def nm_coin_name(guild_id=None):
-    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
-def nm_get_coin_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
-def nm_legacy_coin(guild_id):
-    return nm_coin_name(guild_id)
 
-def nm_get_brand_name(guild_id=None):
-    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("bot_brand", "NM System")
 
-def nm_format_money(amount, guild_id=None):
-    return f"{int(amount or 0):,} {nm_coin_name(guild_id)}"
 
 @app.after_request
 def nm_coin_save_any_dashboard_post(response):
@@ -18604,33 +17301,6 @@ def nm_coin_save_any_dashboard_post(response):
         except Exception: pass
     return response
 
-@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
-def nm_coin_set_custom_coin_page():
-    gid = nm_coin_gid()
-    if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
-        settings = nm_get_settings_unified(gid)
-        settings["coin_name"] = coin
-        settings["currency_name"] = coin
-        settings["economy_coin_name"] = coin
-        settings["money_name"] = coin
-        settings["coin"] = coin
-        nm_save_settings_unified(gid, settings)
-        return redirect(f"/dashboard/coin-sync-status?guild_id={int(gid)}")
-
-    current = nm_coin_name(gid)
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Settings • Coin Name</h1>
-      <p>Default is <b>NM Coin</b>. Changing it here saves it forever for this server only.</p>
-      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
-        <label>Coin Name</label>
-        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
-        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
-      </form>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
-    </div>
-    """
 
 @app.route("/dashboard/coin-sync-status")
 def nm_coin_sync_status_page():
@@ -18738,22 +17408,7 @@ def nm_guide_mark_sent(guild_id=None):
     settings["guide_last_sent_ts"] = int(time.time())
     nm_guide_save_settings(gid, settings)
 
-def nm_should_send_guide(guild_id=None):
-    gid = int(guild_id or nm_guide_gid())
-    if not nm_guide_enabled(gid):
-        return False
-    last = nm_guide_last_sent(gid)
-    interval = nm_guide_interval_seconds(gid)
-    return int(time.time()) - int(last or 0) >= int(interval)
 
-def nm_disable_guide(guild_id=None):
-    gid = int(guild_id or nm_guide_gid())
-    settings = nm_guide_settings(gid)
-    settings["guide_enabled"] = False
-    settings["guide_interval_seconds"] = 7 * 24 * 60 * 60
-    settings["guide_last_sent_ts"] = int(time.time())
-    nm_guide_save_settings(gid, settings)
-    return True
 
 def nm_enable_guide(guild_id=None, interval_hours=168):
     gid = int(guild_id or nm_guide_gid())
@@ -18765,30 +17420,10 @@ def nm_enable_guide(guild_id=None, interval_hours=168):
     return True
 
 # Override common old guide functions if they exist/call these names.
-def should_send_guide(guild_id=None):
-    return nm_should_send_guide(guild_id)
 
-def mark_guide_sent(guild_id=None):
-    return nm_guide_mark_sent(guild_id)
 
-def guide_should_send(guild_id=None):
-    return nm_should_send_guide(guild_id)
 
-def guide_mark_sent(guild_id=None):
-    return nm_guide_mark_sent(guild_id)
 
-@app.route("/dashboard/disable-guide")
-def nm_disable_guide_route():
-    gid = nm_guide_gid()
-    nm_disable_guide(gid)
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Guide disabled</h1>
-      <p>Guild: <b>{int(gid)}</b></p>
-      <p>الشرح/الدليل توقف وما راح ينزل كل شوي.</p>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
-    </div>
-    """
 
 @app.route("/dashboard/enable-guide")
 def nm_enable_guide_route():
@@ -19009,52 +17644,13 @@ def nm_hotfix_coin_name(guild_id=None):
         return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 # FINAL coin/settings overrides
-def nm_coin_name(guild_id=None):
-    return nm_hotfix_coin_name(guild_id)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_hotfix_coin_name(guild_id)
 
-def nm_legacy_coin(guild_id):
-    return nm_hotfix_coin_name(guild_id)
 
-def nm_get_brand_name(guild_id=None):
-    try:
-        return str(nm_hotfix_settings(guild_id or nm_hotfix_get_gid()).get("bot_brand") or "NM System")
-    except Exception:
-        return "NM System"
 
-def get_guild_settings(guild_id):
-    return nm_hotfix_settings(guild_id)
 
-def save_guild_settings(guild_id, settings):
-    return nm_hotfix_save_settings(guild_id, settings)
 
 # Command center event safe wrapper: accepts guild_id and any future kwargs.
-def cc_record_event(event_type=None, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0, **kwargs):
-    try:
-        if nm_hotfix_postgres_ready():
-            with nm_pg_conn() as conn:
-                conn.execute("""
-                    INSERT INTO command_center_events
-                    (guild_id,event_type,user_id,user_name,channel_id,channel_name,amount,details,created_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (
-                    int(guild_id or nm_hotfix_get_gid()),
-                    str(event_type or kwargs.get("type") or ""),
-                    int(user_id or 0),
-                    str(user_name or ""),
-                    int(channel_id or 0),
-                    str(channel_name or ""),
-                    int(amount or 0),
-                    str(details or ""),
-                    int(time.time())
-                ))
-                conn.commit()
-        # No crash if PG missing.
-    except Exception as e:
-        try: print(f"NM hotfix cc_record_event ignored error: {e}")
-        except Exception: pass
 
 @app.after_request
 def nm_hotfix_coin_dashboard_post(response):
@@ -19096,27 +17692,6 @@ def nm_hotfix_coin_page():
     </div>
     """
 
-@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
-def nm_hotfix_set_coin_page():
-    gid = nm_hotfix_get_gid()
-    if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
-        s = nm_hotfix_settings(gid)
-        s["coin_name"] = coin
-        nm_hotfix_save_settings(gid, s)
-        return redirect(f"/dashboard/coin-hotfix?guild_id={int(gid)}")
-    current = nm_hotfix_coin_name(gid)
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Settings • Coin Name</h1>
-      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
-        <label>Coin Name</label>
-        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
-        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
-      </form>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
-    </div>
-    """
 
 def nm_hotfix_boot():
     try:
@@ -19357,17 +17932,8 @@ def get_guild_settings(guild_id):
 def save_guild_settings(guild_id, settings):
     return nm_stable_save_settings(guild_id, settings)
 
-def nm_coin_name(guild_id=None):
-    try:
-        return str(nm_stable_get_settings(guild_id or nm_stable_gid()).get("coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
-    except Exception:
-        return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
-def nm_legacy_coin(guild_id):
-    return nm_coin_name(guild_id)
 
 def nm_get_brand_name(guild_id=None):
     try:
@@ -19488,101 +18054,15 @@ def nm_stable_write_pg_balance(gid, uid, balance):
         try: print(f"NM stable write PG balance skipped: {e}")
         except Exception: pass
 
-def nm_stable_get_balance(gid, uid):
-    gid, uid = int(gid or 0), int(uid or 0)
-    if not uid:
-        return 0
-    sources = []
-    sources.extend(nm_stable_pg_balance_sources(gid, uid))
-    sources.extend(nm_stable_sqlite_balance_sources(gid, uid))
-    best = max([int(v or 0) for _, v in sources], default=0)
-    if best > 0:
-        nm_stable_write_pg_balance(gid, uid, best)
-        nm_stable_write_sqlite_balance(gid, uid, best)
-    return int(best)
 
-def nm_stable_add_money(gid, uid, amount, source_type="system", details="", actor_id=0):
-    gid, uid, amount = int(gid or 0), int(uid or 0), int(amount or 0)
-    current = nm_stable_get_balance(gid, uid)
-    new_balance = max(0, current + amount)
-    nm_stable_write_pg_balance(gid, uid, new_balance)
-    nm_stable_write_sqlite_balance(gid, uid, new_balance)
-    try:
-        if nm_stable_pg_ready():
-            with nm_pg_conn() as conn:
-                conn.execute("""
-                    INSERT INTO money_audit (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
-                """, (gid, uid, amount, new_balance, str(source_type), str(details), int(actor_id or 0), int(time.time())))
-                conn.commit()
-    except Exception:
-        pass
-    return int(new_balance)
 
-def v3_get_balance(guild_id, user_id):
-    return nm_stable_get_balance(guild_id, user_id)
 
-def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
-    return nm_stable_add_money(guild_id, user_id, amount, source_type, details, actor_id)
 
-def get_balance(user_id, guild_id=None):
-    return nm_stable_get_balance(guild_id or nm_stable_gid(), user_id)
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_stable_add_money(guild_id or nm_stable_gid(), user_id, amount, source_type, details, admin_id)
 
-def nm_legacy_balance(guild_id, user_id):
-    return nm_stable_get_balance(guild_id, user_id)
 
-def nm_legacy_add_money(guild_id, user_id, amount):
-    return nm_stable_add_money(guild_id, user_id, amount, "legacy", "legacy synced")
 
-def nm_stable_top_balances(gid, limit=10):
-    gid = int(gid or 0)
-    merged = {}
-    if nm_stable_pg_ready():
-        try:
-            with nm_pg_conn() as conn:
-                rows = conn.execute("""
-                    SELECT user_id, MAX(balance) AS balance
-                    FROM economy
-                    WHERE guild_id IN (%s,0)
-                    GROUP BY user_id
-                    ORDER BY MAX(balance) DESC
-                    LIMIT %s
-                """, (gid, int(limit) * 4)).fetchall()
-                for r in rows:
-                    merged[int(r["user_id"])] = max(int(merged.get(int(r["user_id"]), 0)), int(r["balance"] or 0))
-        except Exception:
-            pass
-    for path in nm_stable_sqlite_paths():
-        try:
-            conn = sqlite3.connect(str(path))
-            cur = conn.cursor()
-            for table in ["guild_economy", "economy"]:
-                if not nm_stable_table_exists(cur, table):
-                    continue
-                cols = nm_stable_cols(cur, table)
-                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
-                    cur.execute(f"SELECT user_id, MAX(balance) FROM {table} WHERE guild_id IN (?,0) GROUP BY user_id ORDER BY MAX(balance) DESC LIMIT ?", (gid, int(limit) * 4))
-                    for uid, bal in cur.fetchall():
-                        merged[int(uid)] = max(int(merged.get(int(uid), 0)), int(bal or 0))
-                elif table == "economy" and "user_id" in cols and "balance" in cols:
-                    cur.execute("SELECT user_id,balance FROM economy ORDER BY balance DESC LIMIT ?", (int(limit) * 4,))
-                    for uid, bal in cur.fetchall():
-                        merged[int(uid)] = max(int(merged.get(int(uid), 0)), int(bal or 0))
-            conn.close()
-        except Exception:
-            pass
-    items = sorted(merged.items(), key=lambda x: x[1], reverse=True)[:int(limit)]
-    for uid, bal in items:
-        if bal > 0:
-            nm_stable_write_pg_balance(gid, uid, bal)
-            nm_stable_write_sqlite_balance(gid, uid, bal)
-    return items
 
-def dashboard_total_coins():
-    return int(sum(b for _, b in nm_stable_top_balances(nm_stable_gid(), 10000)))
 
 def dashboard_count_table(table):
     if table in ("economy", "guild_economy"):
@@ -19595,15 +18075,6 @@ def dashboard_count_table(table):
         pass
     return 0
 
-def dashboard_money_rows(limit=10):
-    rows = []
-    for i, (uid, bal) in enumerate(nm_stable_top_balances(nm_stable_gid(), limit), start=1):
-        try:
-            name = dashboard_member_name(uid)
-        except Exception:
-            name = f"User {uid}"
-        rows.append({"rank": i, "user_id": int(uid), "name": name, "balance": int(bal)})
-    return rows
 
 # ---------------- guide spam ----------------
 
@@ -19704,27 +18175,6 @@ def nm_stable_sync_route():
     </div>
     """
 
-@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
-def nm_stable_set_coin_route():
-    gid = nm_stable_gid()
-    if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
-        s = nm_stable_get_settings(gid)
-        s.update({"coin_name": coin, "currency_name": coin, "economy_coin_name": coin, "money_name": coin, "coin": coin})
-        nm_stable_save_settings(gid, s)
-        return redirect(f"/dashboard/stable-sync?guild_id={int(gid)}")
-    current = nm_coin_name(gid)
-    return f"""
-    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Settings • Coin Name</h1>
-      <p>This is saved from Settings per server. Default is <b>NM Coin</b>.</p>
-      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
-        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
-        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
-      </form>
-      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
-    </div>
-    """
 
 @app.route("/dashboard/disable-guide")
 def nm_stable_disable_guide_route():
@@ -20055,20 +18505,10 @@ def nm_final_save_coin(guild_id=None, coin_name=None):
 
     return coin
 
-def nm_coin_name(guild_id=None):
-    return nm_final_read_coin_from_all_sources(guild_id)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_final_read_coin_from_all_sources(guild_id)
 
-def nm_legacy_coin(guild_id):
-    return nm_final_read_coin_from_all_sources(guild_id)
 
-def nm_currency_name(guild_id=None):
-    return nm_final_read_coin_from_all_sources(guild_id)
 
-def nm_money_name(guild_id=None):
-    return nm_final_read_coin_from_all_sources(guild_id)
 
 def nm_format_currency(amount, guild_id=None):
     return f"{int(amount or 0):,} {nm_final_read_coin_from_all_sources(guild_id)}"
@@ -20380,14 +18820,8 @@ def nm_v5_final_coin_from_files(guild_id=None):
         pass
     return "NM Coin"
 
-def nm_coin_name(guild_id=None):
-    return nm_v5_final_coin_from_files(guild_id)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_v5_final_coin_from_files(guild_id)
 
-def nm_legacy_coin(guild_id=None):
-    return nm_v5_final_coin_from_files(guild_id)
 
 
 
@@ -20400,28 +18834,6 @@ def nm_legacy_coin(guild_id=None):
 # - Works with /data fallback even when DATABASE_URL is missing.
 # =====================================================================
 
-def nm_v5_coin_gid(source=None):
-    try:
-        if source is not None:
-            if hasattr(source, "guild") and getattr(source, "guild", None):
-                return int(source.guild.id)
-            if hasattr(source, "message") and getattr(source.message, "guild", None):
-                return int(source.message.guild.id)
-            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
-                return int(source.guild_id)
-    except Exception:
-        pass
-    try:
-        return int(
-            request.args.get("guild_id")
-            or request.form.get("guild_id")
-            or session.get("selected_guild_id")
-            or session.get("dashboard_active_guild_id")
-            or globals().get("GUILD_ID", 0)
-            or 0
-        )
-    except Exception:
-        return int(globals().get("GUILD_ID", 0) or 0)
 
 def nm_v5_coin_store_path():
     try:
@@ -20500,99 +18912,13 @@ def nm_v5_pg_save_coin(gid, coin):
         except Exception: pass
         return False
 
-def nm_v5_get_coin_name(guild_id=None):
-    gid = int(guild_id or nm_v5_coin_gid())
 
-    # 1) Durable per-guild /data store has priority.
-    store = nm_v5_coin_load_store()
-    row = store.get(str(gid), {})
-    if isinstance(row, dict):
-        v = row.get("coin_name") or row.get("currency_name") or row.get("economy_coin_name") or row.get("money_name") or row.get("coin")
-        if v is not None and str(v).strip():
-            return str(v).strip()
-
-    # 2) PostgreSQL if connected.
-    pg_coin = nm_v5_pg_read_coin(gid)
-    if pg_coin:
-        # mirror PG to /data so future redeploy without PG still remembers
-        nm_v5_set_coin_name(gid, pg_coin, mirror_pg=False)
-        return pg_coin
-
-    # 3) Old dashboard file fallback only if this guild has no saved coin yet.
-    try:
-        for p in [Path("/data/dashboard_settings.json"), Path("dashboard_settings.json")]:
-            if p.exists() and p.stat().st_size > 0:
-                old = json.loads(p.read_text(encoding="utf-8") or "{}")
-                if isinstance(old, dict):
-                    v = old.get("coin_name") or old.get("currency_name") or old.get("economy_coin_name") or old.get("money_name") or old.get("coin")
-                    if v is not None and str(v).strip():
-                        nm_v5_set_coin_name(gid, str(v).strip())
-                        return str(v).strip()
-    except Exception:
-        pass
-
-    # 4) New guild default.
-    nm_v5_set_coin_name(gid, "NM Coin")
-    return "NM Coin"
-
-def nm_v5_set_coin_name(guild_id=None, coin_name="NM Coin", mirror_pg=True):
-    gid = int(guild_id or nm_v5_coin_gid())
-    coin = str(coin_name or "NM Coin").strip() or "NM Coin"
-
-    store = nm_v5_coin_load_store()
-    row = store.get(str(gid), {})
-    if not isinstance(row, dict):
-        row = {}
-    row.update({
-        "coin_name": coin,
-        "currency_name": coin,
-        "economy_coin_name": coin,
-        "money_name": coin,
-        "coin": coin,
-    })
-    store[str(gid)] = row
-    nm_v5_coin_save_store(store)
-
-    # Mirror old runtime/global settings so the Settings page instantly shows it.
-    try:
-        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
-            dashboard_settings.update(row)
-    except Exception:
-        pass
-
-    try:
-        p = Path("/data/dashboard_settings.json")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        old = {}
-        if p.exists() and p.stat().st_size > 0:
-            old = json.loads(p.read_text(encoding="utf-8") or "{}")
-        if not isinstance(old, dict):
-            old = {}
-        old.update(row)
-        p.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-
-    if mirror_pg:
-        nm_v5_pg_save_coin(gid, coin)
-
-    return coin
 
 # Final public coin APIs used everywhere.
-def nm_coin_name(guild_id=None):
-    return nm_v5_get_coin_name(guild_id)
 
-def nm_get_coin_name(guild_id=None):
-    return nm_v5_get_coin_name(guild_id)
 
-def nm_legacy_coin(guild_id):
-    return nm_v5_get_coin_name(guild_id)
 
-def nm_currency_name(guild_id=None):
-    return nm_v5_get_coin_name(guild_id)
 
-def nm_money_name(guild_id=None):
-    return nm_v5_get_coin_name(guild_id)
 
 def nm_format_money(amount, guild_id=None):
     return f"{int(amount or 0):,} {nm_v5_get_coin_name(guild_id)}"
@@ -21123,16 +19449,8 @@ def v3_get_level_data(guild_id, user_id):
 def v3_add_xp(guild_id, user_id, amount):
     return nm_v5_add_xp(guild_id, user_id, amount)
 
-def get_level_data(user_id, guild_id=None):
-    return nm_v5_get_level_data(guild_id or nm_v5_sync_gid(), user_id)
 
-def add_xp(user_id, amount, guild_id=None):
-    return nm_v5_add_xp(guild_id or nm_v5_sync_gid(), user_id, amount)
 
-def nm_legacy_level(guild_id, user_id):
-    xp, level = nm_v5_get_level_data(guild_id, user_id)
-    # Some old code expects (level, xp)
-    return level, xp
 
 def dashboard_level_rows(limit=10):
     gid = nm_v5_sync_gid()
@@ -21371,38 +19689,14 @@ async def nm_v5_message_context_listener(message):
 
 # ---------------- final coin API with guild context ----------------
 
-def nm_coin_name(guild_id=None):
-    gid = nm_v5_find_runtime_guild_id(guild_id)
-    try:
-        if "nm_v5_get_coin_name" in globals():
-            return str(nm_v5_get_coin_name(gid) or "NM Coin")
-    except Exception:
-        pass
-    try:
-        if "nm_final_read_coin_from_all_sources" in globals():
-            return str(nm_final_read_coin_from_all_sources(gid) or "NM Coin")
-    except Exception:
-        pass
-    return "NM Coin"
 
-def nm_get_coin_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
 def nm_legacy_coin(guild_id):
     return nm_coin_name(guild_id)
 
-def nm_currency_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
-def nm_money_name(guild_id=None):
-    return nm_coin_name(guild_id)
 
-def coin_line(amount, guild_id=None):
-    return f"{int(amount or 0):,} {nm_coin_name(guild_id)}"
 
-def money_delta(amount, guild_id=None):
-    sign = "+" if int(amount or 0) >= 0 else ""
-    return f"{sign}{int(amount or 0):,} {nm_coin_name(guild_id)}"
 
 # ---------------- final money API with guild context ----------------
 
@@ -21462,27 +19756,10 @@ def nm_v5_real_add_money(user_id, amount, guild_id=None, source_type="system", d
 
     return nm_v5_real_get_balance(uid, gid)
 
-def get_balance(user_id, guild_id=None):
-    return nm_v5_real_get_balance(user_id, guild_id)
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_real_add_money(user_id, amount, guild_id, source_type, details, admin_id)
 
-def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    gid = nm_v5_find_runtime_guild_id(guild_id)
-    uid = int(user_id or 0)
-    amount = int(amount or 0)
-    current = nm_v5_real_get_balance(uid, gid)
-    if current < amount:
-        return False, current
-    new_balance = nm_v5_real_add_money(uid, -amount, gid, source_type, details, admin_id)
-    return True, int(new_balance or 0)
 
-def nm_legacy_balance(guild_id, user_id):
-    return nm_v5_real_get_balance(user_id, guild_id)
 
-def nm_legacy_add_money(guild_id, user_id, amount):
-    return nm_v5_real_add_money(user_id, amount, guild_id, "legacy", "legacy synced", 0)
 
 # ---------------- final level API with guild context ----------------
 
@@ -21549,23 +19826,6 @@ def nm_legacy_level(guild_id, user_id):
 
 # ---------------- leaderboards with same guild context ----------------
 
-def get_top_money(limit=10, guild_id=None):
-    gid = nm_v5_find_runtime_guild_id(guild_id)
-    try:
-        if "nm_stable_top_balances" in globals():
-            return [(int(uid), int(bal)) for uid, bal in nm_stable_top_balances(gid, int(limit))]
-    except Exception:
-        pass
-
-    try:
-        rows = dashboard_money_rows(int(limit))
-        out = []
-        for r in rows:
-            if isinstance(r, dict):
-                out.append((int(r.get("user_id", 0)), int(r.get("balance", 0))))
-        return out
-    except Exception:
-        return []
 
 def get_top_levels(limit=10, guild_id=None):
     gid = nm_v5_find_runtime_guild_id(guild_id)
@@ -23089,49 +21349,11 @@ def nm_v5_get_merged_top_money(guild_id=None, limit=10):
     return items[:limit]
 
 # Final leaderboard API overrides.
-def v3_get_top_money(guild_id, limit=10):
-    return nm_v5_get_merged_top_money(guild_id, limit)
 
-def get_top_money(limit=10, guild_id=None):
-    return nm_v5_get_merged_top_money(guild_id, limit)
 
-def dashboard_money_rows(limit=10):
-    gid = nm_v5_top_gid()
-    rows = []
-    for i, (uid, bal) in enumerate(nm_v5_get_merged_top_money(gid, int(limit)), start=1):
-        try:
-            name = dashboard_member_name(uid)
-        except Exception:
-            name = f"User {uid}"
-        rows.append({"rank": i, "user_id": int(uid), "name": name, "balance": int(bal)})
-    return rows
 
-def dashboard_total_coins():
-    return int(sum(int(bal or 0) for _, bal in nm_v5_get_merged_top_money(nm_v5_top_gid(), 10000)))
 
 # Fix legacy !الغني specifically.
-async def nm_legacy_top(message):
-    gid = nm_v5_top_gid(message)
-    coin = nm_coin_name(gid) if "nm_coin_name" in globals() else "NM Coin"
-    rows = nm_v5_get_merged_top_money(gid, 10)
-    if not rows:
-        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
-
-    lines = []
-    for i, (uid, bal) in enumerate(rows, 1):
-        m = message.guild.get_member(int(uid)) if message.guild else None
-        who = m.mention if m else f"`{uid}`"
-        medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"`#{i}`"
-        lines.append(f"{medal} {who} — 🪙 **{int(bal):,} {coin}**")
-
-    embed = discord.Embed(
-        title="🏆 أغنى الأعضاء",
-        description="\n".join(lines),
-        color=0xf59e0b,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_footer(text=f"{BOT_BRAND} • Economy Leaderboard")
-    await message.channel.send(embed=embed)
 
 @app.route("/dashboard/fix-richest-sync")
 def nm_v5_fix_richest_sync_route():
@@ -23809,35 +22031,6 @@ try:
 except NameError:
     NM_V5_ECO_LOCK = threading.RLock()
 
-def nm_v5_eco_gid(source=None):
-    try:
-        if source is not None:
-            if hasattr(source, "guild") and getattr(source, "guild", None):
-                return int(source.guild.id)
-            if hasattr(source, "message") and getattr(source.message, "guild", None):
-                return int(source.message.guild.id)
-            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
-                return int(source.guild_id)
-    except Exception:
-        pass
-    try:
-        if "nm_v5_find_runtime_guild_id" in globals():
-            gid = int(nm_v5_find_runtime_guild_id())
-            if gid:
-                return gid
-    except Exception:
-        pass
-    try:
-        return int(
-            request.args.get("guild_id")
-            or request.form.get("guild_id")
-            or session.get("selected_guild_id")
-            or session.get("dashboard_active_guild_id")
-            or (getattr(nm_global_first_guild(), "id", 0) if "nm_global_first_guild" in globals() else 0)
-            or NM_V5_ECO_TEST_GUILD_ID
-        )
-    except Exception:
-        return int((getattr(nm_global_first_guild(), "id", 0) if "nm_global_first_guild" in globals() else 0) or 0)
 
 def nm_v5_eco_coin(guild_id=None):
     gid = int(guild_id or nm_v5_eco_gid())
@@ -23859,270 +22052,25 @@ def nm_v5_eco_delta(amount, guild_id=None):
     return f"**{sign}{v:,} {nm_v5_eco_coin(guild_id)}**"
 
 # override common format helpers used by old embeds
-def coin_line(amount, bold=True, guild_id=None):
-    return nm_v5_eco_money(amount, guild_id, bold)
 
-def money_delta(amount, guild_id=None):
-    return nm_v5_eco_delta(amount, guild_id)
 
-def nm_v5_eco_db_path():
-    p = Path("/data/nm_system.db")
-    if p.exists():
-        return p
-    return Path("nm_system.db")
 
-def nm_v5_eco_conn():
-    conn = sqlite3.connect(str(nm_v5_eco_db_path()), timeout=30, isolation_level=None)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.execute("PRAGMA foreign_keys=ON")
-    except Exception:
-        pass
-    return conn
 
-def nm_v5_eco_init():
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS guild_economy (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                balance INTEGER DEFAULT 0,
-                last_daily INTEGER DEFAULT 0,
-                last_boost_weekly INTEGER DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS money_audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER DEFAULT 0,
-                user_id INTEGER DEFAULT 0,
-                amount INTEGER DEFAULT 0,
-                new_balance INTEGER DEFAULT 0,
-                source_type TEXT DEFAULT '',
-                details TEXT DEFAULT '',
-                actor_id INTEGER DEFAULT 0,
-                created_at INTEGER DEFAULT 0
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS nm_economy_locks (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                lock_key TEXT NOT NULL,
-                expires_at INTEGER DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id, lock_key)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS nm_salary_cooldowns (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                last_salary INTEGER DEFAULT 0,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS nm_casino_rounds (
-                round_id TEXT PRIMARY KEY,
-                guild_id INTEGER DEFAULT 0,
-                user_id INTEGER DEFAULT 0,
-                game TEXT DEFAULT '',
-                bet INTEGER DEFAULT 0,
-                status TEXT DEFAULT 'open',
-                created_at INTEGER DEFAULT 0,
-                finished_at INTEGER DEFAULT 0,
-                result_amount INTEGER DEFAULT 0
-            )
-        """)
-        conn.commit()
-        conn.close()
 
-def nm_v5_eco_audit(cur, guild_id, user_id, amount, new_balance, source_type, details="", actor_id=0):
-    cur.execute("""
-        INSERT INTO money_audit (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at)
-        VALUES (?,?,?,?,?,?,?,?)
-    """, (int(guild_id), int(user_id), int(amount), int(new_balance), str(source_type), str(details), int(actor_id or 0), int(time.time())))
 
-def nm_v5_eco_get_balance(guild_id, user_id):
-    nm_v5_eco_init()
-    gid, uid = int(guild_id or 0), int(user_id or 0)
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
 
-        # first selected guild
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        row = cur.fetchone()
-        selected = int(row["balance"] or 0) if row else 0
 
-        # legacy sources; used only if selected is zero/lower
-        best = selected
-        for table in ("guild_economy", "economy"):
-            try:
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
-                if not cur.fetchone():
-                    continue
-                cur.execute(f"PRAGMA table_info({table})")
-                cols = [r[1] for r in cur.fetchall()]
-                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
-                    cur.execute(f"SELECT MAX(balance) AS b FROM {table} WHERE user_id=?", (uid,))
-                    r = cur.fetchone()
-                    best = max(best, int((r["b"] if r else 0) or 0))
-                elif table == "economy" and "user_id" in cols and "balance" in cols:
-                    cur.execute("SELECT balance FROM economy WHERE user_id=?", (uid,))
-                    r = cur.fetchone()
-                    best = max(best, int((r["balance"] if r else 0) or 0))
-            except Exception:
-                pass
 
-        if best < 0:
-            best = 0
 
-        # mirror best to selected guild
-        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
-        cur.execute("UPDATE guild_economy SET balance=MAX(COALESCE(balance,0), ?) WHERE guild_id=? AND user_id=?", (best, gid, uid))
-        conn.commit()
-        conn.close()
-        return int(best)
 
-def nm_v5_eco_set_balance(guild_id, user_id, new_balance, source_type="set_balance", details="", actor_id=0):
-    nm_v5_eco_init()
-    gid, uid = int(guild_id or 0), int(user_id or 0)
-    new_balance = max(0, int(new_balance or 0))
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        old = int((cur.fetchone() or {"balance": 0})["balance"] or 0)
-        delta = new_balance - old
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_balance, gid, uid))
-        nm_v5_eco_audit(cur, gid, uid, delta, new_balance, source_type, details, actor_id)
-        conn.commit()
-        conn.close()
-    try:
-        if "nm_v5_top_write_balance" in globals():
-            nm_v5_top_write_balance(gid, uid, new_balance)
-    except Exception:
-        pass
-    return new_balance
 
-def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="change", details="", actor_id=0, allow_negative=False):
-    nm_v5_eco_init()
-    gid, uid, amount = int(guild_id or 0), int(user_id or 0), int(amount or 0)
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        old = int((cur.fetchone() or {"balance": 0})["balance"] or 0)
-        new = old + amount
-        if new < 0 and not allow_negative:
-            conn.rollback()
-            conn.close()
-            return False, old
-        new = max(0, new)
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
-        nm_v5_eco_audit(cur, gid, uid, amount, new, source_type, details, actor_id)
-        conn.commit()
-        conn.close()
-    try:
-        if "nm_v5_top_write_balance" in globals():
-            nm_v5_top_write_balance(gid, uid, new)
-    except Exception:
-        pass
-    return True, int(new)
-
-def nm_v5_eco_debit(guild_id, user_id, amount, source_type="debit", details="", actor_id=0):
-    amount = abs(int(amount or 0))
-    return nm_v5_eco_change_balance(guild_id, user_id, -amount, source_type, details, actor_id)
-
-def nm_v5_eco_credit(guild_id, user_id, amount, source_type="credit", details="", actor_id=0):
-    amount = int(amount or 0)
-    return nm_v5_eco_change_balance(guild_id, user_id, amount, source_type, details, actor_id)
-
-def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, details="transfer"):
-    nm_v5_eco_init()
-    gid, src, dst, amount = int(guild_id or 0), int(from_user_id or 0), int(to_user_id or 0), abs(int(amount or 0))
-    if amount <= 0 or src == dst:
-        return False, nm_v5_eco_get_balance(gid, src), nm_v5_eco_get_balance(gid, dst)
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        for uid in (src, dst):
-            cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, src))
-        src_bal = int(cur.fetchone()["balance"] or 0)
-        if src_bal < amount:
-            conn.rollback()
-            conn.close()
-            return False, src_bal, nm_v5_eco_get_balance(gid, dst)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, dst))
-        dst_bal = int(cur.fetchone()["balance"] or 0)
-        new_src = src_bal - amount
-        new_dst = dst_bal + amount
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_src, gid, src))
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_dst, gid, dst))
-        nm_v5_eco_audit(cur, gid, src, -amount, new_src, "transfer_out", details, dst)
-        nm_v5_eco_audit(cur, gid, dst, amount, new_dst, "transfer_in", details, src)
-        conn.commit()
-        conn.close()
-    return True, new_src, new_dst
-
-def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome, multiplier=2.0, details=""):
-    """
-    outcome:
-      win  -> debit bet, credit bet*multiplier
-      lose -> debit bet only
-      push -> debit bet, credit bet
-    Returns dict.
-    """
-    gid, uid, bet = int(guild_id or 0), int(user_id or 0), abs(int(bet or 0))
-    if bet <= 0:
-        return {"ok": False, "reason": "invalid_bet", "balance": nm_v5_eco_get_balance(gid, uid), "delta": 0}
-
-    ok, bal_after_debit = nm_v5_eco_debit(gid, uid, bet, f"casino_{game}_bet", f"{game} bet locked before result")
-    if not ok:
-        return {"ok": False, "reason": "insufficient", "balance": bal_after_debit, "delta": 0}
-
-    if outcome == "win":
-        payout = int(round(bet * float(multiplier)))
-        ok2, bal = nm_v5_eco_credit(gid, uid, payout, f"casino_{game}_win", details or f"{game} win payout")
-        return {"ok": True, "outcome": "win", "balance": bal, "delta": payout - bet, "payout": payout}
-    if outcome == "push":
-        ok2, bal = nm_v5_eco_credit(gid, uid, bet, f"casino_{game}_push", details or f"{game} push refund")
-        return {"ok": True, "outcome": "push", "balance": bal, "delta": 0, "payout": bet}
-
-    return {"ok": True, "outcome": "lose", "balance": bal_after_debit, "delta": -bet, "payout": 0}
 
 # Public money API overrides
-def v3_get_balance(guild_id, user_id):
-    return nm_v5_eco_get_balance(guild_id, user_id)
 
-def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
-    ok, bal = nm_v5_eco_credit(guild_id, user_id, amount, source_type, details, actor_id)
-    return bal
 
-def v3_remove_money(guild_id, user_id, amount, source_type="removed", details="", actor_id=0):
-    return nm_v5_eco_debit(guild_id, user_id, amount, source_type, details, actor_id)
 
-def get_balance(user_id, guild_id=None):
-    return nm_v5_eco_get_balance(guild_id or nm_v5_eco_gid(), user_id)
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    ok, bal = nm_v5_eco_credit(guild_id or nm_v5_eco_gid(), user_id, amount, source_type, details, admin_id)
-    return bal
 
-def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_eco_debit(guild_id or nm_v5_eco_gid(), user_id, amount, source_type, details, admin_id)
 
 def nm_legacy_balance(guild_id, user_id):
     return nm_v5_eco_get_balance(guild_id, user_id)
@@ -24185,25 +22133,6 @@ def nm_v5_parse_bet(amount):
     except Exception:
         return None
 
-async def nm_v5_bet_or_reply(ctx, amount):
-    if not getattr(ctx, "guild", None):
-        return None
-    try:
-        if "require_gambling_channel" in globals():
-            ok = await require_gambling_channel(ctx)
-            if not ok:
-                return None
-    except Exception:
-        pass
-    bet = nm_v5_parse_bet(amount)
-    if bet is None or bet <= 0:
-        await ctx.send("❌ مبلغ الرهان غير صحيح. مثال: `!حظ 500` أو `!bj 10k`")
-        return None
-    bal = nm_v5_eco_get_balance(ctx.guild.id, ctx.author.id)
-    if bal < bet:
-        await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(bal, ctx.guild.id)}")
-        return None
-    return int(bet)
 
 def nm_v5_game_embed(member, guild_id, title, status, color, bet, delta, balance, details=""):
     embed = discord.Embed(title=title, description=status, color=color, timestamp=discord.utils.utcnow())
@@ -24219,61 +22148,9 @@ def nm_v5_game_embed(member, guild_id, title, status, color, bet, delta, balance
     embed.set_footer(text=f"{BOT_BRAND} • Safe Economy Ledger")
     return embed
 
-async def nm_v5_luck_cmd(ctx, amount=None):
-    bet = await nm_v5_bet_or_reply(ctx, amount)
-    if bet is None:
-        return
-    gid = int(ctx.guild.id)
-    win = random.random() < 0.45
-    result = nm_v5_eco_game_result(gid, ctx.author.id, "luck", bet, "win" if win else "lose", 2.0, "Luck game")
-    if not result["ok"]:
-        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
-    embed = nm_v5_game_embed(ctx.author, gid, "🍀 حظ", "✅ فزت!" if win else "❌ خسرت.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"])
-    await ctx.send(embed=embed)
 
-async def nm_v5_double_cmd(ctx, amount=None):
-    bet = await nm_v5_bet_or_reply(ctx, amount)
-    if bet is None:
-        return
-    gid = int(ctx.guild.id)
-    win = random.random() < 0.48
-    result = nm_v5_eco_game_result(gid, ctx.author.id, "double", bet, "win" if win else "lose", 2.0, "Double game")
-    if not result["ok"]:
-        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
-    embed = nm_v5_game_embed(ctx.author, gid, "🎲 دبل", "✅ دبلت الرهان!" if win else "❌ راحت عليك.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"])
-    await ctx.send(embed=embed)
 
-async def nm_v5_flip_cmd(ctx, amount=None, choice=None):
-    bet = await nm_v5_bet_or_reply(ctx, amount)
-    if bet is None:
-        return
-    gid = int(ctx.guild.id)
-    win = random.random() < 0.50
-    face = random.choice(["وجه", "كتابة"])
-    result = nm_v5_eco_game_result(gid, ctx.author.id, "flip", bet, "win" if win else "lose", 2.0, "Coin flip game")
-    if not result["ok"]:
-        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
-    embed = nm_v5_game_embed(ctx.author, gid, "🪙 وجه", "✅ فزت!" if win else "❌ خسرت.", NM_V5_COLOR_GREEN if win else NM_V5_COLOR_RED, bet, result["delta"], result["balance"], f"طلعت: **{face}**")
-    await ctx.send(embed=embed)
 
-async def nm_v5_slot_cmd(ctx, amount=None):
-    bet = await nm_v5_bet_or_reply(ctx, amount)
-    if bet is None:
-        return
-    gid = int(ctx.guild.id)
-    icons = ["🍒", "🍋", "🍇", "💎", "7️⃣"]
-    roll = [random.choice(icons), random.choice(icons), random.choice(icons)]
-    if roll[0] == roll[1] == roll[2]:
-        outcome, mult, status, color = "win", 5.0, "🔥 جاكبوت! ثلاث رموز.", NM_V5_COLOR_GREEN
-    elif len(set(roll)) == 2:
-        outcome, mult, status, color = "win", 1.5, "✅ رمزين متشابهين، فزت ربح صغير.", NM_V5_COLOR_GREEN
-    else:
-        outcome, mult, status, color = "lose", 0.0, "❌ ولا رمز، خسرت.", NM_V5_COLOR_RED
-    result = nm_v5_eco_game_result(gid, ctx.author.id, "slot", bet, outcome, mult, "Slot machine")
-    if not result["ok"]:
-        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(result['balance'], gid)}")
-    embed = nm_v5_game_embed(ctx.author, gid, "🎰 سلوت", status, color, bet, result["delta"], result["balance"], " | ".join(roll))
-    await ctx.send(embed=embed)
 
 # Blackjack safe implementation
 def nm_v5_card():
@@ -24364,28 +22241,6 @@ class NMV5BlackjackSafeView(discord.ui.View):
         ok, bal = nm_v5_eco_credit(self.gid, self.uid, self.bet, "casino_blackjack_push", "Blackjack push refund")
         return await self.finish(interaction, "🟨 **PUSH** — تعادل ورجع الرهان.", NM_V5_COLOR_YELLOW, 0, bal)
 
-async def nm_v5_blackjack_cmd(ctx, amount=None):
-    bet = await nm_v5_bet_or_reply(ctx, amount)
-    if bet is None:
-        return
-    gid = int(ctx.guild.id)
-    ok, bal = nm_v5_eco_debit(gid, ctx.author.id, bet, "casino_blackjack_bet", "Blackjack bet locked before cards")
-    if not ok:
-        return await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {nm_v5_eco_money(bal, gid)}")
-    player, dealer = [nm_v5_card(), nm_v5_card()], [nm_v5_card(), nm_v5_card()]
-    if nm_v5_hand_value(player) == 21 or nm_v5_hand_value(dealer) == 21:
-        p21, d21 = nm_v5_hand_value(player) == 21, nm_v5_hand_value(dealer) == 21
-        if p21 and d21:
-            ok, bal = nm_v5_eco_credit(gid, ctx.author.id, bet, "casino_blackjack_push", "Natural push refund")
-            return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🟨 **PUSH** — الاثنين بلاك جاك.", NM_V5_COLOR_YELLOW, True, 0, bal, False))
-        if p21:
-            profit = int(bet * 1.5)
-            ok, bal = nm_v5_eco_credit(gid, ctx.author.id, bet + profit, "casino_blackjack_natural", "Natural blackjack payout")
-            return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🔥 **BLACKJACK** — فزت.", NM_V5_COLOR_GREEN, True, profit, bal, False))
-        bal = nm_v5_eco_get_balance(gid, ctx.author.id)
-        return await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "❌ **DEALER BLACKJACK** — خسرت.", NM_V5_COLOR_RED, True, -bet, bal, False))
-    view = NMV5BlackjackSafeView(gid, ctx.author.id, bet, player, dealer)
-    await ctx.send(embed=nm_v5_blackjack_embed(ctx.author, gid, bet, player, dealer, "🎴 الرهان انخصم مسبقًا. اختر Hit أو Stand.", NM_V5_COLOR_PURPLE, False, None, bal, True), view=view)
 
 # Override all known casino prefix commands without duplicate registration
 for _name, _fn in {
@@ -24424,43 +22279,10 @@ def nm_v5_eco_replace_coin_html(response):
     return response
 
 # Top money unified from ledger
-def nm_v5_eco_top_money(guild_id=None, limit=10):
-    nm_v5_eco_init()
-    gid = int(guild_id or nm_v5_eco_gid())
-    conn = nm_v5_eco_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT user_id, MAX(balance) AS balance
-        FROM guild_economy
-        WHERE guild_id IN (?,0)
-        GROUP BY user_id
-        HAVING MAX(balance) > 0
-        ORDER BY MAX(balance) DESC
-        LIMIT ?
-    """, (gid, int(limit)))
-    rows = [(int(r["user_id"]), int(r["balance"] or 0)) for r in cur.fetchall()]
-    conn.close()
-    return rows
 
-def v3_get_top_money(guild_id, limit=10):
-    return nm_v5_eco_top_money(guild_id, limit)
 
-def get_top_money(limit=10, guild_id=None):
-    return nm_v5_eco_top_money(guild_id, limit)
 
-def dashboard_money_rows(limit=10):
-    gid = nm_v5_eco_gid()
-    out = []
-    for i, (uid, bal) in enumerate(nm_v5_eco_top_money(gid, limit), 1):
-        try:
-            name = dashboard_member_name(uid)
-        except Exception:
-            name = f"User {uid}"
-        out.append({"rank": i, "user_id": uid, "name": name, "balance": bal})
-    return out
 
-def dashboard_total_coins():
-    return sum(b for _, b in nm_v5_eco_top_money(nm_v5_eco_gid(), 100000))
 
 async def nm_legacy_top(message):
     gid = int(message.guild.id)
@@ -24651,49 +22473,8 @@ def nm_v5_economy_hardening_boot():
 NM_V5_STRICT_ECO_PATCH_ACTIVE = True
 
 
-def nm_v5_safe_int(value, default=0):
-    try:
-        return int(value or default)
-    except Exception:
-        return int(default)
 
 
-def nm_v5_final_gid(source=None, fallback=None):
-    """أفضل محاولة لمعرفة السيرفر الحالي بدون ربط البوت بسيرفر واحد."""
-    try:
-        if source is not None:
-            if hasattr(source, "guild") and getattr(source, "guild", None):
-                return int(source.guild.id)
-            if hasattr(source, "message") and getattr(source.message, "guild", None):
-                return int(source.message.guild.id)
-            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
-                return int(source.guild_id)
-    except Exception:
-        pass
-    try:
-        if "nm_v5_find_runtime_guild_id" in globals():
-            gid = int(nm_v5_find_runtime_guild_id(fallback))
-            if gid:
-                return gid
-    except Exception:
-        pass
-    try:
-        gid = int(
-            request.args.get("guild_id")
-            or request.form.get("guild_id")
-            or session.get("selected_guild_id")
-            or session.get("dashboard_active_guild_id")
-            or fallback
-            or 0
-        )
-        if gid:
-            return gid
-    except Exception:
-        pass
-    try:
-        return int(fallback or globals().get("GUILD_ID", 0) or 0)
-    except Exception:
-        return 0
 
 
 def nm_v5_coin_file_path_final():
@@ -24942,154 +22723,33 @@ def nm_v5_eco_ensure_user(cur, guild_id, user_id):
     cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance,last_daily,last_boost_weekly) VALUES (?,?,0,0,0)", (int(guild_id), int(user_id)))
 
 
-def nm_v5_eco_get_balance(guild_id, user_id):
-    """Strict per-guild balance. لا ينسخ أعلى رصيد من سيرفر ثاني."""
-    nm_v5_eco_init()
-    gid, uid = int(guild_id or 0), int(user_id or 0)
-    if gid <= 0 or uid <= 0:
-        return 0
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        nm_v5_eco_ensure_user(cur, gid, uid)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        row = cur.fetchone()
-        bal = max(0, int(row["balance"] or 0)) if row else 0
-        if row and int(row["balance"] or 0) < 0:
-            cur.execute("UPDATE guild_economy SET balance=0 WHERE guild_id=? AND user_id=?", (gid, uid))
-            bal = 0
-        conn.commit()
-        conn.close()
-        return bal
 
 
-def nm_v5_eco_set_balance(guild_id, user_id, new_balance, source_type="set_balance", details="", actor_id=0):
-    nm_v5_eco_init()
-    gid, uid = int(guild_id or 0), int(user_id or 0)
-    new_balance = max(0, int(new_balance or 0))
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        nm_v5_eco_ensure_user(cur, gid, uid)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        old = int((cur.fetchone() or {"balance": 0})["balance"] or 0)
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_balance, gid, uid))
-        nm_v5_eco_audit(cur, gid, uid, new_balance - old, new_balance, source_type, details, actor_id)
-        conn.commit()
-        conn.close()
-    return new_balance
 
 
-def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="change", details="", actor_id=0, allow_negative=False):
-    nm_v5_eco_init()
-    gid, uid, amount = int(guild_id or 0), int(user_id or 0), int(amount or 0)
-    if gid <= 0 or uid <= 0:
-        return False, 0
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        nm_v5_eco_ensure_user(cur, gid, uid)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        old = max(0, int((cur.fetchone() or {"balance": 0})["balance"] or 0))
-        new = old + amount
-        if new < 0 and not allow_negative:
-            conn.rollback()
-            conn.close()
-            return False, old
-        new = max(0, new)
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new, gid, uid))
-        nm_v5_eco_audit(cur, gid, uid, amount, new, source_type, details, actor_id)
-        conn.commit()
-        conn.close()
-    return True, int(new)
 
 
-def nm_v5_eco_debit(guild_id, user_id, amount, source_type="debit", details="", actor_id=0):
-    return nm_v5_eco_change_balance(guild_id, user_id, -abs(int(amount or 0)), source_type, details, actor_id)
 
 
-def nm_v5_eco_credit(guild_id, user_id, amount, source_type="credit", details="", actor_id=0):
-    return nm_v5_eco_change_balance(guild_id, user_id, abs(int(amount or 0)), source_type, details, actor_id)
 
 
-def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, details="transfer", actor_id=0):
-    nm_v5_eco_init()
-    gid, src, dst, amount = int(guild_id or 0), int(from_user_id or 0), int(to_user_id or 0), abs(int(amount or 0))
-    if gid <= 0 or src <= 0 or dst <= 0 or src == dst or amount <= 0:
-        return False, nm_v5_eco_get_balance(gid, src), nm_v5_eco_get_balance(gid, dst)
-    with NM_V5_ECO_LOCK:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("BEGIN IMMEDIATE")
-        nm_v5_eco_ensure_user(cur, gid, src)
-        nm_v5_eco_ensure_user(cur, gid, dst)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, src))
-        src_bal = max(0, int(cur.fetchone()["balance"] or 0))
-        if src_bal < amount:
-            conn.rollback()
-            conn.close()
-            return False, src_bal, nm_v5_eco_get_balance(gid, dst)
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, dst))
-        dst_bal = max(0, int(cur.fetchone()["balance"] or 0))
-        new_src, new_dst = src_bal - amount, dst_bal + amount
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_src, gid, src))
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (new_dst, gid, dst))
-        nm_v5_eco_audit(cur, gid, src, -amount, new_src, "transfer_out", details, actor_id or dst)
-        nm_v5_eco_audit(cur, gid, dst, amount, new_dst, "transfer_in", details, actor_id or src)
-        conn.commit()
-        conn.close()
-    return True, new_src, new_dst
 
 
-def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome, multiplier=2.0, details=""):
-    gid, uid, bet = int(guild_id or 0), int(user_id or 0), abs(int(bet or 0))
-    if bet <= 0:
-        return {"ok": False, "reason": "invalid_bet", "balance": nm_v5_eco_get_balance(gid, uid), "delta": 0, "payout": 0}
-    ok, bal_after_debit = nm_v5_eco_debit(gid, uid, bet, f"casino_{game}_bet", details or f"{game} bet locked before result")
-    if not ok:
-        return {"ok": False, "reason": "insufficient", "balance": bal_after_debit, "delta": 0, "payout": 0}
-    if str(outcome).lower() == "win":
-        payout = max(0, int(round(bet * float(multiplier or 0))))
-        ok2, bal = nm_v5_eco_credit(gid, uid, payout, f"casino_{game}_win", details or f"{game} win payout")
-        return {"ok": True, "outcome": "win", "balance": bal, "delta": payout - bet, "payout": payout}
-    if str(outcome).lower() in ("push", "draw", "tie"):
-        ok2, bal = nm_v5_eco_credit(gid, uid, bet, f"casino_{game}_push", details or f"{game} push refund")
-        return {"ok": True, "outcome": "push", "balance": bal, "delta": 0, "payout": bet}
-    return {"ok": True, "outcome": "lose", "balance": bal_after_debit, "delta": -bet, "payout": 0}
 
 
 # Public API overrides used by old Discord commands, slash commands, and dashboard.
-def v3_get_balance(guild_id, user_id):
-    return nm_v5_eco_get_balance(guild_id, user_id)
 
 
-def v3_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
-    ok, bal = nm_v5_eco_credit(guild_id, user_id, amount, source_type, details, actor_id)
-    return bal
 
 
-def v3_remove_money(guild_id, user_id, amount, source_type="removed", details="", actor_id=0):
-    return nm_v5_eco_debit(guild_id, user_id, amount, source_type, details, actor_id)
 
 
-def get_balance(user_id, guild_id=None):
-    return nm_v5_eco_get_balance(nm_v5_final_gid(fallback=guild_id), user_id)
 
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    ok, bal = nm_v5_eco_credit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
-    return bal
 
 
-def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_eco_debit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
 
 
-def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_eco_set_balance(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
 
 
 def nm_v5_eco_top_money(guild_id=None, limit=10):
@@ -25113,8 +22773,6 @@ def v3_get_top_money(guild_id, limit=10):
     return nm_v5_eco_top_money(guild_id, limit)
 
 
-def get_top_money(limit=10, guild_id=None):
-    return nm_v5_eco_top_money(guild_id, limit)
 
 
 def dashboard_money_rows(limit=10):
@@ -25129,48 +22787,8 @@ def dashboard_money_rows(limit=10):
     return out
 
 
-def dashboard_total_coins():
-    gid = nm_v5_final_gid()
-    try:
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute("SELECT COALESCE(SUM(balance),0) AS total FROM guild_economy WHERE guild_id=?", (int(gid),))
-        total = int(cur.fetchone()["total"] or 0)
-        conn.close()
-        return total
-    except Exception:
-        return 0
 
 
-async def nm_v5_bet_or_reply(ctx, amount):
-    if not getattr(ctx, "guild", None):
-        return None
-    try:
-        NM_V5_ACTIVE_GUILD_ID.set(int(ctx.guild.id))
-    except Exception:
-        pass
-    try:
-        if "require_gambling_channel" in globals():
-            ok = await require_gambling_channel(ctx)
-            if not ok:
-                return None
-    except Exception:
-        pass
-    bet = nm_v5_parse_bet(amount) if "nm_v5_parse_bet" in globals() else None
-    if bet is None:
-        try:
-            bet = int(str(amount).replace(",", ""))
-        except Exception:
-            bet = None
-    if bet is None or int(bet) <= 0:
-        await ctx.send("❌ مبلغ الرهان غير صحيح. مثال: `!حظ 500` أو `!bj 10k`")
-        return None
-    bet = int(bet)
-    bal = nm_v5_eco_get_balance(ctx.guild.id, ctx.author.id)
-    if bal < bet:
-        await ctx.send(f"❌ رصيدك ما يكفي. محفظتك: {coin_line(bal, ctx.guild.id)}")
-        return None
-    return bet
 
 
 async def nm_v5_luck_cmd(ctx, amount=None):
@@ -25434,37 +23052,8 @@ def nm_v5_economy_strict_status():
 # These overrides must stay before keep_alive()/bot.run().
 # =====================================================================
 
-def get_money_rank(user_id, guild_id=None):
-    try:
-        gid = nm_v5_final_gid(fallback=guild_id)
-        uid = nm_v5_safe_int(user_id, 0)
-        if gid <= 0 or uid <= 0:
-            return None
-        bal = nm_v5_eco_get_balance(gid, uid)
-        conn = nm_v5_eco_conn()
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT COUNT(*) + 1 AS rank
-            FROM guild_economy
-            WHERE guild_id = ? AND balance > ?
-            """,
-            (int(gid), int(bal)),
-        )
-        row = cur.fetchone()
-        conn.close()
-        return int((row["rank"] if hasattr(row, "keys") else row[0]) or 1)
-    except Exception as e:
-        try: nm_v5_log_runtime_error("get_money_rank_extra_fix", e)
-        except Exception: pass
-        return None
 
 
-def economy_status_text(user_id, guild_id=None):
-    gid = nm_v5_final_gid(fallback=guild_id)
-    balance = nm_v5_eco_get_balance(gid, user_id) if gid else 0
-    rank = get_money_rank(user_id, gid) if gid else None
-    return balance, (f"#{rank}" if rank else "غير معروف")
 
 
 def get_booster_last_claim(user_id, guild_id=None):
@@ -25905,29 +23494,16 @@ def nm_stable_top_balances(gid, limit=10):
     return nm_v5_eco_top_money(nm_v5_safe_int(gid, 0), nm_v5_safe_int(limit, 10))
 
 
-def v3_get_balance(guild_id, user_id):
-    return nm_v5_strict_balance(guild_id, user_id)
 
 
-def get_balance(user_id, guild_id=None):
-    return nm_v5_strict_balance(nm_v5_final_gid(fallback=guild_id), user_id)
 
 
-def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    ok, bal = nm_v5_eco_credit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
-    return bal
 
 
-def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_eco_debit(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
 
 
-def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    return nm_v5_eco_set_balance(nm_v5_final_gid(fallback=guild_id), user_id, amount, source_type, details, admin_id)
 
 
-def get_top_money(limit=10, guild_id=None):
-    return nm_v5_eco_top_money(nm_v5_final_gid(fallback=guild_id), limit)
 
 
 def dashboard_total_coins():
