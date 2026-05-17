@@ -8797,11 +8797,13 @@ async def on_ready():
         create_default_guild_settings(live_guild)
 
     # =========================
-    # SLASH COMMAND SYNC
+    # SLASH COMMAND SYNC - CLEAN MODE
     # =========================
-    # Global commands can take time to appear in Discord.
-    # For faster rollout, we also sync a guild copy to every server the bot is in.
-    # This makes the / commands show almost immediately after redeploy.
+    # Important:
+    # Older builds copied global slash commands into every guild.
+    # Discord then showed two copies of the same command: one global + one guild command.
+    # This clean mode keeps ONE source only: global commands.
+    # It also deletes old guild-specific copies so the command menu stops duplicating.
     try:
         global_synced = await bot.tree.sync()
         print(f"✅ Slash commands synced globally: {len(global_synced)}")
@@ -8811,12 +8813,12 @@ async def on_ready():
     try:
         for live_guild in bot.guilds:
             guild_obj = discord.Object(id=live_guild.id)
-            bot.tree.copy_global_to(guild=guild_obj)
-            guild_synced = await bot.tree.sync(guild=guild_obj)
-            print(f"✅ Slash commands synced to guild {live_guild.name} ({live_guild.id}): {len(guild_synced)}")
+            bot.tree.clear_commands(guild=guild_obj)
+            cleared = await bot.tree.sync(guild=guild_obj)
+            print(f"🧹 Cleared guild-specific duplicate slash commands in {live_guild.name} ({live_guild.id}). Remaining guild commands: {len(cleared)}")
             await asyncio.sleep(1)
     except Exception as e:
-        print(f"❌ Guild slash sync error: {type(e).__name__}: {e}")
+        print(f"❌ Guild duplicate cleanup error: {type(e).__name__}: {e}")
 
     if guild:
         await ensure_custom_roles(guild)
@@ -12351,6 +12353,29 @@ async def slash_setup_status(interaction: discord.Interaction):
     embed.set_footer(text=f"{BOT_BRAND} • Global V3")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    """Make slash command errors visible instead of Discord showing 'The application did not respond'."""
+    try:
+        original_error = getattr(error, "original", error)
+        error_text = f"{type(original_error).__name__}: {str(original_error)[:900]}"
+        print(f"Slash Command Error: {error_text}")
+
+        message = (
+            "❌ صار خطأ داخل أمر السلاش.\n"
+            "انسخ آخر سطر من Railway Logs إذا تكرر الخطأ.\n"
+            f"```txt\n{clean_text(error_text, 900)}\n```"
+        )
+
+        if not interaction.response.is_done():
+            await interaction.response.send_message(message, ephemeral=True)
+        else:
+            await interaction.followup.send(message, ephemeral=True)
+    except Exception as e:
+        print(f"Slash error handler failed: {type(e).__name__}: {e}")
+
+
 @bot.event
 async def on_command_completion(ctx):
     try:
@@ -12403,10 +12428,15 @@ async def sync_slash_commands_command(ctx):
         return
 
     try:
+        global_synced = await bot.tree.sync()
         guild_obj = discord.Object(id=ctx.guild.id)
-        bot.tree.copy_global_to(guild=guild_obj)
+        bot.tree.clear_commands(guild=guild_obj)
         guild_synced = await bot.tree.sync(guild=guild_obj)
-        await ctx.send(f"✅ تم تحديث أوامر / لهذا السيرفر: `{len(guild_synced)}` أمر.")
+        await ctx.send(
+            f"✅ تم تحديث أوامر / وتنظيف التكرار.\n"
+            f"Global commands: `{len(global_synced)}`\n"
+            f"Guild duplicate commands cleared: `{len(guild_synced)}`"
+        )
     except Exception as e:
         await ctx.send(f"❌ فشل تحديث أوامر السلاش: `{type(e).__name__}: {str(e)[:300]}`")
 
