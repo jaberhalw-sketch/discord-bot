@@ -492,6 +492,57 @@ bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 
 # =========================
+# NM V8 SAFE STARTUP SHIMS - FINAL
+# These names are required by older dashboard/on_ready routes.
+# They do not restore old economy/casino logic; they only prevent legacy pages from crashing.
+# =========================
+def dashboard_require_admin():
+    try:
+        if 'dashboard_require_login' in globals():
+            denied = dashboard_require_login()
+            if denied:
+                return denied
+        return None
+    except Exception:
+        return None
+
+def dashboard_require_owner():
+    try:
+        return dashboard_require_admin()
+    except Exception:
+        return None
+
+def nm_v5_economy_hardening_boot():
+    try:
+        if 'NMCore' in globals():
+            NMCore.init()
+        print('✅ NM V8 safe startup: legacy nm_v5_economy_hardening_boot bridged')
+    except Exception as e:
+        print(f'⚠️ NM V8 safe startup boot warning: {e}')
+
+def seed_real_estate_properties(guild_id=None):
+    try:
+        gid = int(guild_id or 0)
+        if not gid:
+            try:
+                gid = int(request.args.get('guild_id') or session.get('dashboard_active_guild_id') or 0)
+            except Exception:
+                gid = 0
+        if not gid:
+            try:
+                guilds = list(getattr(bot, 'guilds', []) or [])
+                gid = int(guilds[0].id) if guilds else 0
+            except Exception:
+                gid = 0
+        if gid and 'NMCore' in globals():
+            NMCore.seed_properties(gid)
+        return None
+    except Exception as e:
+        print(f'⚠️ NM V8 safe startup property seed warning: {e}')
+        return None
+
+
+# =========================
 # NM V8 BOOT COMPATIBILITY FALLBACKS
 # These are not new economy/casino systems. They are safety wrappers for old
 # dashboard/on_ready code that still calls names removed during the V8 unification.
@@ -22292,6 +22343,36 @@ try:
 except Exception as e:
     try: print(f"❌ NM V8 unified core failed: {type(e).__name__}: {e}")
     except Exception: pass
+
+
+@app.route('/dashboard/v8-safe-startup-status')
+def nm_v8_safe_startup_status():
+    try:
+        gid = 0
+        try:
+            gid = int(request.args.get('guild_id') or 0)
+        except Exception:
+            gid = 0
+        checks = {
+            'dashboard_require_admin': 'dashboard_require_admin' in globals(),
+            'dashboard_require_owner': 'dashboard_require_owner' in globals(),
+            'seed_real_estate_properties': 'seed_real_estate_properties' in globals(),
+            'nm_v5_economy_hardening_boot': 'nm_v5_economy_hardening_boot' in globals(),
+            'NMCore': 'NMCore' in globals(),
+        }
+        rows = ''.join(f"<tr><td>{k}</td><td>{'✅ OK' if v else '❌ Missing'}</td></tr>" for k,v in checks.items())
+        return f"""
+        <div style='font-family:Arial;background:#0b1020;color:#eef;padding:28px'>
+          <h1>NM V8 Safe Startup Status</h1>
+          <p>This confirms legacy dashboard/on_ready names are bridged safely.</p>
+          <table border='1' cellpadding='10' cellspacing='0' style='border-collapse:collapse;background:#111827'>
+            <tr><th>Check</th><th>Status</th></tr>{rows}
+          </table>
+          <p>Guild: {gid}</p>
+        </div>
+        """
+    except Exception as e:
+        return f"NM V8 safe startup status error: {e}", 500
 
 keep_alive()
 
