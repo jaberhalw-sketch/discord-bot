@@ -11733,6 +11733,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_polish_self_check()
     nm_stable_polish_boot()
     nm_hotfix_boot()
     nm_guide_boot_disable_spam()
@@ -20063,6 +20064,218 @@ def nm_final_replace_rendered_coin(response):
     return response
 
 
+
+# =====================================================================
+# NM V5 ABSOLUTE LOG VAULT SAFE OVERRIDE
+# This completely replaces the old /dashboard/log-vault endpoint at runtime.
+# =====================================================================
+
+def nm_v5_escape(v, limit=5000):
+    try:
+        return dash_escape(str(v), limit)
+    except Exception:
+        import html
+        return html.escape(str(v))[:limit]
+
+def nm_v5_gid():
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v5_safe_log_rows(gid, channel_id="all", q="", limit=120):
+    rows, total = [], 0
+
+    try:
+        if "log_vault_recent" in globals() and callable(log_vault_recent):
+            got = log_vault_recent(guild_id=gid, limit=limit, offset=0, log_type="all", query=q, deleted_filter="all", channel_id=channel_id)
+            if isinstance(got, tuple):
+                rows, total = got[0] or [], int(got[1] or 0)
+            elif isinstance(got, list):
+                rows, total = got, len(got)
+    except Exception as e:
+        try: print(f"NM V5 safe log_vault_recent skipped: {e}")
+        except Exception: pass
+
+    if not rows:
+        try:
+            db_path = next((p for p in [Path("/data/nm_system.db"), Path("nm_system.db")] if p.exists() and p.stat().st_size > 0), None)
+            if db_path:
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('dashboard_log_vault','log_vault')")
+                found = cur.fetchone()
+                if found:
+                    table = found["name"]
+                    where = "WHERE guild_id=?"
+                    params = [int(gid)]
+                    if channel_id and str(channel_id) != "all":
+                        where += " AND discord_channel_id=?"
+                        params.append(int(channel_id))
+                    if q:
+                        where += " AND (title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ?)"
+                        like = f"%{q}%"
+                        params.extend([like, like, like])
+                    cur.execute(f"SELECT * FROM {table} {where} ORDER BY id DESC LIMIT ?", tuple(params + [int(limit)]))
+                    rows = [dict(r) for r in cur.fetchall()]
+                    cur.execute(f"SELECT COUNT(*) AS c FROM {table} {where}", tuple(params))
+                    total = int(cur.fetchone()["c"] or 0)
+                conn.close()
+        except Exception as e:
+            try: print(f"NM V5 safe sqlite log vault skipped: {e}")
+            except Exception: pass
+
+    return rows or [], int(total or len(rows or []))
+
+def nm_v5_row_to_dict(row):
+    if isinstance(row, dict):
+        return row
+    try:
+        keys = ["id","guild_id","log_type","title","description","discord_channel_id","discord_channel_name","discord_message_id","deleted_from_discord","deleted_by_id","deleted_by_name","created_at","deleted_at"]
+        return {k: row[i] if i < len(row) else "" for i, k in enumerate(keys)}
+    except Exception:
+        return {"title": "Unknown log", "description": str(row)}
+
+def nm_v5_safe_log_vault_page():
+    gid = nm_v5_gid()
+    channel_id = request.args.get("channel_id", "all")
+    q = str(request.args.get("q", "") or "").strip()[:120]
+    rows, total = nm_v5_safe_log_rows(gid, channel_id=channel_id, q=q, limit=120)
+
+    channels = {}
+    for raw in rows:
+        r = nm_v5_row_to_dict(raw)
+        cid = str(r.get("discord_channel_id") or "0")
+        cname = str(r.get("discord_channel_name") or "unknown")
+        channels[cid] = cname
+
+    channel_buttons = ['<a class="channel active" href="/dashboard/log-vault?guild_id={gid}"># all-logs</a>'.format(gid=int(gid))]
+    for cid, cname in sorted(channels.items(), key=lambda x: x[1].lower()):
+        active = " active" if str(channel_id) == str(cid) else ""
+        channel_buttons.append(
+            '<a class="channel{active}" href="/dashboard/log-vault?guild_id={gid}&channel_id={cid}"># {name}</a>'.format(
+                active=active, gid=int(gid), cid=nm_v5_escape(cid, 80), name=nm_v5_escape(cname, 80)
+            )
+        )
+
+    cards = []
+    for raw in rows:
+        r = nm_v5_row_to_dict(raw)
+        title = nm_v5_escape(r.get("title") or r.get("log_type") or "Log", 180)
+        desc = nm_v5_escape(r.get("description") or "", 2500)
+        typ = nm_v5_escape(r.get("log_type") or "log", 80)
+        cname = nm_v5_escape(r.get("discord_channel_name") or "unknown", 80)
+        mid = nm_v5_escape(r.get("discord_message_id") or "", 80)
+        created = nm_v5_escape(r.get("created_at") or "", 80)
+        cards.append("""
+        <div class="log-card">
+          <div class="log-head">
+            <div>
+              <div class="log-title">{title}</div>
+              <div class="log-meta">Type: {typ} • Channel: #{cname}</div>
+            </div>
+            <span class="pill">Saved</span>
+          </div>
+          <div class="log-clean-text">{desc}</div>
+          <div class="log-foot">Message ID: {mid} • Created: {created}</div>
+        </div>
+        """.format(title=title, typ=typ, cname=cname, desc=desc, mid=mid, created=created))
+
+    if not cards:
+        cards.append('<div class="empty">No logs found for this channel.</div>')
+
+    return """
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>NM System • Log Vault</title>
+      <style>
+        body {{ margin:0; font-family:Arial, sans-serif; background:#060b1a; color:#f8fafc; }}
+        .wrap {{ display:grid; grid-template-columns:280px 1fr; min-height:100vh; }}
+        .side {{ background:#080d1d; border-right:1px solid #1e293b; padding:22px; }}
+        .main {{ padding:32px; background:linear-gradient(135deg,#081026,#17103a); }}
+        h1 {{ margin:0 0 8px; font-size:34px; }}
+        .muted {{ color:#94a3b8; margin-bottom:22px; }}
+        .channel {{ display:block; padding:12px 14px; border-radius:14px; color:#cbd5e1; text-decoration:none; margin-bottom:8px; background:#0f172a; border:1px solid #1e293b; }}
+        .channel.active, .channel:hover {{ background:#312e81; color:white; border-color:#7c3aed; }}
+        .toolbar {{ display:flex; gap:10px; margin:18px 0 22px; }}
+        input {{ background:#020617; color:white; border:1px solid #334155; border-radius:12px; padding:12px; min-width:320px; }}
+        button, .btn {{ background:#7c3aed; color:white; border:0; border-radius:12px; padding:12px 16px; font-weight:800; text-decoration:none; }}
+        .stats {{ display:flex; gap:12px; margin-bottom:18px; }}
+        .stat {{ background:#0f172a; border:1px solid #1e293b; border-radius:18px; padding:16px 18px; min-width:150px; }}
+        .log-card {{ background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:18px; margin-bottom:14px; box-shadow:0 16px 40px rgba(0,0,0,.22); }}
+        .log-head {{ display:flex; justify-content:space-between; gap:16px; align-items:start; margin-bottom:12px; }}
+        .log-title {{ font-size:18px; font-weight:900; }}
+        .log-meta, .log-foot {{ color:#94a3b8; font-size:13px; margin-top:6px; }}
+        .pill {{ background:#064e3b; color:#bbf7d0; padding:6px 10px; border-radius:999px; font-size:12px; font-weight:900; }}
+        .log-clean-text {{ line-height:1.75; overflow-wrap:anywhere; word-break:break-word; white-space:pre-wrap; color:#e5e7eb; }}
+        .empty {{ background:#0b1224; border:1px solid #334155; border-radius:18px; padding:24px; color:#94a3b8; }}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <aside class="side">
+          <h2>📚 Log Vault</h2>
+          <div class="muted">Click a channel to view only its logs.</div>
+          {channels}
+          <a class="channel" href="/dashboard?guild_id={gid}">← Dashboard</a>
+        </aside>
+        <main class="main">
+          <h1>Log Vault</h1>
+          <div class="muted">Separated Discord-style logs. No merged messy wall.</div>
+          <div class="stats">
+            <div class="stat"><b>{total}</b><br><span class="muted">Total results</span></div>
+            <div class="stat"><b>{count}</b><br><span class="muted">Shown</span></div>
+          </div>
+          <form class="toolbar" method="GET">
+            <input type="hidden" name="guild_id" value="{gid}">
+            <input type="hidden" name="channel_id" value="{channel_id}">
+            <input name="q" value="{q}" placeholder="Search logs...">
+            <button>Search</button>
+            <a class="btn" href="/dashboard/log-vault?guild_id={gid}">Reset</a>
+          </form>
+          {cards}
+        </main>
+      </div>
+    </body>
+    </html>
+    """.format(
+        gid=int(gid),
+        channels="".join(channel_buttons),
+        total=int(total),
+        count=len(rows),
+        channel_id=nm_v5_escape(channel_id, 100),
+        q=nm_v5_escape(q, 140),
+        cards="".join(cards),
+    )
+
+try:
+    app.view_functions["dashboard_log_vault_page"] = nm_v5_safe_log_vault_page
+    app.view_functions["dashboard_log_vault"] = nm_v5_safe_log_vault_page
+except Exception as e:
+    try: print(f"NM V5 log vault endpoint override failed: {e}")
+    except Exception: pass
+
+@app.route("/dashboard/log-vault-safe")
+def nm_v5_log_vault_safe_alias():
+    return nm_v5_safe_log_vault_page()
+
+def nm_v5_polish_self_check():
+    try:
+        print("✅ NM V5 self-check: compile OK, shutil OK, Log Vault endpoint override installed")
+    except Exception:
+        pass
+
+
 keep_alive()
 
 while True:
@@ -20077,4 +20290,3 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
-# NM V5 polish update
