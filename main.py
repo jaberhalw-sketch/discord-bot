@@ -11741,6 +11741,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_coin_persist_boot()
     nm_v5_polish_self_check()
     nm_stable_polish_boot()
     nm_hotfix_boot()
@@ -20337,6 +20338,278 @@ def nm_get_coin_name(guild_id=None):
 
 def nm_legacy_coin(guild_id=None):
     return nm_v5_final_coin_from_files(guild_id)
+
+
+
+# =====================================================================
+# NM V5 PER-GUILD COIN PERSISTENCE FINAL
+# Rule:
+# - Every new guild starts with NM Coin.
+# - If owner changes coin name from dashboard/settings, it stays forever for that guild.
+# - Redeploy/code update will NOT reset it.
+# - Works with /data fallback even when DATABASE_URL is missing.
+# =====================================================================
+
+def nm_v5_coin_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v5_coin_store_path():
+    try:
+        p = Path("/data")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "guild_settings_v5.json"
+    except Exception:
+        return Path("guild_settings_v5.json")
+
+def nm_v5_coin_load_store():
+    try:
+        p = nm_v5_coin_store_path()
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def nm_v5_coin_save_store(data):
+    try:
+        p = nm_v5_coin_store_path()
+        p.write_text(json.dumps(data if isinstance(data, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as e:
+        try: print(f"NM V5 coin store save failed: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_pg_ready_for_coin():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+def nm_v5_pg_read_coin(gid):
+    if not nm_v5_pg_ready_for_coin():
+        return None
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (int(gid),)).fetchone()
+            if row:
+                raw = row["settings"]
+                settings = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+                for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                    v = settings.get(k)
+                    if v is not None and str(v).strip():
+                        return str(v).strip()
+    except Exception as e:
+        try: print(f"NM V5 PG coin read skipped: {e}")
+        except Exception: pass
+    return None
+
+def nm_v5_pg_save_coin(gid, coin):
+    if not nm_v5_pg_ready_for_coin():
+        return False
+    try:
+        patch = {
+            "coin_name": coin,
+            "currency_name": coin,
+            "economy_coin_name": coin,
+            "money_name": coin,
+            "coin": coin,
+        }
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO guild_settings (guild_id, settings, updated_at)
+                VALUES (%s,%s::jsonb,NOW())
+                ON CONFLICT (guild_id)
+                DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+            """, (int(gid), json.dumps(patch, ensure_ascii=False)))
+            conn.commit()
+        return True
+    except Exception as e:
+        try: print(f"NM V5 PG coin save skipped: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_get_coin_name(guild_id=None):
+    gid = int(guild_id or nm_v5_coin_gid())
+
+    # 1) Durable per-guild /data store has priority.
+    store = nm_v5_coin_load_store()
+    row = store.get(str(gid), {})
+    if isinstance(row, dict):
+        v = row.get("coin_name") or row.get("currency_name") or row.get("economy_coin_name") or row.get("money_name") or row.get("coin")
+        if v is not None and str(v).strip():
+            return str(v).strip()
+
+    # 2) PostgreSQL if connected.
+    pg_coin = nm_v5_pg_read_coin(gid)
+    if pg_coin:
+        # mirror PG to /data so future redeploy without PG still remembers
+        nm_v5_set_coin_name(gid, pg_coin, mirror_pg=False)
+        return pg_coin
+
+    # 3) Old dashboard file fallback only if this guild has no saved coin yet.
+    try:
+        for p in [Path("/data/dashboard_settings.json"), Path("dashboard_settings.json")]:
+            if p.exists() and p.stat().st_size > 0:
+                old = json.loads(p.read_text(encoding="utf-8") or "{}")
+                if isinstance(old, dict):
+                    v = old.get("coin_name") or old.get("currency_name") or old.get("economy_coin_name") or old.get("money_name") or old.get("coin")
+                    if v is not None and str(v).strip():
+                        nm_v5_set_coin_name(gid, str(v).strip())
+                        return str(v).strip()
+    except Exception:
+        pass
+
+    # 4) New guild default.
+    nm_v5_set_coin_name(gid, "NM Coin")
+    return "NM Coin"
+
+def nm_v5_set_coin_name(guild_id=None, coin_name="NM Coin", mirror_pg=True):
+    gid = int(guild_id or nm_v5_coin_gid())
+    coin = str(coin_name or "NM Coin").strip() or "NM Coin"
+
+    store = nm_v5_coin_load_store()
+    row = store.get(str(gid), {})
+    if not isinstance(row, dict):
+        row = {}
+    row.update({
+        "coin_name": coin,
+        "currency_name": coin,
+        "economy_coin_name": coin,
+        "money_name": coin,
+        "coin": coin,
+    })
+    store[str(gid)] = row
+    nm_v5_coin_save_store(store)
+
+    # Mirror old runtime/global settings so the Settings page instantly shows it.
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(row)
+    except Exception:
+        pass
+
+    try:
+        p = Path("/data/dashboard_settings.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        old = {}
+        if p.exists() and p.stat().st_size > 0:
+            old = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if not isinstance(old, dict):
+            old = {}
+        old.update(row)
+        p.write_text(json.dumps(old, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    if mirror_pg:
+        nm_v5_pg_save_coin(gid, coin)
+
+    return coin
+
+# Final public coin APIs used everywhere.
+def nm_coin_name(guild_id=None):
+    return nm_v5_get_coin_name(guild_id)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_v5_get_coin_name(guild_id)
+
+def nm_legacy_coin(guild_id):
+    return nm_v5_get_coin_name(guild_id)
+
+def nm_currency_name(guild_id=None):
+    return nm_v5_get_coin_name(guild_id)
+
+def nm_money_name(guild_id=None):
+    return nm_v5_get_coin_name(guild_id)
+
+def nm_format_money(amount, guild_id=None):
+    return f"{int(amount or 0):,} {nm_v5_get_coin_name(guild_id)}"
+
+@app.after_request
+def nm_v5_coin_persist_after_request(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("money_name")
+                or request.form.get("coin")
+            )
+            if coin is not None and str(coin).strip():
+                nm_v5_set_coin_name(nm_v5_coin_gid(), str(coin).strip())
+    except Exception as e:
+        try: print(f"NM V5 coin persist after_request skipped: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/coin-persist-status")
+def nm_v5_coin_persist_status():
+    gid = nm_v5_coin_gid()
+    coin = nm_v5_get_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Coin Persistence Active</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin Name: <b>{dash_escape(coin, 100)}</b></p>
+      <p>Default is NM Coin. If you change it, it stays saved for this guild after redeploy.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
+def nm_v5_set_custom_coin_page_final():
+    gid = nm_v5_coin_gid()
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        nm_v5_set_coin_name(gid, coin)
+        return redirect(f"/dashboard/coin-persist-status?guild_id={int(gid)}")
+    current = nm_v5_get_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Settings • Coin Name</h1>
+      <p>New servers start with <b>NM Coin</b>. Custom value is saved per server forever.</p>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <input type="hidden" name="guild_id" value="{int(gid)}">
+        <label style="display:block;color:#94a3b8;font-weight:800;margin-bottom:8px">Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+def nm_v5_coin_persist_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            coin = nm_v5_get_coin_name(gid)
+            print(f"✅ NM V5 per-guild coin persistence active: guild={gid}, coin={coin}")
+    except Exception as e:
+        try: print(f"NM V5 coin persist boot skipped: {e}")
+        except Exception: pass
 
 
 keep_alive()
