@@ -11743,6 +11743,8 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_final_audit_boot()
+    nm_v5_richest_sync_boot()
     nm_v5_admin_pro_boot()
     nm_v5_admin_people_boot()
     nm_v5_admin_access_boot()
@@ -22851,6 +22853,551 @@ def nm_v5_admin_pro_boot():
         print("✅ NM V5 Admin Access Pro+ active")
     except Exception:
         pass
+
+
+
+# =====================================================================
+# NM V5 FINAL ECONOMY LEADERBOARD SYNC FIX
+# Fixes !الغني / !اغنى / rich / top / dashboard richest
+# Problem: old top commands read only one table, while wallet/salary use synced balance.
+# Solution: one merged top source from guild_economy + economy + legacy guild_id=0,
+# then mirror best balance into the current guild.
+# =====================================================================
+
+def nm_v5_top_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        if "nm_v5_find_runtime_guild_id" in globals():
+            gid = int(nm_v5_find_runtime_guild_id())
+            if gid:
+                return gid
+    except Exception:
+        pass
+    try:
+        return int(globals().get("GUILD_ID", 0) or 0)
+    except Exception:
+        return 0
+
+def nm_v5_top_sqlite_paths():
+    for p in [Path("/data/nm_system.db"), Path("nm_system.db")]:
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                yield p
+        except Exception:
+            pass
+
+def nm_v5_top_table_exists(cur, table):
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+def nm_v5_top_cols(cur, table):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return [r[1] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+def nm_v5_top_write_balance(gid, uid, balance):
+    gid, uid, balance = int(gid or 0), int(uid or 0), int(balance or 0)
+    for path in nm_v5_top_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS guild_economy (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    balance INTEGER DEFAULT 0,
+                    last_daily INTEGER DEFAULT 0,
+                    last_boost_weekly INTEGER DEFAULT 0,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+            cur.execute("UPDATE guild_economy SET balance=MAX(COALESCE(balance,0), ?) WHERE guild_id=? AND user_id=?", (balance, gid, uid))
+
+            # Mirror to old economy if it has guild_id shape.
+            if nm_v5_top_table_exists(cur, "economy"):
+                cols = nm_v5_top_cols(cur, "economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute("INSERT OR IGNORE INTO economy (guild_id,user_id,balance) VALUES (?,?,0)", (gid, uid))
+                    cur.execute("UPDATE economy SET balance=MAX(COALESCE(balance,0), ?) WHERE guild_id=? AND user_id=?", (balance, gid, uid))
+                elif "user_id" in cols and "balance" in cols:
+                    cur.execute("INSERT OR IGNORE INTO economy (user_id,balance) VALUES (?,0)", (uid,))
+                    cur.execute("UPDATE economy SET balance=MAX(COALESCE(balance,0), ?) WHERE user_id=?", (balance, uid))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            try: print(f"NM V5 top write skipped {path}: {e}")
+            except Exception: pass
+
+def nm_v5_get_merged_top_money(guild_id=None, limit=10):
+    gid = int(guild_id or nm_v5_top_gid())
+    limit = int(limit or 10)
+    merged = {}
+
+    # 1) Use known synced balance APIs first if available, by scanning DB user ids.
+    for path in nm_v5_top_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+
+            # guild_economy
+            if nm_v5_top_table_exists(cur, "guild_economy"):
+                cols = nm_v5_top_cols(cur, "guild_economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute("""
+                        SELECT user_id, MAX(balance) AS balance
+                        FROM guild_economy
+                        WHERE guild_id IN (?, 0)
+                        GROUP BY user_id
+                    """, (gid,))
+                    for uid, bal in cur.fetchall():
+                        uid, bal = int(uid), int(bal or 0)
+                        merged[uid] = max(int(merged.get(uid, 0)), bal)
+
+                    # also any rows from wrong guilds, because previous builds mixed guild ids
+                    cur.execute("""
+                        SELECT user_id, MAX(balance) AS balance
+                        FROM guild_economy
+                        GROUP BY user_id
+                    """)
+                    for uid, bal in cur.fetchall():
+                        uid, bal = int(uid), int(bal or 0)
+                        merged[uid] = max(int(merged.get(uid, 0)), bal)
+
+            # economy
+            if nm_v5_top_table_exists(cur, "economy"):
+                cols = nm_v5_top_cols(cur, "economy")
+                if "guild_id" in cols and "user_id" in cols and "balance" in cols:
+                    cur.execute("""
+                        SELECT user_id, MAX(balance) AS balance
+                        FROM economy
+                        WHERE guild_id IN (?, 0)
+                        GROUP BY user_id
+                    """, (gid,))
+                    for uid, bal in cur.fetchall():
+                        uid, bal = int(uid), int(bal or 0)
+                        merged[uid] = max(int(merged.get(uid, 0)), bal)
+
+                    cur.execute("""
+                        SELECT user_id, MAX(balance) AS balance
+                        FROM economy
+                        GROUP BY user_id
+                    """)
+                    for uid, bal in cur.fetchall():
+                        uid, bal = int(uid), int(bal or 0)
+                        merged[uid] = max(int(merged.get(uid, 0)), bal)
+
+                elif "user_id" in cols and "balance" in cols:
+                    cur.execute("SELECT user_id, balance FROM economy")
+                    for uid, bal in cur.fetchall():
+                        uid, bal = int(uid), int(bal or 0)
+                        merged[uid] = max(int(merged.get(uid, 0)), bal)
+
+            conn.close()
+        except Exception as e:
+            try: print(f"NM V5 top sqlite scan skipped {path}: {e}")
+            except Exception: pass
+
+    # 2) PG if active.
+    try:
+        if "nm_v5_pg_ready" in globals() and nm_v5_pg_ready():
+            with nm_pg_conn() as conn:
+                rows = conn.execute("""
+                    SELECT user_id, MAX(balance) AS balance
+                    FROM economy
+                    GROUP BY user_id
+                """).fetchall()
+                for r in rows:
+                    uid, bal = int(r["user_id"]), int(r["balance"] or 0)
+                    merged[uid] = max(int(merged.get(uid, 0)), bal)
+    except Exception as e:
+        try: print(f"NM V5 top PG scan skipped: {e}")
+        except Exception: pass
+
+    # 3) Make sure synced balance API wins for each user.
+    for uid in list(merged.keys()):
+        try:
+            if "nm_v5_real_get_balance" in globals():
+                merged[uid] = max(int(merged[uid]), int(nm_v5_real_get_balance(uid, gid) or 0))
+            elif "v3_get_balance" in globals():
+                merged[uid] = max(int(merged[uid]), int(v3_get_balance(gid, uid) or 0))
+        except Exception:
+            pass
+
+    items = [(uid, bal) for uid, bal in merged.items() if int(bal or 0) > 0]
+    items.sort(key=lambda x: int(x[1]), reverse=True)
+
+    # 4) Mirror winners to current guild so next reads are clean.
+    for uid, bal in items[:max(limit, 50)]:
+        nm_v5_top_write_balance(gid, uid, bal)
+
+    return items[:limit]
+
+# Final leaderboard API overrides.
+def v3_get_top_money(guild_id, limit=10):
+    return nm_v5_get_merged_top_money(guild_id, limit)
+
+def get_top_money(limit=10, guild_id=None):
+    return nm_v5_get_merged_top_money(guild_id, limit)
+
+def dashboard_money_rows(limit=10):
+    gid = nm_v5_top_gid()
+    rows = []
+    for i, (uid, bal) in enumerate(nm_v5_get_merged_top_money(gid, int(limit)), start=1):
+        try:
+            name = dashboard_member_name(uid)
+        except Exception:
+            name = f"User {uid}"
+        rows.append({"rank": i, "user_id": int(uid), "name": name, "balance": int(bal)})
+    return rows
+
+def dashboard_total_coins():
+    return int(sum(int(bal or 0) for _, bal in nm_v5_get_merged_top_money(nm_v5_top_gid(), 10000)))
+
+# Fix legacy !الغني specifically.
+async def nm_legacy_top(message):
+    gid = nm_v5_top_gid(message)
+    coin = nm_coin_name(gid) if "nm_coin_name" in globals() else "NM Coin"
+    rows = nm_v5_get_merged_top_money(gid, 10)
+    if not rows:
+        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
+
+    lines = []
+    for i, (uid, bal) in enumerate(rows, 1):
+        m = message.guild.get_member(int(uid)) if message.guild else None
+        who = m.mention if m else f"`{uid}`"
+        medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"`#{i}`"
+        lines.append(f"{medal} {who} — 🪙 **{int(bal):,} {coin}**")
+
+    embed = discord.Embed(
+        title="🏆 أغنى الأعضاء",
+        description="\n".join(lines),
+        color=0xf59e0b,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} • Economy Leaderboard")
+    await message.channel.send(embed=embed)
+
+@app.route("/dashboard/fix-richest-sync")
+def nm_v5_fix_richest_sync_route():
+    gid = nm_v5_top_gid()
+    rows = nm_v5_get_merged_top_money(gid, 10000)
+    coin = nm_coin_name(gid) if "nm_coin_name" in globals() else "NM Coin"
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Richest Sync Fixed</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Rows synced: <b>{len(rows)}</b></p>
+      <p>Top source now uses merged wallet balance.</p>
+      <p>Coin: <b>{dash_escape(coin,100)}</b></p>
+      <p><a style="color:#8b5cf6" href="/dashboard/economy?guild_id={int(gid)}">Economy</a></p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Dashboard</a></p>
+    </div>
+    """
+
+def nm_v5_richest_sync_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            rows = nm_v5_get_merged_top_money(gid, 10000)
+            print(f"✅ NM V5 richest/top sync active: guild={gid}, rows={len(rows)}")
+    except Exception as e:
+        try: print(f"NM V5 richest sync boot skipped: {e}")
+        except Exception: pass
+
+
+
+# =====================================================================
+# NM V5 FINAL AUDIT + HEALTH CHECK + ERROR VISIBILITY
+# This layer does NOT hide issues.
+# It logs runtime errors and shows what is healthy/broken in the dashboard.
+# =====================================================================
+
+def nm_v5_audit_data_path(filename):
+    try:
+        p = Path("/data")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / filename
+    except Exception:
+        return Path(filename)
+
+def nm_v5_runtime_error_path():
+    return nm_v5_audit_data_path("nm_runtime_errors_v5.json")
+
+def nm_v5_runtime_errors_load():
+    try:
+        p = nm_v5_runtime_error_path()
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "[]")
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+def nm_v5_runtime_errors_save(data):
+    try:
+        p = nm_v5_runtime_error_path()
+        p.write_text(json.dumps(data[-250:] if isinstance(data, list) else [], ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+def nm_v5_log_runtime_error(source, error):
+    try:
+        data = nm_v5_runtime_errors_load()
+        data.append({
+            "time": int(time.time()),
+            "source": str(source),
+            "error": str(error),
+            "traceback": traceback.format_exc()[-5000:],
+        })
+        nm_v5_runtime_errors_save(data)
+    except Exception:
+        pass
+
+def nm_v5_check_item(name, ok, detail=""):
+    return {
+        "name": str(name),
+        "ok": bool(ok),
+        "detail": str(detail),
+    }
+
+def nm_v5_file_status(path):
+    try:
+        p = Path(path)
+        return p.exists(), p.stat().st_size if p.exists() else 0
+    except Exception:
+        return False, 0
+
+def nm_v5_sqlite_tables():
+    out = []
+    try:
+        db_path = nm_v5_audit_data_path("nm_system.db")
+        if not db_path.exists():
+            db_path = Path("nm_system.db")
+        if not db_path.exists():
+            return []
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        out = [r[0] for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        nm_v5_log_runtime_error("sqlite_tables", e)
+    return out
+
+def nm_v5_required_function_exists(name):
+    fn = globals().get(name)
+    return callable(fn)
+
+def nm_v5_health_checks():
+    checks = []
+
+    # Imports
+    checks.append(nm_v5_check_item("import shutil", "shutil" in globals(), "Needed for recovery restore."))
+    checks.append(nm_v5_check_item("import traceback", "traceback" in globals(), "Needed for readable errors."))
+
+    # Persistent files
+    required_files = [
+        "nm_system.db",
+        "warnings.json",
+        "log_channels.json",
+        "dashboard_settings.json",
+        "guild_settings_v5.json",
+        "protection_settings_v5.json",
+        "admin_access_v5.json",
+    ]
+    for fn in required_files:
+        exists, size = nm_v5_file_status(nm_v5_audit_data_path(fn))
+        severity_ok = exists if fn in ("nm_system.db", "dashboard_settings.json") else True
+        checks.append(nm_v5_check_item(f"/data/{fn}", severity_ok, f"exists={exists}, size={size} bytes"))
+
+    # SQLite tables
+    tables = nm_v5_sqlite_tables()
+    checks.append(nm_v5_check_item("SQLite reachable", bool(tables), f"tables={', '.join(tables[:30]) if tables else 'none'}"))
+    checks.append(nm_v5_check_item("economy table available", ("economy" in tables or "guild_economy" in tables), f"tables={tables}"))
+    checks.append(nm_v5_check_item("level table available", ("levels" in tables or "guild_levels" in tables), f"tables={tables}"))
+
+    # Core APIs
+    funcs = [
+        "nm_coin_name",
+        "get_balance",
+        "add_money",
+        "get_level_data",
+        "add_xp",
+        "get_guild_protection_settings",
+        "save_guild_protection_settings",
+        "dashboard_money_rows",
+        "v3_get_top_money",
+        "nm_legacy_top",
+        "dashboard_dynamic_owner_role_ids",
+        "dashboard_dynamic_admin_role_ids",
+    ]
+    for fn in funcs:
+        checks.append(nm_v5_check_item(f"function {fn}", nm_v5_required_function_exists(fn), "required API override"))
+
+    # Routes/endpoints
+    endpoints = [
+        "dashboard_log_vault_page",
+        "dashboard_admin_access_page",
+        "nm_v5_admin_access_export",
+        "nm_v5_fix_richest_sync_route",
+        "nm_v5_discord_sync_status",
+        "nm_v5_protection_status_page",
+    ]
+    for ep in endpoints:
+        checks.append(nm_v5_check_item(f"endpoint {ep}", ep in app.view_functions, "Flask endpoint"))
+
+    # Postgres status
+    pg_active = False
+    try:
+        pg_active = bool(globals().get("NM_DATABASE_URL") and globals().get("NM_V4_POSTGRES_ENABLED"))
+    except Exception:
+        pg_active = False
+    checks.append(nm_v5_check_item("PostgreSQL active", pg_active, "If false, bot uses /data fallback. This is OK but not strongest persistence."))
+
+    # Discord intents impossible to fully test here; show warning if variable not visible
+    checks.append(nm_v5_check_item("Live Discord API test", False, "Cannot be verified inside static file generation. Verify after Railway redeploy from logs and Discord commands."))
+
+    return checks
+
+def nm_v5_health_html():
+    checks = nm_v5_health_checks()
+    ok_count = sum(1 for c in checks if c["ok"])
+    bad = [c for c in checks if not c["ok"]]
+
+    rows = []
+    for c in checks:
+        icon = "✅" if c["ok"] else "⚠️"
+        cls = "ok" if c["ok"] else "bad"
+        rows.append(f"""
+        <div class="check-row {cls}">
+          <div><b>{icon} {dash_escape(c['name'], 120)}</b><div class="muted">{dash_escape(c['detail'], 900)}</div></div>
+        </div>
+        """)
+
+    bad_summary = "".join([f"<li>{dash_escape(c['name'], 120)} — {dash_escape(c['detail'], 500)}</li>" for c in bad]) or "<li>No issues from code self-check.</li>"
+
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:36px">
+      <style>
+        .card {{ background:#0f172a; border:1px solid #26345c; border-radius:22px; padding:20px; margin:14px 0; }}
+        .check-row {{ background:#0b1224; border:1px solid #26345c; border-radius:16px; padding:14px; margin:10px 0; }}
+        .check-row.ok {{ border-color:#14532d; }}
+        .check-row.bad {{ border-color:#7f1d1d; }}
+        .muted {{ color:#94a3b8; margin-top:5px; }}
+        a {{ color:#8b5cf6; }}
+        code {{ background:#020617; padding:3px 6px; border-radius:7px; }}
+      </style>
+      <h1>NM System V5 Health Check</h1>
+      <div class="card">
+        <h2>Score: {ok_count}/{len(checks)} OK</h2>
+        <p class="muted">This page does not hide problems. Anything not verifiable is shown as warning.</p>
+        <p>
+          <a href="/dashboard">Dashboard</a> •
+          <a href="/dashboard/runtime-errors">Runtime Errors</a> •
+          <a href="/dashboard/sync-all">Sync All</a> •
+          <a href="/dashboard/fix-richest-sync">Fix Richest Sync</a>
+        </p>
+      </div>
+      <div class="card">
+        <h2>Warnings / Missing</h2>
+        <ul>{bad_summary}</ul>
+      </div>
+      <div class="card">
+        <h2>All Checks</h2>
+        {''.join(rows)}
+      </div>
+    </div>
+    """
+
+@app.route("/dashboard/health-check")
+def nm_v5_health_check_route():
+    return nm_v5_health_html()
+
+@app.route("/dashboard/runtime-errors")
+def nm_v5_runtime_errors_route():
+    data = list(reversed(nm_v5_runtime_errors_load()[-80:]))
+    rows = []
+    for e in data:
+        try:
+            t = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(e.get("time", 0))))
+        except Exception:
+            t = "Unknown"
+        rows.append(f"""
+        <div class="err">
+          <b>{dash_escape(e.get('source','unknown'), 120)}</b>
+          <div class="muted">{t}</div>
+          <pre>{dash_escape(e.get('error',''), 1000)}</pre>
+          <details><summary>Traceback</summary><pre>{dash_escape(e.get('traceback',''), 5000)}</pre></details>
+        </div>
+        """)
+    if not rows:
+        rows.append("<div class='err'>No runtime errors saved yet.</div>")
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:36px">
+      <style>
+        .err {{ background:#0f172a; border:1px solid #26345c; border-radius:18px; padding:16px; margin:12px 0; }}
+        .muted {{ color:#94a3b8; }}
+        pre {{ white-space:pre-wrap; background:#020617; padding:12px; border-radius:12px; color:#e5e7eb; overflow:auto; }}
+        a {{ color:#8b5cf6; }}
+      </style>
+      <h1>NM Runtime Errors</h1>
+      <p><a href="/dashboard/health-check">Back to Health Check</a></p>
+      {''.join(rows)}
+    </div>
+    """
+
+# Dashboard-readable error page. Does not hide the error; logs it too.
+@app.errorhandler(Exception)
+def nm_v5_final_error_handler(error):
+    try:
+        nm_v5_log_runtime_error(getattr(request, "path", "unknown"), error)
+    except Exception:
+        pass
+    try:
+        path = request.path
+    except Exception:
+        path = ""
+    if str(path).startswith("/dashboard"):
+        tb = traceback.format_exc()
+        return f"""
+        <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:36px">
+          <h1>NM Dashboard Error</h1>
+          <p>ما سكّت عن الخطأ. تم حفظه في <code>/dashboard/runtime-errors</code>.</p>
+          <pre style="white-space:pre-wrap;background:#020617;padding:16px;border-radius:14px;color:#e5e7eb">{dash_escape(tb[-5000:], 5000)}</pre>
+          <p><a style="color:#8b5cf6" href="/dashboard/health-check">Open Health Check</a></p>
+        </div>
+        """, 500
+    return "Internal Server Error", 500
+
+def nm_v5_final_audit_boot():
+    try:
+        checks = nm_v5_health_checks()
+        bad = [c for c in checks if not c["ok"]]
+        print(f"✅ NM V5 final audit active: {len(checks)-len(bad)}/{len(checks)} checks OK")
+        if bad:
+            print("⚠️ NM V5 audit warnings:")
+            for c in bad[:12]:
+                print(f" - {c['name']}: {c['detail']}")
+    except Exception as e:
+        try:
+            print(f"NM V5 final audit boot failed: {e}")
+        except Exception:
+            pass
 
 
 keep_alive()
