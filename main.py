@@ -2526,6 +2526,7 @@ async def send_log(guild, title, description, color=COLOR_GREY, log_type="genera
         )
         cc_record_event(
             "discord_log",
+            guild_id=getattr(guild, "id", GUILD_ID),
             channel_id=getattr(channel, "id", 0),
             channel_name=getattr(channel, "name", ""),
             details=f"{log_type} | {title}"
@@ -2844,6 +2845,7 @@ async def handle_violation(message, reason):
     count = add_warning(message.author, reason, old_message, "النظام التلقائي")
     cc_record_event(
         "violation",
+        guild_id=message.guild.id,
         user_id=message.author.id,
         user_name=str(message.author),
         channel_id=message.channel.id,
@@ -6140,6 +6142,56 @@ def dashboard_oauth_debug():
     return render_dashboard_page("OAuth Debug", body)
 
 
+
+
+# =========================
+# GLOBAL DASHBOARD PHASE 3 HELPERS
+# =========================
+
+def dashboard_set_active_guild(guild_id):
+    try:
+        gid = int(guild_id)
+        if bot and bot.get_guild(gid):
+            session["dashboard_active_guild_id"] = gid
+            return gid
+    except Exception:
+        pass
+    session["dashboard_active_guild_id"] = int(GUILD_ID)
+    return int(GUILD_ID)
+
+
+def dashboard_get_active_guild_id():
+    raw = request.args.get("guild_id") or session.get("dashboard_active_guild_id") or GUILD_ID
+    return dashboard_set_active_guild(raw)
+
+
+def dashboard_guild_banner(guild_id, label="Selected Guild"):
+    guild = bot.get_guild(int(guild_id)) if bot else None
+    name = guild.name if guild else get_guild_settings(guild_id).get("guild_name", "Unknown Guild")
+    icon = guild.icon.url if guild and guild.icon else ""
+    if icon:
+        icon_html = f'<img src="{icon}" style="width:44px;height:44px;border-radius:16px;border:1px solid var(--line);object-fit:cover">'
+    else:
+        icon_html = '<div style="width:44px;height:44px;border-radius:16px;border:1px solid var(--line);display:grid;place-items:center;background:rgba(59,130,246,.15)">🌍</div>'
+    return f"""
+    <div class="card" style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:12px">
+        {icon_html}
+        <div>
+          <div class="muted small">{dash_escape(label, 80)}</div>
+          <h3 style="margin:2px 0 0">{dash_escape(name, 120)}</h3>
+          <div class="muted small"><code>{int(guild_id)}</code></div>
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <a class="btn" href="/dashboard/guilds">Switch Guild</a>
+        <a class="btn" href="/dashboard/guild/{int(guild_id)}/setup">Setup</a>
+        <a class="btn" href="/dashboard/guild/{int(guild_id)}/command-center">Command Center</a>
+        <a class="btn" href="/dashboard/guild/{int(guild_id)}/warnings">Warnings</a>
+      </div>
+    </div>
+    """
+
 @app.route("/dashboard")
 def dashboard_home():
     denied = dashboard_require_admin()
@@ -6300,6 +6352,42 @@ def dashboard_guild_setup_page(guild_id):
     </div>
     '''
     return render_dashboard_page("Guild Setup", body)
+
+@app.route("/dashboard/guild/<int:guild_id>/command-center", methods=["GET"])
+def dashboard_guild_command_center_redirect(guild_id):
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    dashboard_set_active_guild(guild_id)
+    return redirect(f"/dashboard/command-center?guild_id={int(guild_id)}")
+
+
+@app.route("/dashboard/guild/<int:guild_id>/warnings", methods=["GET"])
+def dashboard_guild_warnings_redirect(guild_id):
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    dashboard_set_active_guild(guild_id)
+    return redirect(f"/dashboard/warnings?guild_id={int(guild_id)}")
+
+
+@app.route("/dashboard/guild/<int:guild_id>/log-vault", methods=["GET"])
+def dashboard_guild_log_vault_redirect(guild_id):
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    dashboard_set_active_guild(guild_id)
+    return redirect(f"/dashboard/log-vault?guild_id={int(guild_id)}")
+
+
+@app.route("/dashboard/guild/<int:guild_id>/protection", methods=["GET"])
+def dashboard_guild_protection_redirect(guild_id):
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    dashboard_set_active_guild(guild_id)
+    return redirect(f"/dashboard/protection?guild_id={int(guild_id)}")
+
 
 
 @app.route("/dashboard/economy", methods=["GET"])
@@ -6527,6 +6615,7 @@ def dashboard_events_page():
     status = "ON" if EVENTS_ENABLED else "OFF"
     body = f"""
     {dashboard_toast_html()}
+    {guild_banner}
     <div class="grid">
       <div class="card stat"><div class="icon">🎉</div><div class="num">{status}</div><div class="label">Events Status</div></div>
       <div class="card stat"><div class="icon">🏆</div><div class="num">{short_money(DEFAULT_EVENT_PRIZE)}</div><div class="label">Default Prize</div></div>
@@ -6687,6 +6776,7 @@ def dashboard_warnings_page():
 
     body = f'''
     {dashboard_toast_html()}
+    {guild_banner}
 
     <style>
       .warning-tabs {{
@@ -7466,6 +7556,7 @@ def dashboard_control_page():
     emergency_button_text = "Disable Emergency" if control.get("emergency_lockdown") else "Enable Emergency Lockdown"
     body = f"""
     {dashboard_toast_html()}
+    {guild_banner}
     <div class="hero"><div class="card"><div class="big">🛡️ Admin Control Center</div><p class="muted">اقفل وافتح أي أمر أو نظام كامل بدون تعديل الكود. التغييرات فورية وتحفظ بعد الريستارت.</p></div><div class="card {emergency_class}"><h3>🚨 Emergency Mode</h3><p class="muted">يقفل الاقتصاد والقمار واللفل والتحويلات وأغلب أوامر الأعضاء، ويترك الأدوات الإدارية الأساسية.</p><form method="post" action="/dashboard/control/emergency"><input type="hidden" name="enabled" value="{emergency_enabled_value}"><button class="btn {emergency_button_class}">{emergency_button_text}</button></form></div></div>
     <form method="post" action="/dashboard/control/save">
       <div class="card"><h3>🧩 System Toggles</h3><div class="switchgrid">{system_cards}</div></div>
@@ -7534,11 +7625,13 @@ def dashboard_audit_page():
 
 @app.route("/dashboard/log-vault", methods=["GET"])
 def dashboard_log_vault_page():
-    denied = dashboard_require_admin()
+    denied = dashboard_require_owner()
     if denied:
         return denied
 
     init_db()
+    selected_guild_id = dashboard_get_active_guild_id()
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Log Vault Guild")
     log_type = request.args.get("type", "all").strip() or "all"
     deleted_filter = request.args.get("deleted", "all").strip() or "all"
     query = request.args.get("q", "").strip()[:120]
@@ -7595,6 +7688,7 @@ def dashboard_log_vault_page():
 
     body = f"""
     {dashboard_toast_html()}
+    {guild_banner}
     <div class="hero">
       <div class="card">
         <div class="big">🗄️ Log Vault</div>
@@ -7641,6 +7735,8 @@ def dashboard_command_center_page():
         return denied
 
     init_db()
+    selected_guild_id = dashboard_get_active_guild_id()
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Command Center Guild")
 
     since_24h = cc_since_hours(24)
     since_1h = cc_since_hours(1)
