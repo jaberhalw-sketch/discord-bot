@@ -6376,6 +6376,157 @@ def dashboard_global_stats_html(compact=False):
 
 
 
+
+
+# =========================
+# PROBOT-STYLE SERVER RAIL
+# =========================
+
+def dashboard_guild_initials(name):
+    try:
+        parts = [x for x in re.split(r"\s+", str(name or "")) if x]
+        if not parts:
+            return "?"
+        if len(parts) == 1:
+            return parts[0][:2].upper()
+        return (parts[0][0] + parts[1][0]).upper()
+    except Exception:
+        return "?"
+
+
+def dashboard_guild_access_label(guild_id):
+    try:
+        guild_id = int(guild_id)
+        if dashboard_current_user_is_owner():
+            return "Bot Owner", "owner"
+        perms, is_owner = dashboard_oauth_guild_permissions(guild_id)
+        if is_owner:
+            return "Server Owner", "owner"
+        if perms & 0x8:
+            return "Administrator", "admin"
+        if perms & 0x20:
+            return "Manage Server", "admin"
+        return "No Access", "none"
+    except Exception:
+        return "Unknown", "none"
+
+
+def dashboard_guild_setup_state(guild):
+    try:
+        settings = get_guild_settings(int(guild.id))
+        missing = []
+        if not int(settings.get("commands_channel_id") or 0):
+            missing.append("commands")
+        if not int(settings.get("gambling_channel_id") or 0):
+            missing.append("gambling")
+        if not int(settings.get("logs_category_id") or 0):
+            missing.append("logs")
+        me = guild.me or guild.get_member(bot.user.id) if bot and bot.user else None
+        perms = me.guild_permissions if me else None
+        if perms:
+            if not perms.manage_channels:
+                missing.append("manage channels")
+            if not perms.embed_links:
+                missing.append("embeds")
+            if not perms.view_audit_log:
+                missing.append("audit log")
+        if missing:
+            return "Needs Setup", "warn", ", ".join(missing[:3])
+        return "Ready", "ok", "setup complete"
+    except Exception:
+        return "Unknown", "warn", "could not inspect"
+
+
+def dashboard_visible_bot_guilds_for_current_user(limit=80):
+    try:
+        all_guilds = sorted(list(bot.guilds), key=lambda g: str(g.name).lower()) if bot else []
+    except Exception:
+        all_guilds = []
+
+    if dashboard_current_user_is_owner():
+        return all_guilds[:int(limit)]
+
+    visible = []
+    bot_ids = dashboard_bot_guild_ids()
+    for item in dashboard_user_guilds():
+        try:
+            gid = int(item.get("id"))
+            if gid not in bot_ids:
+                continue
+            if not dashboard_has_manage_guild_oauth(gid):
+                continue
+            guild = bot.get_guild(gid) if bot else None
+            if guild:
+                visible.append(guild)
+        except Exception:
+            pass
+    visible = sorted(visible, key=lambda g: str(g.name).lower())
+    return visible[:int(limit)]
+
+
+def dashboard_server_rail_html():
+    user = session.get("discord_user")
+    if not user:
+        return ""
+
+    guilds = dashboard_visible_bot_guilds_for_current_user(limit=90)
+    active_id = int(session.get("dashboard_active_guild_id") or GUILD_ID)
+
+    items = []
+    # Home/account button
+    avatar = ""
+    try:
+        uid = str(user.get("id") or "")
+        av = str(user.get("avatar") or "")
+        if uid and av:
+            avatar = f"https://cdn.discordapp.com/avatars/{uid}/{av}.png?size=64"
+    except Exception:
+        avatar = ""
+    if avatar:
+        account_inner = f"<img src='{avatar}' alt='me'>"
+    else:
+        account_inner = "👤"
+    items.append(f"<a class='serverbubble account' href='/dashboard' title='Dashboard'>{account_inner}</a>")
+    items.append("<div class='serversep'></div>")
+
+    for guild in guilds:
+        try:
+            gid = int(guild.id)
+            active = " active" if gid == active_id else ""
+            label, access_class = dashboard_guild_access_label(gid)
+            state_text, state_class, state_tip = dashboard_guild_setup_state(guild)
+            title = f"{dash_escape(guild.name, 80)} • {label} • {state_text}: {dash_escape(state_tip, 80)}"
+            if guild.icon:
+                inner = f"<img src='{guild.icon.url}' alt='{dash_escape(guild.name, 40)}'>"
+            else:
+                inner = f"<span>{dashboard_guild_initials(guild.name)}</span>"
+            crown = "<em>👑</em>" if access_class == "owner" else ""
+            items.append(
+                f"<a class='serverbubble {state_class}{active}' href='/dashboard/select-guild/{gid}' title='{title}'>"
+                f"{inner}<i></i>{crown}</a>"
+            )
+        except Exception:
+            pass
+
+    if dashboard_current_user_is_owner():
+        items.append("<div class='serversep'></div>")
+        items.append("<a class='serverbubble ownerbtn' href='/dashboard/owner-console' title='Owner Console'>👑</a>")
+
+    return "<aside class='serverrail'>" + "".join(items) + "</aside>"
+
+
+@app.route('/dashboard/select-guild/<int:guild_id>')
+def dashboard_select_guild(guild_id):
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    if not dashboard_can_manage_guild(int(guild_id)):
+        return dashboard_access_denied_html("ما عندك صلاحية إدارة هذا السيرفر من الداشبورد.")
+    dashboard_set_active_guild(int(guild_id))
+    # افتح setup للسيرفر المختار عشان يكون واضح وش السيرفر اللي تتحكم فيه.
+    return redirect(f"/dashboard/guild/{int(guild_id)}/setup")
+
+
 DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
 <html lang="en">
@@ -6388,7 +6539,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
     *{box-sizing:border-box} html{scroll-behavior:smooth} body{margin:0;min-height:100vh;overflow-x:hidden;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Arial,sans-serif;background:radial-gradient(circle at 12% -10%,rgba(88,101,242,.35),transparent 34%),radial-gradient(circle at 92% 0%,rgba(139,92,246,.28),transparent 32%),radial-gradient(circle at 50% 110%,rgba(6,182,212,.12),transparent 28%),linear-gradient(180deg,#091021 0%,#050714 100%)}
     body:before{content:"";position:fixed;inset:0;pointer-events:none;background:radial-gradient(circle at 70% 10%,rgba(88,101,242,.08),transparent 30%);opacity:.8}
     a{color:inherit;text-decoration:none} code{background:rgba(2,6,23,.9);border:1px solid var(--line);padding:3px 7px;border-radius:9px;color:#dbeafe;word-break:break-word}
-    .layout{display:grid;grid-template-columns:290px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px 18px;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(7,10,18,.92),rgba(7,10,18,.72));overflow-y:auto;overflow-x:hidden}.sidebar::-webkit-scrollbar{width:8px}.sidebar::-webkit-scrollbar-thumb{background:rgba(148,163,184,.2);border-radius:999px}
+    .layout{display:grid;grid-template-columns:74px 290px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:20px 18px;border-right:1px solid var(--line);background:linear-gradient(180deg,rgba(7,10,18,.92),rgba(7,10,18,.72));overflow-y:auto;overflow-x:hidden}.sidebar::-webkit-scrollbar{width:8px}.sidebar::-webkit-scrollbar-thumb{background:rgba(148,163,184,.2);border-radius:999px}
+    .serverrail{position:sticky;top:0;height:100vh;padding:14px 10px;border-right:1px solid var(--line);background:rgba(3,7,18,.72);display:flex;flex-direction:column;align-items:center;gap:10px;overflow-y:auto;overflow-x:hidden}.serverrail::-webkit-scrollbar{width:0}.serverbubble{width:50px;height:50px;border-radius:18px;display:grid;place-items:center;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.08);position:relative;transition:.16s ease;color:#fff;font-weight:1000}.serverbubble img{width:100%;height:100%;border-radius:18px;object-fit:cover}.serverbubble span{font-size:15px}.serverbubble:hover{border-radius:15px;transform:translateY(-1px);background:rgba(88,101,242,.18);border-color:rgba(139,92,246,.38)}.serverbubble.active{border-radius:15px;box-shadow:0 0 0 3px rgba(88,101,242,.24);border-color:rgba(139,92,246,.55)}.serverbubble.active:before{content:'';position:absolute;left:-9px;top:11px;bottom:11px;width:4px;border-radius:999px;background:#fff}.serverbubble i{position:absolute;right:-2px;bottom:-2px;width:13px;height:13px;border-radius:999px;border:3px solid #050714;background:#f59e0b}.serverbubble.ok i{background:#22c55e}.serverbubble.bad i{background:#ef4444}.serverbubble.warn i{background:#f59e0b}.serverbubble em{position:absolute;right:-6px;top:-6px;font-style:normal;font-size:13px;background:rgba(15,23,42,.96);border:1px solid var(--line);border-radius:999px;width:22px;height:22px;display:grid;place-items:center}.serversep{width:34px;height:1px;background:var(--line);margin:2px 0}.serverbubble.account{margin-bottom:2px}.serverbubble.ownerbtn{background:linear-gradient(135deg,rgba(245,158,11,.28),rgba(139,92,246,.16));}
     .brand{display:flex;align-items:center;gap:13px;padding:10px 7px 20px;margin-bottom:4px}.logo{width:58px;height:58px;border-radius:22px;background:linear-gradient(135deg,#5865f2,#8b5cf6 58%,#ec4899);display:grid;place-items:center;font-size:29px;box-shadow:0 24px 55px rgba(88,101,242,.32);position:relative}.logo:after{content:"";position:absolute;inset:-1px;border-radius:23px;border:1px solid rgba(255,255,255,.22)}.brand h1{font-size:23px;margin:0;letter-spacing:-.35px}.brand p{margin:5px 0 0;color:var(--muted);font-size:12px}
     .navsection{margin:14px 0 8px;padding:0 8px;color:#64748b;font-size:10px;letter-spacing:.15em;text-transform:uppercase;font-weight:1000}.navlist{display:grid;gap:7px}.navitem{display:flex;align-items:center;gap:11px;padding:12px 13px;border:1px solid transparent;border-radius:17px;color:#cbd5e1;font-weight:900;letter-spacing:-.1px;position:relative;transition:.18s ease}.navicon{width:28px;height:28px;border-radius:11px;display:grid;place-items:center;background:rgba(255,255,255,.06);box-shadow:inset 0 0 0 1px rgba(255,255,255,.06)}.navitem:hover{background:rgba(255,255,255,.06);border-color:var(--line);transform:translateX(2px)}.navitem.active{background:linear-gradient(135deg,rgba(88,101,242,.26),rgba(139,92,246,.18));border-color:rgba(139,92,246,.38);color:#fff;box-shadow:0 12px 30px rgba(88,101,242,.12)}.navitem.active:before{content:"";position:absolute;left:-18px;top:12px;bottom:12px;width:4px;border-radius:999px;background:linear-gradient(180deg,#8b5cf6,#06b6d4)}.ownerlock{margin-left:auto;font-size:11px;color:#fbbf24}.navfoot{margin-top:22px;padding:14px;border:1px solid var(--line);border-radius:22px;background:rgba(15,23,42,.52);box-shadow:var(--soft)}.userbox{display:flex;gap:10px;align-items:center;margin-bottom:11px}.userdot{width:36px;height:36px;border-radius:14px;background:linear-gradient(135deg,#312e81,#8b5cf6);display:grid;place-items:center}.userbox b{display:block}.userbox span{font-size:12px;color:var(--muted)}
     .main{padding:26px;max-width:1540px;width:100%;min-width:0;margin:0 auto}.topbar{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;gap:14px}.headline h2{font-size:34px;line-height:1.05;margin:0;letter-spacing:-.85px}.headline p{color:var(--muted);margin:8px 0 0}.actions{display:flex;gap:10px;flex-wrap:wrap}.btn{border:1px solid var(--line);background:rgba(20,29,52,.82);padding:10px 14px;border-radius:15px;color:var(--text);display:inline-flex;align-items:center;gap:8px;cursor:pointer;font-weight:950;box-shadow:0 10px 30px rgba(0,0,0,.16);transition:.16s ease}.btn.primary{background:linear-gradient(135deg,var(--blue),var(--purple));border-color:transparent}.btn.green{background:linear-gradient(135deg,#15803d,#22c55e);border-color:transparent}.btn.red{background:linear-gradient(135deg,#991b1b,#ef4444);border-color:transparent}.btn:hover{transform:translateY(-1px);filter:brightness(1.08)}
@@ -6399,11 +6551,12 @@ DASHBOARD_BASE_TEMPLATE = r'''
 
     .globalstats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045)}.globalstats div{padding:8px;border-radius:14px;background:rgba(15,23,42,.45);text-align:center}.globalstats b{display:block;font-size:22px;letter-spacing:-.4px}.globalstats span{display:block;color:var(--muted);font-size:11px;font-weight:900;text-transform:uppercase;margin-top:2px}.globalstats.compact{grid-template-columns:1fr 1fr}
     .card,.navitem,.btn{will-change:auto}.card{content-visibility:auto;contain-intrinsic-size:260px}.sidebar .card{content-visibility:visible}.navitem span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tablewrap{border-radius:18px}.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.guildlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}.compactnote{padding:10px 12px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.04);color:var(--muted);font-size:12px}
-    @media(max-width:1100px){.layout{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:26px}.hero .big{font-size:32px}.navfoot{margin-bottom:0}.guildlist{grid-template-columns:1fr}}
+    @media(max-width:1100px){.layout{grid-template-columns:1fr}.serverrail{position:relative;height:auto;flex-direction:row;justify-content:flex-start;overflow-x:auto;overflow-y:hidden}.sidebar{position:relative;height:auto}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:26px}.hero .big{font-size:32px}.navfoot{margin-bottom:0}.guildlist{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
 <div class="layout">
+  {{ server_rail|safe }}
   <aside class="sidebar">
     <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Fast global control panel</p></div></div>
     {{ global_stats_compact|safe }}
@@ -6479,6 +6632,7 @@ def render_dashboard_page(title, body, status=200):
         access_level=access_level,
         role_badge=role_badge,
         global_stats_compact=dashboard_global_stats_html(compact=True),
+        server_rail=dashboard_server_rail_html(),
     ), status
 
 
