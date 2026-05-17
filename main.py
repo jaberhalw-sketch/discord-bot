@@ -7276,6 +7276,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
       <a class="navitem" href="/dashboard"><span class="navicon">🏠</span><span>Overview</span></a>
       <a class="navitem" href="/dashboard/guilds"><span class="navicon">🌍</span><span>Guilds</span></a>
       <a class="navitem" href="/dashboard/command-center"><span class="navicon">🧠</span><span>Command Center</span></a>
+      <a class="navitem" href="/dashboard/discord-activity"><span class="navicon">📡</span><span>Discord Activity</span></a>
+      <a class="navitem" href="/dashboard/discord-sync-status"><span class="navicon">🔁</span><span>Discord Sync Status</span></a>
       <a class="navitem" href="/dashboard/log-vault"><span class="navicon">🗄️</span><span>Log Vault</span></a>
       <a class="navitem" href="/dashboard/user"><span class="navicon">👤</span><span>User Lookup</span></a>
       <a class="navitem" href="/dashboard/warnings"><span class="navicon">⚠️</span><span>Warnings</span></a>
@@ -22243,27 +22245,36 @@ class NMV5BlackjackSafeView(discord.ui.View):
 
 
 # Override all known casino prefix commands without duplicate registration
-for _name, _fn in {
-    "حظ": nm_v5_luck_cmd,
-    "luck": nm_v5_luck_cmd,
-    "دبل": nm_v5_double_cmd,
-    "double": nm_v5_double_cmd,
-    "سلوت": nm_v5_slot_cmd,
-    "slot": nm_v5_slot_cmd,
-    "وجه": nm_v5_flip_cmd,
-    "flip": nm_v5_flip_cmd,
-    "bj": nm_v5_blackjack_cmd,
-    "blackjack": nm_v5_blackjack_cmd,
-    "بلاكجاك": nm_v5_blackjack_cmd,
-}.items():
+# Safe boot guard: in cleaned builds, this block can appear before the final
+# nm_v5_* command functions are defined. Never reference undefined names here.
+def nm_try_install_casino_overrides_early():
     try:
-        _cmd = bot.get_command(_name)
-        if _cmd:
-            _cmd.callback = _fn
-            print(f"✅ NM V5 casino safe ledger override: {_name}")
+        _pairs = {
+            "حظ": "nm_v5_luck_cmd",
+            "luck": "nm_v5_luck_cmd",
+            "دبل": "nm_v5_double_cmd",
+            "double": "nm_v5_double_cmd",
+            "سلوت": "nm_v5_slot_cmd",
+            "slot": "nm_v5_slot_cmd",
+            "وجه": "nm_v5_flip_cmd",
+            "flip": "nm_v5_flip_cmd",
+            "bj": "nm_v5_blackjack_cmd",
+            "blackjack": "nm_v5_blackjack_cmd",
+            "بلاكجاك": "nm_v5_blackjack_cmd",
+        }
+        for _name, _fn_name in _pairs.items():
+            _fn = globals().get(_fn_name)
+            if not _fn:
+                continue
+            _cmd = bot.get_command(_name)
+            if _cmd:
+                _cmd.callback = _fn
+                print(f"✅ NM V5 casino safe ledger override: {_name}")
     except Exception as e:
-        try: print(f"NM V5 casino override failed {_name}: {e}")
+        try: print(f"NM V5 early casino override skipped safely: {e}")
         except Exception: pass
+
+nm_try_install_casino_overrides_early()
 
 # Dashboard replace hardcoded NM Coin if old HTML still says it
 @app.after_request
@@ -25505,6 +25516,485 @@ try:
     print('✅ NM V6 Casino all-in loss fix loaded: legacy ! commands now use strict debit-first ledger')
 except Exception:
     pass
+
+
+# =====================================================================
+# NM V6 DISCORD -> DASHBOARD FULL ACTIVITY MIRROR
+# Purpose: anything important that happens inside Discord is visible in dashboard.
+# This is intentionally installed BEFORE keep_alive()/bot.run().
+# It uses bot.add_listener so it does not overwrite old @bot.event handlers.
+# =====================================================================
+
+NM_DASH_EVENT_RETENTION = 30000
+NM_DASH_MESSAGE_SNIPPET_LIMIT = 700
+
+
+def nm_dash_sync_safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default or 0)
+
+
+def nm_dash_sync_gid_from_request():
+    try:
+        return nm_dash_sync_safe_int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or 0
+        )
+    except Exception:
+        return 0
+
+
+def nm_dash_sync_current_gid():
+    try:
+        gid = nm_dash_sync_gid_from_request()
+        if gid:
+            return gid
+    except Exception:
+        pass
+    try:
+        if "nm_v5_find_runtime_guild_id" in globals():
+            gid = nm_dash_sync_safe_int(nm_v5_find_runtime_guild_id(), 0)
+            if gid:
+                return gid
+    except Exception:
+        pass
+    try:
+        if "nm_active_guild_id" in globals():
+            gid = nm_dash_sync_safe_int(nm_active_guild_id(), 0)
+            if gid:
+                return gid
+    except Exception:
+        pass
+    try:
+        return nm_dash_sync_safe_int(getattr(getattr(bot, "guilds", [None])[0], "id", 0), 0) if getattr(bot, "guilds", None) else 0
+    except Exception:
+        return 0
+
+
+def nm_dash_sync_html(value, limit=2000):
+    try:
+        return dash_escape(str(value or "")[:limit], limit)
+    except Exception:
+        try:
+            return html.escape(str(value or "")[:limit])
+        except Exception:
+            return ""
+
+
+def nm_dash_sync_json(data):
+    try:
+        return json.dumps(data or {}, ensure_ascii=False, default=str)[:6000]
+    except Exception:
+        return "{}"
+
+
+def nm_dash_sync_member_name(user):
+    try:
+        return str(getattr(user, "display_name", None) or getattr(user, "name", None) or user)
+    except Exception:
+        return "Unknown"
+
+
+def nm_dash_sync_init():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_discord_dashboard_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER DEFAULT 0,
+                event_type TEXT DEFAULT 'general',
+                title TEXT DEFAULT '',
+                actor_id INTEGER DEFAULT 0,
+                actor_name TEXT DEFAULT '',
+                target_id INTEGER DEFAULT 0,
+                target_name TEXT DEFAULT '',
+                channel_id INTEGER DEFAULT 0,
+                channel_name TEXT DEFAULT '',
+                message_id INTEGER DEFAULT 0,
+                content TEXT DEFAULT '',
+                metadata_json TEXT DEFAULT '{}',
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_nm_dash_events_guild_time ON nm_discord_dashboard_events(guild_id, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_nm_dash_events_type ON nm_discord_dashboard_events(guild_id, event_type, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_nm_dash_events_actor ON nm_discord_dashboard_events(guild_id, actor_id, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_nm_dash_events_channel ON nm_discord_dashboard_events(guild_id, channel_id, id DESC)")
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try: print(f"NM dashboard event init failed: {e}")
+        except Exception: pass
+        return False
+
+
+def nm_dash_event_record(guild_id=0, event_type="general", title="", actor=None, target=None, channel=None, message=None, content="", metadata=None):
+    try:
+        nm_dash_sync_init()
+        guild_id = nm_dash_sync_safe_int(guild_id or getattr(getattr(message, "guild", None), "id", 0) or getattr(getattr(channel, "guild", None), "id", 0), 0)
+        actor_id = nm_dash_sync_safe_int(getattr(actor, "id", 0), 0)
+        actor_name = nm_dash_sync_member_name(actor)[:160] if actor else ""
+        target_id = nm_dash_sync_safe_int(getattr(target, "id", 0), 0)
+        target_name = nm_dash_sync_member_name(target)[:160] if target else ""
+        channel_id = nm_dash_sync_safe_int(getattr(channel, "id", 0) or getattr(getattr(message, "channel", None), "id", 0), 0)
+        channel_name = str(getattr(channel, "name", "") or getattr(getattr(message, "channel", None), "name", "") or "")[:180]
+        message_id = nm_dash_sync_safe_int(getattr(message, "id", 0), 0)
+        content = str(content or getattr(message, "content", "") or "")[:NM_DASH_MESSAGE_SNIPPET_LIMIT]
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO nm_discord_dashboard_events
+            (guild_id, event_type, title, actor_id, actor_name, target_id, target_name, channel_id, channel_name,
+             message_id, content, metadata_json, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            guild_id, str(event_type or "general")[:80], str(title or "")[:240], actor_id, actor_name,
+            target_id, target_name, channel_id, channel_name, message_id, content, nm_dash_sync_json(metadata), int(time.time())
+        ))
+        try:
+            cur.execute("""
+                DELETE FROM nm_discord_dashboard_events
+                WHERE id NOT IN (
+                    SELECT id FROM nm_discord_dashboard_events
+                    WHERE guild_id=? ORDER BY id DESC LIMIT ?
+                ) AND guild_id=?
+            """, (guild_id, int(NM_DASH_EVENT_RETENTION), guild_id))
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        try: print(f"NM dashboard event record failed: {e}")
+        except Exception: pass
+        return False
+
+
+async def nm_dash_listener_message(message):
+    try:
+        if not getattr(message, "guild", None):
+            return
+        if getattr(getattr(message, "author", None), "bot", False):
+            return
+        content = str(getattr(message, "content", "") or "")
+        is_command = content.strip().startswith(str(globals().get("PREFIX", "!")))
+        # Keep a dashboard-visible feed of all user messages, with commands highlighted.
+        nm_dash_event_record(
+            message.guild.id,
+            "discord_command_message" if is_command else "discord_message",
+            "Command message" if is_command else "Message sent",
+            actor=message.author,
+            channel=message.channel,
+            message=message,
+            content=content,
+            metadata={
+                "attachments": [getattr(a, "filename", "") for a in getattr(message, "attachments", [])],
+                "mentions": [getattr(u, "id", 0) for u in getattr(message, "mentions", [])],
+                "jump_url": getattr(message, "jump_url", ""),
+            },
+        )
+    except Exception as e:
+        try: print(f"NM dash message listener failed: {e}")
+        except Exception: pass
+
+
+async def nm_dash_listener_message_delete(message):
+    try:
+        if not getattr(message, "guild", None):
+            return
+        nm_dash_event_record(message.guild.id, "message_delete", "Message deleted", actor=getattr(message, "author", None), channel=getattr(message, "channel", None), message=message, content=getattr(message, "content", ""), metadata={"attachments": [getattr(a, "filename", "") for a in getattr(message, "attachments", [])]})
+    except Exception: pass
+
+
+async def nm_dash_listener_message_edit(before, after):
+    try:
+        if not getattr(after, "guild", None):
+            return
+        if getattr(getattr(after, "author", None), "bot", False):
+            return
+        nm_dash_event_record(after.guild.id, "message_edit", "Message edited", actor=after.author, channel=after.channel, message=after, content=getattr(after, "content", ""), metadata={"before": str(getattr(before, "content", "") or "")[:700], "after": str(getattr(after, "content", "") or "")[:700], "jump_url": getattr(after, "jump_url", "")})
+    except Exception: pass
+
+
+async def nm_dash_listener_command(ctx):
+    try:
+        if not getattr(ctx, "guild", None):
+            return
+        nm_dash_event_record(ctx.guild.id, "command_start", f"Command: {getattr(getattr(ctx, 'command', None), 'qualified_name', 'unknown')}", actor=ctx.author, channel=ctx.channel, message=ctx.message, content=getattr(ctx.message, "content", ""), metadata={"command": str(getattr(getattr(ctx, "command", None), "qualified_name", "")), "prefix": str(getattr(ctx, "prefix", ""))})
+    except Exception: pass
+
+
+async def nm_dash_listener_command_completion(ctx):
+    try:
+        if not getattr(ctx, "guild", None):
+            return
+        nm_dash_event_record(ctx.guild.id, "command_success", f"Command completed: {getattr(getattr(ctx, 'command', None), 'qualified_name', 'unknown')}", actor=ctx.author, channel=ctx.channel, message=ctx.message, content=getattr(ctx.message, "content", ""), metadata={"command": str(getattr(getattr(ctx, "command", None), "qualified_name", ""))})
+    except Exception: pass
+
+
+async def nm_dash_listener_command_error(ctx, error):
+    try:
+        if not getattr(ctx, "guild", None):
+            return
+        nm_dash_event_record(ctx.guild.id, "command_error", f"Command error: {getattr(getattr(ctx, 'command', None), 'qualified_name', 'unknown')}", actor=ctx.author, channel=ctx.channel, message=ctx.message, content=getattr(ctx.message, "content", ""), metadata={"error": f"{type(error).__name__}: {error}"[:1000]})
+    except Exception: pass
+
+
+async def nm_dash_listener_interaction(interaction):
+    try:
+        if not getattr(interaction, "guild", None):
+            return
+        data = getattr(interaction, "data", {}) or {}
+        name = data.get("name") or data.get("custom_id") or str(getattr(interaction, "type", "interaction"))
+        nm_dash_event_record(interaction.guild.id, "interaction", f"Interaction: {name}", actor=getattr(interaction, "user", None), channel=getattr(interaction, "channel", None), content=str(name), metadata={"type": str(getattr(interaction, "type", "")), "data": data})
+    except Exception: pass
+
+
+async def nm_dash_listener_member_join(member):
+    try:
+        nm_dash_event_record(member.guild.id, "member_join", "Member joined", actor=member, target=member, metadata={"bot": bool(getattr(member, "bot", False))})
+    except Exception: pass
+
+
+async def nm_dash_listener_member_remove(member):
+    try:
+        nm_dash_event_record(member.guild.id, "member_leave", "Member left", actor=member, target=member, metadata={"bot": bool(getattr(member, "bot", False))})
+    except Exception: pass
+
+
+async def nm_dash_listener_member_update(before, after):
+    try:
+        if not getattr(after, "guild", None):
+            return
+        changes = {}
+        if getattr(before, "nick", None) != getattr(after, "nick", None):
+            changes["nick"] = {"before": getattr(before, "nick", None), "after": getattr(after, "nick", None)}
+        before_roles = {r.id: r.name for r in getattr(before, "roles", [])}
+        after_roles = {r.id: r.name for r in getattr(after, "roles", [])}
+        added = [name for rid, name in after_roles.items() if rid not in before_roles]
+        removed = [name for rid, name in before_roles.items() if rid not in after_roles]
+        if added or removed:
+            changes["roles"] = {"added": added, "removed": removed}
+        if changes:
+            nm_dash_event_record(after.guild.id, "member_update", "Member updated", actor=after, target=after, metadata=changes)
+    except Exception: pass
+
+
+async def nm_dash_listener_voice_state_update(member, before, after):
+    try:
+        gid = member.guild.id
+        before_ch = getattr(getattr(before, "channel", None), "name", None)
+        after_ch = getattr(getattr(after, "channel", None), "name", None)
+        if before_ch == after_ch:
+            return
+        title = "Voice joined" if not before_ch and after_ch else "Voice left" if before_ch and not after_ch else "Voice moved"
+        nm_dash_event_record(gid, "voice_state", title, actor=member, target=member, channel=getattr(after, "channel", None) or getattr(before, "channel", None), metadata={"before": before_ch, "after": after_ch})
+    except Exception: pass
+
+
+async def nm_dash_listener_guild_channel_create(channel):
+    try:
+        nm_dash_event_record(channel.guild.id, "channel_create", "Channel created", channel=channel, metadata={"name": getattr(channel, "name", ""), "type": str(getattr(channel, "type", ""))})
+    except Exception: pass
+
+
+async def nm_dash_listener_guild_channel_delete(channel):
+    try:
+        nm_dash_event_record(channel.guild.id, "channel_delete", "Channel deleted", channel=channel, metadata={"name": getattr(channel, "name", ""), "type": str(getattr(channel, "type", ""))})
+    except Exception: pass
+
+
+async def nm_dash_listener_guild_role_create(role):
+    try:
+        nm_dash_event_record(role.guild.id, "role_create", "Role created", target=role, metadata={"role_id": role.id, "name": role.name})
+    except Exception: pass
+
+
+async def nm_dash_listener_guild_role_delete(role):
+    try:
+        nm_dash_event_record(role.guild.id, "role_delete", "Role deleted", target=role, metadata={"role_id": role.id, "name": role.name})
+    except Exception: pass
+
+
+def nm_install_discord_dashboard_sync_listeners():
+    try:
+        nm_dash_sync_init()
+        listeners = [
+            (nm_dash_listener_message, "on_message"),
+            (nm_dash_listener_message_delete, "on_message_delete"),
+            (nm_dash_listener_message_edit, "on_message_edit"),
+            (nm_dash_listener_command, "on_command"),
+            (nm_dash_listener_command_completion, "on_command_completion"),
+            (nm_dash_listener_command_error, "on_command_error"),
+            (nm_dash_listener_interaction, "on_interaction"),
+            (nm_dash_listener_member_join, "on_member_join"),
+            (nm_dash_listener_member_remove, "on_member_remove"),
+            (nm_dash_listener_member_update, "on_member_update"),
+            (nm_dash_listener_voice_state_update, "on_voice_state_update"),
+            (nm_dash_listener_guild_channel_create, "on_guild_channel_create"),
+            (nm_dash_listener_guild_channel_delete, "on_guild_channel_delete"),
+            (nm_dash_listener_guild_role_create, "on_guild_role_create"),
+            (nm_dash_listener_guild_role_delete, "on_guild_role_delete"),
+        ]
+        existing = getattr(bot, "extra_events", {}) or {}
+        for func, event_name in listeners:
+            current = existing.get(event_name, [])
+            if not any(getattr(f, "__name__", "") == getattr(func, "__name__", "") for f in current):
+                bot.add_listener(func, event_name)
+        print("✅ NM Discord -> Dashboard activity mirror installed")
+    except Exception as e:
+        try: print(f"❌ NM Discord dashboard sync install failed: {e}")
+        except Exception: pass
+
+
+@app.route("/dashboard/discord-sync-status")
+def nm_discord_sync_status_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_dash_sync_current_gid()
+    try:
+        nm_dash_sync_init()
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS c FROM nm_discord_dashboard_events WHERE guild_id=?", (int(gid),))
+        total = int((cur.fetchone()["c"] if hasattr(cur.fetchone, "__call__") else 0) or 0)
+    except Exception:
+        total = 0
+    try:
+        # Re-query safely because the expression above is kept defensive for mixed row factories.
+        conn = db_connect(); cur = conn.cursor(); cur.execute("SELECT COUNT(*) FROM nm_discord_dashboard_events WHERE guild_id=?", (int(gid),)); total = int(cur.fetchone()[0] or 0); conn.close()
+    except Exception:
+        pass
+    body = f"""
+    <div class='hero'>
+      <div class='card'><div class='big'>🔁 Discord Sync Status</div><p class='muted'>أي حدث مهم يصير في الديسكورد ينحفظ هنا ويطلع في الداشبورد.</p></div>
+      <div class='card'><h3>Guild</h3><div class='cc-stat'>{int(gid)}</div><span class='pill ok'>Global Multi-Guild</span></div>
+    </div>
+    <div class='grid3'>
+      <div class='card'><h3>📡 Activity Events</h3><div class='cc-stat'>{total:,}</div><p class='muted small'>Messages, commands, interactions, joins/leaves, voice, roles, channels.</p></div>
+      <div class='card'><h3>💰 Money Tracker</h3><p class='muted'>الفلوس والقمار والتحويلات تظهر في Money Tracker.</p><a class='btn primary' href='/dashboard/money-tracker?guild_id={int(gid)}'>Open Money Tracker</a></div>
+      <div class='card'><h3>🏠 Real Estate Audit</h3><p class='muted'>العقارات والإيجارات والتملك تظهر في Real Estate Audit.</p><a class='btn primary' href='/dashboard/real-estate-audit-pro?guild_id={int(gid)}'>Open Real Estate Audit</a></div>
+    </div>
+    <div class='card'><a class='btn' href='/dashboard/discord-activity?guild_id={int(gid)}'>📡 Open Discord Activity</a></div>
+    """
+    return render_dashboard_page("Discord Sync Status", body)
+
+
+@app.route("/dashboard/discord-activity")
+def nm_discord_activity_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
+    gid = nm_dash_sync_current_gid()
+    event_type = str(request.args.get("type") or "").strip()[:80]
+    user_id_raw = str(request.args.get("user_id") or "").strip()
+    channel_id_raw = str(request.args.get("channel_id") or "").strip()
+    q_raw = str(request.args.get("q") or "").strip()[:120]
+    limit = max(25, min(500, nm_dash_sync_safe_int(request.args.get("limit") or 200, 200)))
+    nm_dash_sync_init()
+    where = ["guild_id=?"]
+    params = [int(gid)]
+    if event_type:
+        where.append("event_type=?")
+        params.append(event_type)
+    if user_id_raw.isdigit():
+        where.append("(actor_id=? OR target_id=?)")
+        params.extend([int(user_id_raw), int(user_id_raw)])
+    if channel_id_raw.isdigit():
+        where.append("channel_id=?")
+        params.append(int(channel_id_raw))
+    if q_raw:
+        where.append("(title LIKE ? OR content LIKE ? OR actor_name LIKE ? OR target_name LIKE ? OR metadata_json LIKE ?)")
+        like = f"%{q_raw}%"
+        params.extend([like, like, like, like, like])
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(f"""
+            SELECT id, event_type, title, actor_id, actor_name, target_id, target_name, channel_id, channel_name,
+                   message_id, content, metadata_json, created_at
+            FROM nm_discord_dashboard_events
+            WHERE {' AND '.join(where)}
+            ORDER BY id DESC
+            LIMIT ?
+        """, (*params, int(limit)))
+        rows = cur.fetchall()
+        cur.execute("SELECT event_type, COUNT(*) FROM nm_discord_dashboard_events WHERE guild_id=? GROUP BY event_type ORDER BY COUNT(*) DESC LIMIT 18", (int(gid),))
+        counts = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        rows = []
+        counts = []
+        try: print(f"Discord activity page error: {e}")
+        except Exception: pass
+    def col(row, key, idx):
+        try: return row[key]
+        except Exception:
+            try: return row[idx]
+            except Exception: return ""
+    type_links = "".join(f"<a class='pill' href='/dashboard/discord-activity?guild_id={int(gid)}&type={nm_dash_sync_html(col(c,'event_type',0),80)}'>{nm_dash_sync_html(col(c,'event_type',0),80)}: {int(col(c,'COUNT(*)',1) or col(c,1,1) or 0):,}</a> " for c in counts)
+    rows_html = ""
+    for r in rows:
+        rid = col(r, "id", 0)
+        et = col(r, "event_type", 1)
+        title = col(r, "title", 2)
+        actor_id = nm_dash_sync_safe_int(col(r, "actor_id", 3), 0)
+        actor_name = col(r, "actor_name", 4)
+        target_id = nm_dash_sync_safe_int(col(r, "target_id", 5), 0)
+        target_name = col(r, "target_name", 6)
+        channel_id = nm_dash_sync_safe_int(col(r, "channel_id", 7), 0)
+        channel_name = col(r, "channel_name", 8)
+        msg_id = nm_dash_sync_safe_int(col(r, "message_id", 9), 0)
+        content = col(r, "content", 10)
+        created = nm_dash_sync_safe_int(col(r, "created_at", 12), 0)
+        actor_cell = f"{nm_dash_sync_html(actor_name, 120)}<br><span class='muted small'>{actor_id}</span>" if actor_id else "-"
+        target_cell = f"{nm_dash_sync_html(target_name, 120)}<br><span class='muted small'>{target_id}</span>" if target_id else "-"
+        channel_cell = f"#{nm_dash_sync_html(channel_name, 120)}<br><span class='muted small'>{channel_id}</span>" if channel_id else "-"
+        rows_html += f"""
+        <tr>
+          <td><b>#{rid}</b><br><span class='pill'>{nm_dash_sync_html(et, 80)}</span><br><span class='muted small'>{created}</span></td>
+          <td>{nm_dash_sync_html(title, 220)}<br><span class='muted small'>Message: {msg_id or '-'}</span></td>
+          <td>{actor_cell}</td>
+          <td>{target_cell}</td>
+          <td>{channel_cell}</td>
+          <td style='max-width:420px;white-space:pre-wrap'>{nm_dash_sync_html(content, 700)}</td>
+        </tr>
+        """
+    if not rows_html:
+        rows_html = "<tr><td colspan='6'>No Discord activity logged yet for this guild. Send a message or command after redeploy.</td></tr>"
+    body = f"""
+    <div class='hero'>
+      <div class='card'><div class='big'>📡 Discord Activity</div><p class='muted'>هذه الصفحة تجمع أحداث الديسكورد داخل الداشبورد: رسائل، أوامر، أخطاء أوامر، تفاعلات أزرار/سلاش، دخول/خروج، فويس، رتب، ورومات.</p></div>
+      <div class='card'><h3>Guild</h3><div class='cc-stat'>{int(gid)}</div><a class='btn' href='/dashboard/discord-sync-status?guild_id={int(gid)}'>Sync Status</a></div>
+    </div>
+    <form class='card audit-filter' method='get' action='/dashboard/discord-activity'>
+      <input type='hidden' name='guild_id' value='{int(gid)}'>
+      <div><label>Type</label><input name='type' value='{nm_dash_sync_html(event_type, 80)}' placeholder='command_success / discord_message'></div>
+      <div><label>User ID</label><input name='user_id' value='{nm_dash_sync_html(user_id_raw, 40)}'></div>
+      <div><label>Channel ID</label><input name='channel_id' value='{nm_dash_sync_html(channel_id_raw, 40)}'></div>
+      <div><label>Search</label><input name='q' value='{nm_dash_sync_html(q_raw, 120)}' placeholder='text / name / command'></div>
+      <div><label>Limit</label><input name='limit' value='{int(limit)}'></div>
+      <div><button class='btn primary'>Filter</button></div>
+    </form>
+    <div class='card'><h3>Event Types</h3>{type_links or '<span class="muted">No events yet.</span>'}</div>
+    <div class='card'><h3>Latest Discord Events</h3><div class='tablewrap'><table class='table'><tr><th>ID / Type</th><th>Title</th><th>Actor</th><th>Target</th><th>Channel</th><th>Content</th></tr>{rows_html}</table></div></div>
+    """
+    return render_dashboard_page("Discord Activity", body)
+
+
+try:
+    nm_install_discord_dashboard_sync_listeners()
+except Exception as e:
+    try: print(f"NM Discord dashboard sync boot ignored: {e}")
+    except Exception: pass
 
 keep_alive()
 
