@@ -4977,6 +4977,112 @@ def dashboard_get_member_sync(user_id):
         return None
 
 
+async def dashboard_fetch_member_from_guild(guild_id, user_id):
+    guild = bot.get_guild(int(guild_id or 0)) if bot else None
+    if not guild:
+        return None
+    try:
+        member = guild.get_member(int(user_id))
+        if member:
+            return member
+        return await guild.fetch_member(int(user_id))
+    except Exception:
+        return None
+
+
+def dashboard_get_member_in_guild_sync(guild_id, user_id, timeout=4):
+    try:
+        future = asyncio.run_coroutine_threadsafe(
+            dashboard_fetch_member_from_guild(int(guild_id or 0), int(user_id)),
+            bot.loop
+        )
+        return future.result(timeout=timeout)
+    except Exception:
+        return None
+
+
+def dashboard_member_name_in_guild(user_id, guild_id=0, include_id=True):
+    try:
+        user_id = int(user_id or 0)
+    except Exception:
+        user_id = 0
+    if not user_id:
+        return "Unknown User"
+
+    member = dashboard_get_member_in_guild_sync(guild_id, user_id) if guild_id else dashboard_get_member_sync(user_id)
+    if not member:
+        id_part = f"<br><span class='muted small'>ID: {user_id}</span>" if include_id else ""
+        return f"User {user_id}{id_part}"
+
+    nick = html.escape(str(getattr(member, "display_name", "") or member.name))
+    username = html.escape(str(member))
+    if str(getattr(member, "display_name", "") or "") and member.display_name != member.name:
+        main = f"<b>{nick}</b><br><span class='muted small'>@{username}</span>"
+    else:
+        main = f"<b>@{username}</b>"
+    if include_id:
+        main += f"<br><span class='muted small'>ID: {user_id}</span>"
+    return main
+
+
+def dashboard_member_chip_in_guild(user_id, guild_id=0):
+    try:
+        user_id = int(user_id or 0)
+    except Exception:
+        return html.escape(str(user_id or "Unknown"))
+    member = dashboard_get_member_in_guild_sync(guild_id, user_id) if guild_id else dashboard_get_member_sync(user_id)
+    if not member:
+        return html.escape(str(user_id))
+    nick = html.escape(str(getattr(member, "display_name", "") or member.name))
+    username = html.escape(str(member))
+    if getattr(member, "display_name", member.name) != member.name:
+        label = f"{nick} (@{username})"
+    else:
+        label = f"@{username}"
+    return f"<span class='user-chip' title='ID: {user_id}'>{label}</span>"
+
+
+def log_vault_enrich_user_ids_html(text, guild_id=0, limit=6000):
+    raw = str(text or "")[:int(limit)]
+    if not raw:
+        return ""
+
+    # Replace Discord user mentions and raw user IDs with nickname + username when the member exists in this guild.
+    mention_re = re.compile(r"<@!?(\d{15,25})>")
+    id_re = re.compile(r"(?<!\d)(\d{17,22})(?!\d)")
+    cache = {}
+
+    def chip(uid):
+        uid = str(uid)
+        if uid not in cache:
+            cache[uid] = dashboard_member_chip_in_guild(int(uid), guild_id)
+        return cache[uid]
+
+    parts = []
+    pos = 0
+    for m in mention_re.finditer(raw):
+        before = raw[pos:m.start()]
+        parts.append(html.escape(before))
+        parts.append(chip(m.group(1)))
+        pos = m.end()
+    parts.append(html.escape(raw[pos:]))
+    html_text = "".join(parts)
+
+    # Enrich raw IDs only if they belong to a real member in the selected guild; otherwise keep the number.
+    def repl_id(match):
+        uid = match.group(1)
+        member = dashboard_get_member_in_guild_sync(guild_id, int(uid), timeout=2) if guild_id else dashboard_get_member_sync(int(uid))
+        if not member:
+            return uid
+        return f"{uid} {chip(uid)}"
+
+    try:
+        html_text = id_re.sub(repl_id, html_text)
+    except Exception:
+        pass
+    return html_text
+
+
 
 def dashboard_member_has_role(member, role_ids):
     try:
@@ -9249,12 +9355,12 @@ def dashboard_log_vault_page():
         vault_id, row_guild_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
         icon, type_label = log_vault_type_meta(row_type)
         title_text = dash_escape(title or "Untitled log", 180)
-        summary = dash_escape(log_vault_short_text(description, 360), 420)
-        full_desc = dash_escape(description, 6000)
+        summary = log_vault_enrich_user_ids_html(log_vault_short_text(description, 360), selected_guild_id, 420)
+        full_desc = log_vault_enrich_user_ids_html(description, selected_guild_id, 6000)
         status = "<span class='vault-status saved'>Saved</span>"
         deleted_line = ""
         if int(deleted_flag or 0) == 1:
-            deleter = dashboard_member_name(deleted_by_id) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
+            deleter = dashboard_member_name_in_guild(deleted_by_id, selected_guild_id, include_id=True) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
             deleted_line = f"<div class='vault-deleted'>Deleted by {deleter} • {cc_time(deleted_at)}</div>"
             status = "<span class='vault-status deleted'>Deleted in Discord</span>"
         channel_label = f"#{dash_escape(channel_name, 80)}" if channel_name else "Unknown channel"
@@ -9332,6 +9438,7 @@ def dashboard_log_vault_page():
       .log-time {{ color:var(--muted); font-size:12px; margin-inline-start:auto; }}
       .log-title {{ font-weight:950; font-size:16px; margin-top:6px; overflow-wrap:anywhere; }}
       .log-summary {{ color:var(--muted); line-height:1.55; margin-top:5px; overflow-wrap:anywhere; }}
+      .user-chip {{ display:inline-flex; align-items:center; gap:4px; border:1px solid rgba(59,130,246,.28); background:rgba(59,130,246,.12); color:#bfdbfe; border-radius:999px; padding:2px 7px; font-weight:900; white-space:normal; }}
       .log-actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px; }}
       .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
       .vault-status.saved {{ color:#86efac; background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.25); }}
@@ -9349,7 +9456,7 @@ def dashboard_log_vault_page():
 
     <div class="card">
       <div class="big">🗄️ Log Vault</div>
-      <p class="muted">صار مثل Discord: اختر روم اللوق من اليسار، وتشوف لوقات هذا الروم فقط. اللوقات المحذوفة من Discord تظل محفوظة هنا.</p>
+      <p class="muted">صار مثل Discord: اختر روم اللوق من اليسار، وتشوف لوقات هذا الروم فقط. أرقام الأعضاء تتحول تلقائيًا إلى النك نيم واليوزر داخل السيرفر.</p>
       <div style="height:10px"></div>
       <span class="pill ok">Owner Only</span>
       <span class="pill">Room-based view</span>
