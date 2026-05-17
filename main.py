@@ -11269,6 +11269,10 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    try:
+        await nm_sync_slash_commands()
+    except Exception:
+        pass
     global memory_backup_task, economy_explain_task, booster_weekly_task, timed_roles_task, auction_task
 
     guild = bot.get_guild(GUILD_ID)
@@ -11331,15 +11335,270 @@ async def on_ready():
         status=discord.Status.online,
         activity=discord.Activity(
             type=discord.ActivityType.watching,
-            name="7 Servers | /setup_status"
+            name="7 Servers | !راتب + /راتب"
         )
     )
 
     print(f"NM System Ready: {bot.user}")
 
 
+
+# =========================
+# NM LEGACY ! COMMAND BRIDGE
+# =========================
+_nm_legacy_done = set()
+
+def nm_legacy_gid(message):
+    try:
+        return int(message.guild.id)
+    except Exception:
+        return GUILD_ID
+
+def nm_legacy_coin(guild_id):
+    try:
+        if "get_guild_settings" in globals():
+            s = get_guild_settings(int(guild_id))
+            return s.get("coin_name") or s.get("currency_name") or s.get("economy_coin_name") or "NM Coin"
+    except Exception:
+        pass
+    return "NM Coin"
+
+def nm_legacy_ensure_economy(cur):
+    cur.execute("CREATE TABLE IF NOT EXISTS economy (guild_id INTEGER DEFAULT 0, user_id INTEGER, balance INTEGER DEFAULT 0)")
+    try:
+        nm_ensure_guild_column(cur, "economy")
+    except Exception:
+        pass
+
+def nm_legacy_balance(guild_id, user_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_legacy_ensure_economy(cur)
+        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
+        row = cur.fetchone()
+        if not row:
+            cur.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (?,?,?)", (int(guild_id), int(user_id), 0))
+            conn.commit()
+            bal = 0
+        else:
+            bal = int(row[0] or 0)
+        conn.close()
+        return bal
+    except Exception as e:
+        print(f"legacy balance error: {e}")
+        return 0
+
+def nm_legacy_add_money(guild_id, user_id, amount):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_legacy_ensure_economy(cur)
+        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
+        if not cur.fetchone():
+            cur.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (?,?,?)", (int(guild_id), int(user_id), 0))
+        cur.execute("UPDATE economy SET balance=COALESCE(balance,0)+? WHERE guild_id=? AND user_id=?", (int(amount), int(guild_id), int(user_id)))
+        conn.commit()
+        conn.close()
+        try:
+            nm_persist_dashboard_change("legacy economy change")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        print(f"legacy add money error: {e}")
+        return False
+
+def nm_legacy_take_money(guild_id, user_id, amount):
+    if nm_legacy_balance(guild_id, user_id) < int(amount):
+        return False
+    return nm_legacy_add_money(guild_id, user_id, -int(amount))
+
+def nm_legacy_amount(raw):
+    try:
+        return max(1, int(str(raw).replace(",", "").strip()))
+    except Exception:
+        return 0
+
+def nm_legacy_level(guild_id, user_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        try:
+            nm_ensure_guild_column(cur, "levels")
+        except Exception:
+            pass
+        cur.execute("SELECT level,xp FROM levels WHERE guild_id=? AND user_id=? LIMIT 1", (int(guild_id), int(user_id)))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return int(row[0] or 1), int(row[1] or 0)
+    except Exception:
+        pass
+    return 1, 0
+
+async def nm_legacy_salary(message):
+    gid = nm_legacy_gid(message)
+    uid = int(message.author.id)
+    now = int(time.time())
+    level, xp = nm_legacy_level(gid, uid)
+    amount = 250 + level * 25
+
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""CREATE TABLE IF NOT EXISTS nm_salary_cooldowns
+                       (guild_id INTEGER, user_id INTEGER, last_claim INTEGER DEFAULT 0,
+                        PRIMARY KEY (guild_id,user_id))""")
+        cur.execute("SELECT last_claim FROM nm_salary_cooldowns WHERE guild_id=? AND user_id=?", (gid, uid))
+        row = cur.fetchone()
+        last = int(row[0] or 0) if row else 0
+        remaining = 3600 - (now - last)
+        if remaining > 0:
+            conn.close()
+            return await message.channel.send(f"⏳ {message.author.mention} تقدر تستلم راتب جديد بعد **{max(1, remaining//60)} دقيقة**.")
+        nm_legacy_add_money(gid, uid, amount)
+        cur.execute("""INSERT INTO nm_salary_cooldowns (guild_id,user_id,last_claim) VALUES (?,?,?)
+                       ON CONFLICT(guild_id,user_id) DO UPDATE SET last_claim=excluded.last_claim""", (gid, uid, now))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"legacy salary error: {e}")
+        nm_legacy_add_money(gid, uid, amount)
+
+    coin = nm_legacy_coin(gid)
+    bal = nm_legacy_balance(gid, uid)
+    embed = discord.Embed(
+        title=f"{message.author.display_name} • Salary",
+        description=f"**تم استلام الراتب 💸**\n\nتم إيداع الراتب في محفظتك يا {message.author.mention}\n\n📈 **+{amount:,} 🪙 {coin}**  Level **{level}**\n\n**الرصيد الجديد 💼**\n🪙 **{bal:,} {coin}**",
+        color=0x22c55e
+    )
+    try:
+        embed.set_thumbnail(url=message.author.display_avatar.url)
+    except Exception:
+        pass
+    embed.set_footer(text="NM System • تقدر تستلم راتب جديد كل ساعة")
+    await message.channel.send(embed=embed)
+
+async def nm_legacy_balance_cmd(message):
+    gid = nm_legacy_gid(message)
+    member = message.mentions[0] if message.mentions else message.author
+    coin = nm_legacy_coin(gid)
+    bal = nm_legacy_balance(gid, int(member.id))
+    embed = discord.Embed(title=f"{member.display_name} • Wallet", description=f"🪙 **{bal:,} {coin}**", color=0x8b5cf6)
+    try:
+        embed.set_thumbnail(url=member.display_avatar.url)
+    except Exception:
+        pass
+    await message.channel.send(embed=embed)
+
+async def nm_legacy_luck(message, amount):
+    gid = nm_legacy_gid(message)
+    uid = int(message.author.id)
+    amount = nm_legacy_amount(amount)
+    coin = nm_legacy_coin(gid)
+    if amount <= 0:
+        return await message.channel.send("اكتب مبلغ صحيح. مثال: `!حظ 100`")
+    if not nm_legacy_take_money(gid, uid, amount):
+        return await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{nm_legacy_balance(gid, uid):,} {coin}**")
+    import random
+    if random.random() < 0.5:
+        nm_legacy_add_money(gid, uid, amount * 2)
+        await message.channel.send(f"🎉 فزت! ربحت **{amount:,} {coin}**\nرصيدك: **{nm_legacy_balance(gid, uid):,} {coin}**")
+    else:
+        await message.channel.send(f"💀 خسرت **{amount:,} {coin}**\nرصيدك: **{nm_legacy_balance(gid, uid):,} {coin}**")
+
+async def nm_legacy_slot(message, amount):
+    gid = nm_legacy_gid(message)
+    uid = int(message.author.id)
+    amount = nm_legacy_amount(amount)
+    coin = nm_legacy_coin(gid)
+    if amount <= 0:
+        return await message.channel.send("اكتب مبلغ صحيح. مثال: `!سلوت 100`")
+    if not nm_legacy_take_money(gid, uid, amount):
+        return await message.channel.send(f"❌ رصيدك ما يكفي. رصيدك: **{nm_legacy_balance(gid, uid):,} {coin}**")
+    import random
+    icons = ["🍒","🍋","🍇","💎","7️⃣"]
+    roll = [random.choice(icons) for _ in range(3)]
+    if len(set(roll)) == 1:
+        prize = amount * 5
+        nm_legacy_add_money(gid, uid, prize)
+        return await message.channel.send(f"🎰 {' | '.join(roll)}\n🔥 جاك بوت! ربحت **{prize:,} {coin}**")
+    if len(set(roll)) == 2:
+        prize = amount * 2
+        nm_legacy_add_money(gid, uid, prize)
+        return await message.channel.send(f"🎰 {' | '.join(roll)}\n🎉 ربحت **{prize:,} {coin}**")
+    await message.channel.send(f"🎰 {' | '.join(roll)}\n💀 خسرت **{amount:,} {coin}**")
+
+async def nm_legacy_top(message):
+    gid = nm_legacy_gid(message)
+    coin = nm_legacy_coin(gid)
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_legacy_ensure_economy(cur)
+        cur.execute("SELECT user_id,balance FROM economy WHERE guild_id=? ORDER BY balance DESC LIMIT 10", (gid,))
+        rows = cur.fetchall()
+        conn.close()
+    except Exception:
+        rows = []
+    if not rows:
+        return await message.channel.send("ما فيه بيانات اقتصاد للحين.")
+    lines = []
+    for i, (uid, bal) in enumerate(rows, 1):
+        m = message.guild.get_member(int(uid)) if message.guild else None
+        lines.append(f"**#{i}** {(m.mention if m else f'`{uid}`')} — 🪙 **{int(bal):,} {coin}**")
+    await message.channel.send(embed=discord.Embed(title="🏆 أغنى الأعضاء", description="\n".join(lines), color=0xf59e0b))
+
+async def nm_handle_legacy_bang(message):
+    if not message.guild or message.author.bot:
+        return False
+    content = (message.content or "").strip()
+    if not content.startswith("!"):
+        return False
+    if message.id in _nm_legacy_done:
+        return True
+    _nm_legacy_done.add(message.id)
+    if len(_nm_legacy_done) > 5000:
+        _nm_legacy_done.clear()
+
+    parts = content.split()
+    cmd = parts[0].lower()
+    args = parts[1:]
+
+    if cmd in {"!ping","!بنق","!بينق"}:
+        await message.channel.send(f"🏓 Pong! `{round(bot.latency*1000)}ms`")
+        return True
+    if cmd in {"!راتب","!salary"}:
+        await nm_legacy_salary(message)
+        return True
+    if cmd in {"!رصيدي","!رصيد","!balance","!wallet","!فلوسي"}:
+        await nm_legacy_balance_cmd(message)
+        return True
+    if cmd in {"!اغنى","!top","!توب"}:
+        await nm_legacy_top(message)
+        return True
+    if cmd in {"!حظ","!luck","!دبل","!double"}:
+        await nm_legacy_luck(message, args[0] if args else 0)
+        return True
+    if cmd in {"!سلوت","!slot"}:
+        await nm_legacy_slot(message, args[0] if args else 0)
+        return True
+    if cmd in {"!شرح","!اقتصاد","!help","!مساعدة"}:
+        coin = nm_legacy_coin(nm_legacy_gid(message))
+        embed = discord.Embed(
+            title="📘 NM System",
+            description=f"`!راتب` أو `/راتب`\n`!رصيدي` أو `/رصيدي`\n`!اغنى` أو `/اغنى`\n`!حظ 100` أو `/حظ`\n`!سلوت 100` أو `/سلوت`\n\nالعملة: **{coin}**",
+            color=0x5865F2
+        )
+        await message.channel.send(embed=embed)
+        return True
+    return False
+
 @bot.event
 async def on_message(message):
+    if await nm_handle_legacy_bang(message):
+        return
     global protection_enabled
 
     if message.author.bot:
@@ -15388,6 +15647,28 @@ async def sync_slash_commands_command(ctx):
         )
     except Exception as e:
         await ctx.send(f"❌ فشل تحديث أوامر السلاش: `{type(e).__name__}: {str(e)[:300]}`")
+
+
+# =========================
+# NM SLASH SYNC SAFETY
+# =========================
+async def nm_sync_slash_commands():
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ NM slash commands synced globally: {len(synced)}")
+        return len(synced)
+    except Exception as e:
+        print(f"❌ NM slash sync failed: {e}")
+        return 0
+
+try:
+    @bot.command(name="syncslash", aliases=["تحديث_السلاش"])
+    async def nm_syncslash_command(ctx):
+        count = await nm_sync_slash_commands()
+        await ctx.reply(f"✅ Synced slash commands: `{count}`")
+except Exception:
+    pass
+
 
 keep_alive()
 
