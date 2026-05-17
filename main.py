@@ -5100,12 +5100,85 @@ def dashboard_member_chip_in_guild(user_id, guild_id=0):
     return dashboard_member_identity_html(user_id, guild_id=guild_id, include_id=True, include_roles=False, compact=True)
 
 
+def log_vault_unique_urls(urls, limit=8):
+    seen = set()
+    out = []
+    for url in urls or []:
+        u = str(url or "").strip().strip("<>")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        out.append(u[:900])
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def log_vault_is_media_url(url):
+    try:
+        low = str(url or "").lower().split("?")[0]
+        if any(low.endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]):
+            return True
+        if "cdn.discordapp.com/attachments/" in low or "media.discordapp.net/attachments/" in low:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def log_vault_clean_url(url):
+    return str(url or "").strip().strip("<>")[:900]
+
+
+def log_vault_attachments_html(urls, preview=True):
+    urls = log_vault_unique_urls(urls, limit=6 if preview else 20)
+    if not urls:
+        return ""
+    items = []
+    shown = urls[:4] if preview else urls
+    for idx, url in enumerate(shown, 1):
+        safe = html.escape(log_vault_clean_url(url))
+        label = f"Attachment {idx}"
+        if log_vault_is_media_url(url):
+            items.append(
+                f"<a class='log-attachment media' href='{safe}' target='_blank' title='Open attachment'>"
+                f"<img loading='lazy' src='{safe}' alt='{html.escape(label)}'>"
+                f"<span>{html.escape(label)}</span></a>"
+            )
+        else:
+            items.append(f"<a class='log-attachment file' href='{safe}' target='_blank'>🔗 {html.escape(label)}</a>")
+    if preview and len(urls) > len(shown):
+        items.append(f"<span class='log-attachment more'>+{len(urls)-len(shown)} more</span>")
+    return "<div class='log-attachments'>" + "".join(items) + "</div>"
+
+
+def log_vault_strip_and_collect_urls(text):
+    raw = str(text or "")
+    urls = []
+
+    def md_repl(match):
+        label = match.group(1) or "attachment"
+        url = match.group(2)
+        urls.append(url)
+        return f" {label} "
+
+    raw = re.sub(r"!?\[([^\]]*)\]\((https?://[^\s)]+)\)", md_repl, raw)
+
+    def raw_url_repl(match):
+        url = match.group(0)
+        urls.append(url)
+        return " [attachment] "
+
+    raw = re.sub(r"https?://[^\s<>\)]+", raw_url_repl, raw)
+    raw = re.sub(r"\s+", " ", raw).strip()
+    return raw, urls
+
+
 def log_vault_enrich_user_ids_html(text, guild_id=0, limit=6000):
     raw = str(text or "")[:int(limit)]
     if not raw:
         return ""
 
-    # Replace Discord user mentions and raw user IDs with nickname + username when the member exists in this guild.
     mention_re = re.compile(r"<@!?(\d{15,25})>")
     id_re = re.compile(r"(?<!\d)(\d{17,22})(?!\d)")
     cache = {}
@@ -5126,13 +5199,15 @@ def log_vault_enrich_user_ids_html(text, guild_id=0, limit=6000):
     parts.append(html.escape(raw[pos:]))
     html_text = "".join(parts)
 
-    # Enrich raw IDs only if they belong to a real member in the selected guild; otherwise keep the number.
     def repl_id(match):
         uid = match.group(1)
-        member = dashboard_get_member_in_guild_sync(guild_id, int(uid), timeout=2) if guild_id else dashboard_get_member_sync(int(uid))
-        if not member:
+        try:
+            member = dashboard_get_member_in_guild_sync(guild_id, int(uid), timeout=1) if guild_id else dashboard_get_member_sync(int(uid))
+            if not member:
+                return uid
+            return chip(uid)
+        except Exception:
             return uid
-        return f"{uid} {chip(uid)}"
 
     try:
         html_text = id_re.sub(repl_id, html_text)
@@ -5140,6 +5215,20 @@ def log_vault_enrich_user_ids_html(text, guild_id=0, limit=6000):
         pass
     return html_text
 
+
+def log_vault_render_log_html(text, guild_id=0, preview=True):
+    clean, urls = log_vault_strip_and_collect_urls(text)
+    if preview:
+        clean = log_vault_short_text(clean, 260)
+        if clean.endswith("..."):
+            clean = clean[:-3].rstrip() + "…"
+    else:
+        clean = clean[:5000]
+    rendered = log_vault_enrich_user_ids_html(clean, guild_id, 5000)
+    rendered = rendered.replace("\n", "<br>")
+    if not rendered.strip():
+        rendered = "<span class='muted'>No text content</span>"
+    return f"<div class='log-clean-text'>{rendered}</div>" + log_vault_attachments_html(urls, preview=preview)
 
 
 def dashboard_member_has_role(member, role_ids):
@@ -7052,6 +7141,8 @@ DASHBOARD_BASE_TEMPLATE = r'''
 
     .globalstats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0;padding:10px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045)}.globalstats div{padding:8px;border-radius:14px;background:rgba(15,23,42,.45);text-align:center}.globalstats b{display:block;font-size:22px;letter-spacing:-.4px}.globalstats span{display:block;color:var(--muted);font-size:11px;font-weight:900;text-transform:uppercase;margin-top:2px}.globalstats.compact{grid-template-columns:1fr 1fr}
     .card,.navitem,.btn{will-change:auto}.card{content-visibility:auto;contain-intrinsic-size:260px}.sidebar .card{content-visibility:visible}.navitem span:nth-child(2){overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.tablewrap{border-radius:18px}.quickgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}.guildlist{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}.compactnote{padding:10px 12px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.04);color:var(--muted);font-size:12px}
+
+    .membercard{display:flex;align-items:flex-start;gap:10px;max-width:420px;min-width:0;overflow:hidden}.memberavatar{width:38px;height:38px;border-radius:14px;object-fit:cover;flex:0 0 auto;background:rgba(88,101,242,.16);display:grid;place-items:center}.memberavatar.blank{display:grid;place-items:center;color:#c4b5fd;font-weight:1000}.membermeta{min-width:0;display:grid;gap:3px}.membermeta b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:320px}.userline{display:block;color:var(--muted);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:360px}.mini-member{display:inline-flex;align-items:center;gap:6px;vertical-align:middle;border:1px solid rgba(88,101,242,.28);background:rgba(88,101,242,.12);color:#dbeafe;border-radius:999px;padding:3px 8px;font-weight:900;font-size:12px;max-width:260px;overflow:hidden}.mini-member img{width:18px;height:18px;border-radius:50%;object-fit:cover;flex:0 0 auto}.mini-member span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.memberroles{display:flex;gap:5px;flex-wrap:wrap;margin-top:4px}.rolechip{display:inline-flex;align-items:center;gap:5px;border:1px solid rgba(148,163,184,.20);background:rgba(15,23,42,.70);border-radius:999px;padding:3px 7px;font-size:11px;font-weight:900;max-width:180px}.role-dot{width:8px;height:8px;border-radius:999px;flex:0 0 auto}.role-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.rolechip.owner{border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10)}.rolechip.admin{border-color:rgba(88,101,242,.35);background:rgba(88,101,242,.12)}.rolechip.more{color:var(--muted)}
     @media(max-width:1100px){.layout{grid-template-columns:1fr}.serverrail{position:relative;height:auto;flex-direction:row;justify-content:flex-start;overflow-x:auto;overflow-y:hidden}.sidebar{position:relative;height:auto}.grid,.grid2,.grid3,.hero,.formgrid{grid-template-columns:1fr}.topbar{align-items:flex-start;flex-direction:column}.main{padding:16px}.headline h2{font-size:26px}.hero .big{font-size:32px}.navfoot{margin-bottom:0}.guildlist{grid-template-columns:1fr}}
   </style>
 </head>
@@ -9412,12 +9503,12 @@ def dashboard_log_vault_page():
         vault_id, row_guild_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
         icon, type_label = log_vault_type_meta(row_type)
         title_text = dash_escape(title or "Untitled log", 180)
-        summary = log_vault_enrich_user_ids_html(log_vault_short_text(description, 360), selected_guild_id, 420)
-        full_desc = log_vault_enrich_user_ids_html(description, selected_guild_id, 6000)
+        summary = log_vault_render_log_html(description, selected_guild_id, preview=True)
+        full_desc = log_vault_render_log_html(description, selected_guild_id, preview=False)
         status = "<span class='vault-status saved'>Saved</span>"
         deleted_line = ""
         if int(deleted_flag or 0) == 1:
-            deleter = dashboard_member_name_in_guild(deleted_by_id, selected_guild_id, include_id=True) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
+            deleter = dashboard_member_chip_in_guild(deleted_by_id, selected_guild_id) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
             deleted_line = f"<div class='vault-deleted'>Deleted by {deleter} • {cc_time(deleted_at)}</div>"
             status = "<span class='vault-status deleted'>Deleted in Discord</span>"
         channel_label = f"#{dash_escape(channel_name, 80)}" if channel_name else "Unknown channel"
@@ -9443,7 +9534,7 @@ def dashboard_log_vault_page():
             {deleted_line}
             <details class="vault-details">
               <summary>Show full log</summary>
-              <pre>{full_desc}</pre>
+              <div class="full-log-content">{full_desc}</div>
             </details>
             <div class="log-actions">
               <span class="muted small">Vault ID #{int(vault_id)} • Msg <code>{int(message_id or 0)}</code></span>
@@ -9494,7 +9585,14 @@ def dashboard_log_vault_page():
       .log-head b {{ color:#ddd6fe; }}
       .log-time {{ color:var(--muted); font-size:12px; margin-inline-start:auto; }}
       .log-title {{ font-weight:950; font-size:16px; margin-top:6px; overflow-wrap:anywhere; }}
-      .log-summary {{ color:var(--muted); line-height:1.55; margin-top:5px; overflow-wrap:anywhere; }}
+      .log-summary {{ color:var(--muted); line-height:1.55; margin-top:8px; overflow-wrap:anywhere; max-width:100%; }}
+      .log-clean-text {{ white-space:normal; word-break:break-word; }}
+      .log-attachments {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }}
+      .log-attachment {{ text-decoration:none; border:1px solid rgba(148,163,184,.16); background:rgba(15,23,42,.72); border-radius:14px; overflow:hidden; color:#dbeafe; font-size:12px; font-weight:900; }}
+      .log-attachment.media {{ width:148px; display:block; }}
+      .log-attachment.media img {{ display:block; width:148px; height:96px; object-fit:cover; background:#020617; }}
+      .log-attachment.media span {{ display:block; padding:7px 9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+      .log-attachment.file, .log-attachment.more {{ padding:10px 12px; display:inline-flex; align-items:center; }}
       .user-chip {{ display:inline-flex; align-items:center; gap:4px; border:1px solid rgba(59,130,246,.28); background:rgba(59,130,246,.12); color:#bfdbfe; border-radius:999px; padding:2px 7px; font-weight:900; white-space:normal; }}
       .log-actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px; }}
       .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
@@ -9503,7 +9601,7 @@ def dashboard_log_vault_page():
       .vault-deleted {{ margin-top:8px; color:#fca5a5; font-size:13px; font-weight:800; }}
       .vault-details {{ margin-top:9px; }}
       .vault-details summary {{ cursor:pointer; color:#93c5fd; font-weight:900; }}
-      .vault-details pre {{ white-space:pre-wrap; word-break:break-word; background:rgba(2,6,23,.64); border:1px solid var(--line); border-radius:16px; padding:12px; max-height:260px; overflow:auto; margin-top:8px; }}
+      .full-log-content {{ background:rgba(2,6,23,.64); border:1px solid var(--line); border-radius:16px; padding:12px; max-height:360px; overflow:auto; margin-top:8px; }}
       .vault-pagination {{ display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; margin:14px 0; }}
       .btn.sm {{ padding:7px 10px; font-size:12px; }}
       .btn.disabled {{ pointer-events:none; opacity:.45; }}
