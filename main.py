@@ -2533,6 +2533,14 @@ async def get_log_channel_by_type(guild, log_type="general"):
         if channel:
             return channel
 
+    # Multi-guild fallback: find the standard log channel name inside the current guild.
+    # This makes logs keep working even when the guild-specific channel IDs are not stored globally.
+    standard_name = LOG_CHANNEL_NAMES.get(log_type)
+    if standard_name:
+        channel = discord.utils.get(guild.text_channels, name=standard_name)
+        if channel:
+            return channel
+
     names = ["logs", "log", "audit-log", "audit-logs", "لوق", "لوقات"]
 
     for channel in guild.text_channels:
@@ -4816,6 +4824,24 @@ def dashboard_session_is_private_owner(user=None):
     except Exception:
         return False
 
+
+
+def is_dashboard_owner_user(user_id):
+    try:
+        user_id = int(user_id)
+    except Exception:
+        return False
+    try:
+        if user_id in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+            return True
+        if user_id in DASHBOARD_OWNER_USER_IDS or user_id in dashboard_dynamic_owner_user_ids():
+            return True
+        guild = bot.get_guild(GUILD_ID) if bot else None
+        if guild and int(guild.owner_id) == user_id:
+            return True
+        return dashboard_access_level(user_id) == "owner"
+    except Exception:
+        return user_id in DASHBOARD_PRIVATE_OWNER_USER_IDS
 
 def dashboard_access_level(user_id):
     """
@@ -12293,20 +12319,292 @@ async def slash_economy_guide_ar(interaction: discord.Interaction):
     await slash_economy_guide.callback(interaction)
 
 
+
+# =========================
+# SLASH SETUP STATUS / GUILD SETUP ASSISTANT
+# =========================
+
+def setup_user_can_manage(member):
+    """Who can use setup actions from /setup_status."""
+    try:
+        if not member:
+            return False
+        if int(member.id) in DASHBOARD_PRIVATE_OWNER_USER_IDS:
+            return True
+        perms = getattr(member, "guild_permissions", None)
+        return bool(perms and (perms.administrator or perms.manage_guild or perms.manage_channels))
+    except Exception:
+        return False
+
+
+def setup_channel_line(guild, channel_id, label, kind="text"):
+    try:
+        channel_id = int(channel_id or 0)
+    except Exception:
+        channel_id = 0
+
+    if not channel_id:
+        return f"❌ **{label}:** غير محدد\n> اضبطه من الداشبورد: **Guilds → Setup**"
+
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return f"⚠️ **{label}:** محفوظ لكن الروم غير موجود\n> ID: `{channel_id}` — عدله من الداشبورد."
+
+    return f"✅ **{label}:** {channel.mention}"
+
+
+def setup_log_channels_status(guild, settings=None):
+    settings = settings or get_guild_settings(guild.id)
+    category_id = int(settings.get("logs_category_id") or 0)
+    category = guild.get_channel(category_id) if category_id else None
+
+    existing = []
+    missing = []
+    outside_category = []
+
+    for log_key, channel_name in LOG_CHANNEL_NAMES.items():
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel:
+            existing.append((log_key, channel_name, channel))
+            if category and channel.category_id != category.id:
+                outside_category.append((log_key, channel_name, channel))
+        else:
+            missing.append((log_key, channel_name))
+
+    return {
+        "category_id": category_id,
+        "category": category,
+        "existing": existing,
+        "missing": missing,
+        "outside_category": outside_category,
+        "total": len(LOG_CHANNEL_NAMES),
+    }
+
+
+def build_setup_status_embed(guild):
+    create_default_guild_settings(guild)
+    settings = get_guild_settings(guild.id)
+    logs = setup_log_channels_status(guild, settings)
+
+    commands_line = setup_channel_line(guild, settings.get("commands_channel_id"), "Commands Channel")
+    gambling_line = setup_channel_line(guild, settings.get("gambling_channel_id"), "Gambling Channel")
+
+    if logs["category"]:
+        category_line = f"✅ **Logs Category:** {logs['category'].mention}"
+    elif logs["category_id"]:
+        category_line = f"⚠️ **Logs Category:** محفوظ لكن الكاتقوري غير موجود\n> ID: `{logs['category_id']}` — عدله من الداشبورد."
+    else:
+        category_line = "❌ **Logs Category:** غير محدد\n> تقدر تضغط زر **Create / Repair Logs** أو تحدده من الداشبورد."
+
+    existing_count = len(logs["existing"])
+    missing_count = len(logs["missing"])
+    outside_count = len(logs["outside_category"])
+
+    if missing_count == 0 and outside_count == 0:
+        log_rooms_line = f"✅ **Log Rooms:** `{existing_count}/{logs['total']}` جاهزة ومرتبة."
+    elif missing_count == 0 and outside_count > 0:
+        log_rooms_line = f"⚠️ **Log Rooms:** `{existing_count}/{logs['total']}` موجودة، لكن `{outside_count}` خارج الكاتقوري المحدد."
+    else:
+        log_rooms_line = f"❌ **Log Rooms:** `{existing_count}/{logs['total']}` موجودة — ناقص `{missing_count}`."
+
+    missing_names = ", ".join([f"`#{name}`" for _, name in logs["missing"][:8]])
+    if len(logs["missing"]) > 8:
+        missing_names += f" +{len(logs['missing']) - 8} more"
+    if not missing_names:
+        missing_names = "لا يوجد"
+
+    outside_names = ", ".join([f"`#{name}`" for _, name, _ in logs["outside_category"][:8]])
+    if len(logs["outside_category"]) > 8:
+        outside_names += f" +{len(logs['outside_category']) - 8} more"
+    if not outside_names:
+        outside_names = "لا يوجد"
+
+    bot_member = guild.me or guild.get_member(bot.user.id)
+    perms = None
+    try:
+        perms = bot_member.guild_permissions if bot_member else None
+    except Exception:
+        perms = None
+
+    needed = {
+        "Manage Channels": bool(perms and perms.manage_channels),
+        "Send Messages": bool(perms and perms.send_messages),
+        "Embed Links": bool(perms and perms.embed_links),
+        "Read Message History": bool(perms and perms.read_message_history),
+        "View Audit Log": bool(perms and perms.view_audit_log),
+    }
+    perms_text = "\n".join([f"{'✅' if ok else '❌'} {name}" for name, ok in needed.items()])
+
+    setup_done = bool(settings.get("setup_done")) and settings.get("commands_channel_id") and settings.get("gambling_channel_id") and missing_count == 0
+    color = COLOR_GREEN if setup_done else COLOR_ORANGE
+
+    embed = discord.Embed(
+        title="🧩 Server Setup Status",
+        description=(
+            f"تفاصيل إعداد **{guild.name}**.\n"
+            "إذا الرومات موجودة لكن مو صحيحة، عدلها من الداشبورد: **Guilds → Setup**."
+        ),
+        color=color,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="🏷️ Server", value=f"**{guild.name}**\n`{guild.id}`", inline=False)
+    embed.add_field(name="📍 Main Channels", value=f"{commands_line}\n{gambling_line}", inline=False)
+    embed.add_field(name="🧾 Logs Setup", value=f"{category_line}\n{log_rooms_line}", inline=False)
+    embed.add_field(name="❌ Missing Log Rooms", value=missing_names, inline=False)
+    embed.add_field(name="📦 Existing But Outside Category", value=outside_names, inline=False)
+    embed.add_field(name="🔐 Bot Permissions", value=perms_text, inline=True)
+    embed.add_field(
+        name="✅ What the button does",
+        value=(
+            "**Create / Repair Logs** ينشئ الكاتقوري إذا ناقص، ينشئ رومات اللوق الناقصة، "
+            "وينقل الرومات الموجودة للكاتقوري المحدد."
+        ),
+        inline=False
+    )
+    embed.set_footer(text=f"{BOT_BRAND} • Setup Assistant")
+    return embed
+
+
+async def create_or_repair_guild_log_channels(guild):
+    """Create/repair the standard log category and log rooms for the current guild."""
+    create_default_guild_settings(guild)
+    settings = get_guild_settings(guild.id)
+
+    category = guild.get_channel(int(settings.get("logs_category_id") or 0))
+    created_category = False
+
+    if not category or not isinstance(category, discord.CategoryChannel):
+        category = discord.utils.get(guild.categories, name="Retards System Logs")
+
+    if not category:
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, embed_links=True, read_message_history=True),
+        }
+        category = await guild.create_category(
+            "Retards System Logs",
+            overwrites=overwrites,
+            reason="Retards System setup logs category"
+        )
+        created_category = True
+
+    created = []
+    found = []
+    moved = []
+
+    for log_key, channel_name in LOG_CHANNEL_NAMES.items():
+        channel = discord.utils.get(guild.text_channels, name=channel_name)
+        if channel:
+            found.append(channel_name)
+            if channel.category_id != category.id:
+                try:
+                    await channel.edit(category=category, reason="Retards System setup repair log channel category")
+                    moved.append(channel_name)
+                except Exception:
+                    pass
+        else:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=False, send_messages=False),
+                guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True, embed_links=True, read_message_history=True),
+            }
+            channel = await guild.create_text_channel(
+                name=channel_name,
+                category=category,
+                overwrites=overwrites,
+                reason="Retards System setup create log channel"
+            )
+            created.append(channel_name)
+
+        # Keep the old single-guild JSON working for the main guild.
+        if int(guild.id) == int(GUILD_ID):
+            try:
+                fresh_channel = discord.utils.get(guild.text_channels, name=channel_name)
+                if fresh_channel:
+                    LOG_CHANNEL_IDS[log_key] = fresh_channel.id
+            except Exception:
+                pass
+
+    if int(guild.id) == int(GUILD_ID):
+        save_log_channels()
+
+    update_guild_settings_from_dashboard(
+        guild.id,
+        enabled=settings.get("enabled", True),
+        commands_channel_id=settings.get("commands_channel_id", 0),
+        gambling_channel_id=settings.get("gambling_channel_id", 0),
+        logs_category_id=category.id,
+        setup_done=bool(settings.get("commands_channel_id") and settings.get("gambling_channel_id"))
+    )
+
+    return {
+        "category": category,
+        "created_category": created_category,
+        "created": created,
+        "found": found,
+        "moved": moved,
+    }
+
+
+class SetupStatusView(discord.ui.View):
+    def __init__(self, guild_id, requester_id):
+        super().__init__(timeout=300)
+        self.guild_id = int(guild_id)
+        self.requester_id = int(requester_id)
+
+        if DASHBOARD_BASE_URL:
+            self.add_item(discord.ui.Button(
+                label="Open Dashboard Setup",
+                emoji="⚙️",
+                style=discord.ButtonStyle.link,
+                url=f"{DASHBOARD_BASE_URL}/dashboard/guild/{self.guild_id}/setup"
+            ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not interaction.guild or int(interaction.guild.id) != self.guild_id:
+            await interaction.response.send_message("❌ هذا الزر مو لهذا السيرفر.", ephemeral=True)
+            return False
+        if int(interaction.user.id) != self.requester_id and not setup_user_can_manage(interaction.user):
+            await interaction.response.send_message("❌ تحتاج Manage Server / Administrator عشان تستخدم أزرار الإعداد.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Create / Repair Logs", emoji="🧱", style=discord.ButtonStyle.success)
+    async def create_logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not setup_user_can_manage(interaction.user):
+            await interaction.response.send_message("❌ تحتاج Manage Server أو Administrator لإنشاء رومات اللوقات.", ephemeral=True)
+            return
+
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            result = await create_or_repair_guild_log_channels(interaction.guild)
+            embed = build_setup_status_embed(interaction.guild)
+            summary = (
+                f"✅ تم تجهيز اللوقات.\n"
+                f"Category: {result['category'].mention}\n"
+                f"Created rooms: `{len(result['created'])}`\n"
+                f"Moved rooms: `{len(result['moved'])}`\n"
+                f"Already existed: `{len(result['found'])}`\n\n"
+                "إذا تبي تغير مكان الرومات أو الكاتقوري، عدلها من الداشبورد: **Guilds → Setup**."
+            )
+            embed.add_field(name="🧱 Action Result", value=summary, inline=False)
+            await interaction.followup.send(embed=embed, view=SetupStatusView(interaction.guild.id, interaction.user.id), ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ فشل إنشاء/إصلاح اللوقات: `{type(e).__name__}: {str(e)[:700]}`", ephemeral=True)
+
+    @discord.ui.button(label="Refresh Status", emoji="🔄", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = build_setup_status_embed(interaction.guild)
+        await interaction.response.edit_message(embed=embed, view=SetupStatusView(interaction.guild.id, interaction.user.id))
+
 @bot.tree.command(name="setup_status", description="Show this server setup status")
 async def slash_setup_status(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("❌ هذا الأمر يشتغل داخل السيرفر فقط.", ephemeral=True)
         return
-    create_default_guild_settings(interaction.guild)
-    settings = get_guild_settings(interaction.guild.id)
-    embed = discord.Embed(title="🌍 Retards System Setup Status", description="إعدادات هذا السيرفر للنسخة العالمية.", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
-    embed.add_field(name="Server", value=f"{interaction.guild.name}\n`{interaction.guild.id}`", inline=False)
-    embed.add_field(name="Commands Channel", value=f"<#{settings['commands_channel_id']}>" if settings['commands_channel_id'] else "Not set", inline=True)
-    embed.add_field(name="Gambling Channel", value=f"<#{settings['gambling_channel_id']}>" if settings['gambling_channel_id'] else "Not set", inline=True)
-    embed.add_field(name="Setup Done", value="Yes" if settings['setup_done'] else "No", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    embed = build_setup_status_embed(interaction.guild)
+    view = SetupStatusView(interaction.guild.id, interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 @bot.tree.error
