@@ -7008,6 +7008,8 @@ def dashboard_get_active_guild_id():
     return dashboard_set_active_guild(raw)
 
 
+guild_banner = ""  # GLOBAL_GUILD_BANNER_FALLBACK: prevents runtime crashes if a legacy page misses local banner
+
 def dashboard_guild_banner(guild_id, label="Selected Guild"):
     guild = bot.get_guild(int(guild_id)) if bot else None
     name = guild.name if guild else get_guild_settings(guild_id).get("guild_name", "Unknown Guild")
@@ -7734,6 +7736,8 @@ def dashboard_events_page():
     denied = dashboard_require_admin()
     if denied:
         return denied
+    selected_guild_id = dashboard_get_active_guild_id()
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Events Guild")
     events = get_active_events(20)
     rows = "".join([f"<tr><td>#{eid}</td><td>{clean_text(title,120)}</td><td>{fmt_coin(prize)}</td><td>{end}</td><td>{dashboard_member_name(created)}</td></tr>" for eid,key,title,prize,start,end,created,status in events]) or "<tr><td colspan='5'>No active events</td></tr>"
     status = "ON" if EVENTS_ENABLED else "OFF"
@@ -7882,6 +7886,9 @@ def dashboard_warnings_page():
     denied = dashboard_require_admin()
     if denied:
         return denied
+
+    selected_guild_id = dashboard_get_active_guild_id()
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Warnings Guild")
 
     status = request.args.get("status", "all").strip().lower()
     if status not in ("active", "cleared", "all"):
@@ -8658,6 +8665,8 @@ def dashboard_control_page():
     denied = dashboard_require_owner()
     if denied:
         return denied
+    selected_guild_id = dashboard_get_active_guild_id()
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Control Center Guild")
     control = dashboard_control_settings()
     systems = control["system_toggles"]
     commands = control["command_toggles"]
