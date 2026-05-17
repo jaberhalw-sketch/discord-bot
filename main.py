@@ -11731,6 +11731,8 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_guide_boot_disable_spam()
+    nm_coin_boot_check()
     nm_final_polish_boot()
     nm_v4_boot_balance_sync()
     nm_v4_boot_normalize_brand_coin()
@@ -17393,7 +17395,7 @@ def save_guild_settings(guild_id, settings):
     return nm_v4_save_settings(guild_id, settings)
 
 def nm_get_coin_name(guild_id=None):
-    return nm_v4_get_settings(guild_id).get("coin_name", "NM Coin")
+    return nm_v4_get_settings(guild_id).get("coin_name", nm_coin_name(nm_coin_gid()))
 
 def nm_get_brand_name(guild_id=None):
     return nm_v4_get_settings(guild_id).get("bot_brand", "NM System")
@@ -17419,11 +17421,8 @@ def nm_fix_brand_coin_route():
     """
 
 def nm_v4_boot_normalize_brand_coin():
-    # Disabled on purpose.
-    # Do NOT force coin/brand back to NM System or NM Coin on redeploy.
-    # Whatever the dashboard saves in PostgreSQL must remain exactly as the owner set it.
     try:
-        print("✅ NM V4 brand/coin normalize disabled: custom values are preserved.")
+        print("✅ old coin normalizer disabled; per-guild coin is preserved.")
     except Exception:
         pass
 
@@ -17704,7 +17703,7 @@ def nm_set_custom_coin_route():
         </div>
         """
 
-    current = nm_v4_get_settings(gid).get("coin_name", "NM Coin")
+    current = nm_v4_get_settings(gid).get("coin_name", nm_coin_name(nm_coin_gid()))
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
       <h1>Set Custom Coin</h1>
@@ -18232,7 +18231,7 @@ def save_guild_settings(guild_id, settings):
     return nm_final_save_settings(guild_id, settings)
 
 def nm_coin_name(guild_id=None):
-    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", "NM Coin")
+    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", nm_coin_name(nm_coin_gid()))
 
 def nm_legacy_coin(guild_id):
     return nm_coin_name(guild_id)
@@ -18342,6 +18341,420 @@ def nm_final_polish_boot():
             print(f"✅ NM FINAL POLISH active. synced={synced}, coin={nm_coin_name(gid)}")
     except Exception as e:
         try: print(f"NM FINAL POLISH boot failed: {e}")
+        except Exception: pass
+
+
+
+# =====================================================================
+# NM V4 PER-GUILD COIN FINAL FIX
+# Default: NM Coin for every new server.
+# If changed in dashboard: saved forever per guild in PostgreSQL and used everywhere.
+# =====================================================================
+
+def nm_coin_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_pg_is_ready():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+def nm_read_pg_settings(guild_id):
+    if not nm_pg_is_ready():
+        return {}
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (int(guild_id),)).fetchone()
+            if row:
+                return nm_pg_unjson(row["settings"])
+    except Exception as e:
+        try: print(f"NM coin pg read failed: {e}")
+        except Exception: pass
+    return {}
+
+def nm_write_pg_settings(guild_id, settings):
+    if not nm_pg_is_ready():
+        return False
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO guild_settings (guild_id, settings, updated_at)
+                VALUES (%s,%s::jsonb,NOW())
+                ON CONFLICT (guild_id)
+                DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+            """, (int(guild_id), nm_pg_json(settings or {})))
+            conn.commit()
+        return True
+    except Exception as e:
+        try: print(f"NM coin pg write failed: {e}")
+        except Exception: pass
+        return False
+
+def nm_normalize_coin_settings(settings):
+    settings = dict(settings or {})
+    coin = (
+        settings.get("coin_name")
+        or settings.get("currency_name")
+        or settings.get("economy_coin_name")
+        or settings.get("money_name")
+        or settings.get("coin")
+    )
+    if coin is None or str(coin).strip() == "":
+        coin = "NM Coin"
+    coin = str(coin).strip()
+
+    brand = settings.get("bot_brand") or settings.get("brand_name") or settings.get("bot_name")
+    if brand is None or str(brand).strip() == "":
+        brand = "NM System"
+    brand = str(brand).strip()
+
+    settings["coin_name"] = coin
+    settings["currency_name"] = coin
+    settings["economy_coin_name"] = coin
+    settings["money_name"] = coin
+    settings["coin"] = coin
+
+    settings["bot_brand"] = brand
+    settings["brand_name"] = brand
+    settings["bot_name"] = brand
+    return settings
+
+def nm_get_settings_unified(guild_id=None):
+    gid = int(guild_id or nm_coin_gid())
+    settings = nm_read_pg_settings(gid)
+
+    # Fallback only if PG has no coin value yet. This prevents old JSON from overriding PG.
+    if not settings:
+        try:
+            if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+                settings.update(dashboard_settings)
+        except Exception:
+            pass
+
+    settings = nm_normalize_coin_settings(settings)
+
+    # Ensure new servers get an actual PG row with NM Coin defaults.
+    nm_write_pg_settings(gid, {
+        "coin_name": settings["coin_name"],
+        "currency_name": settings["coin_name"],
+        "economy_coin_name": settings["coin_name"],
+        "money_name": settings["coin_name"],
+        "coin": settings["coin_name"],
+        "bot_brand": settings["bot_brand"],
+        "brand_name": settings["bot_brand"],
+        "bot_name": settings["bot_brand"],
+    })
+    return settings
+
+def nm_save_settings_unified(guild_id=None, settings=None):
+    gid = int(guild_id or nm_coin_gid())
+    settings = nm_normalize_coin_settings(settings or {})
+    nm_write_pg_settings(gid, settings)
+
+    # Mirror runtime/global old dict only for the current selected guild UI.
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(settings)
+            if "save_dashboard_settings" in globals():
+                save_dashboard_settings()
+    except Exception:
+        pass
+    return True
+
+def get_guild_settings(guild_id):
+    return nm_get_settings_unified(guild_id)
+
+def save_guild_settings(guild_id, settings):
+    return nm_save_settings_unified(guild_id, settings)
+
+def nm_coin_name(guild_id=None):
+    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", nm_coin_name(nm_coin_gid()))
+
+def nm_get_coin_name(guild_id=None):
+    return nm_coin_name(guild_id)
+
+def nm_legacy_coin(guild_id):
+    return nm_coin_name(guild_id)
+
+def nm_get_brand_name(guild_id=None):
+    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("bot_brand", "NM System")
+
+def nm_format_money(amount, guild_id=None):
+    return f"{int(amount or 0):,} {nm_coin_name(guild_id)}"
+
+@app.after_request
+def nm_coin_save_any_dashboard_post(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            gid = nm_coin_gid()
+            posted_coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("money_name")
+                or request.form.get("coin")
+            )
+            posted_brand = (
+                request.form.get("bot_brand")
+                or request.form.get("brand_name")
+                or request.form.get("bot_name")
+            )
+            if posted_coin is not None or posted_brand is not None:
+                settings = nm_get_settings_unified(gid)
+                if posted_coin is not None and str(posted_coin).strip():
+                    coin = str(posted_coin).strip()
+                    settings["coin_name"] = coin
+                    settings["currency_name"] = coin
+                    settings["economy_coin_name"] = coin
+                    settings["money_name"] = coin
+                    settings["coin"] = coin
+                if posted_brand is not None and str(posted_brand).strip():
+                    brand = str(posted_brand).strip()
+                    settings["bot_brand"] = brand
+                    settings["brand_name"] = brand
+                    settings["bot_name"] = brand
+                nm_save_settings_unified(gid, settings)
+    except Exception as e:
+        try: print(f"NM coin save after_request failed: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
+def nm_coin_set_custom_coin_page():
+    gid = nm_coin_gid()
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        settings = nm_get_settings_unified(gid)
+        settings["coin_name"] = coin
+        settings["currency_name"] = coin
+        settings["economy_coin_name"] = coin
+        settings["money_name"] = coin
+        settings["coin"] = coin
+        nm_save_settings_unified(gid, settings)
+        return redirect(f"/dashboard/coin-sync-status?guild_id={int(gid)}")
+
+    current = nm_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Set Server Coin</h1>
+      <p>Default is <b>NM Coin</b>. Changing it here saves it forever for this server only.</p>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <label>Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+@app.route("/dashboard/coin-sync-status")
+def nm_coin_sync_status_page():
+    gid = nm_coin_gid()
+    settings = nm_get_settings_unified(gid)
+    nm_save_settings_unified(gid, settings)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Coin Sync Active</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin Name: <b>{dash_escape(nm_coin_name(gid),100)}</b></p>
+      <p>This value is saved in PostgreSQL per server and will not reset on redeploy.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+def nm_coin_boot_check():
+    try:
+        if nm_pg_is_ready():
+            main_gid = int(globals().get("GUILD_ID", 0) or 0)
+            if main_gid:
+                nm_get_settings_unified(main_gid)
+                print(f"✅ NM per-guild coin active. main guild coin={nm_coin_name(main_gid)}")
+    except Exception as e:
+        try: print(f"NM coin boot check failed: {e}")
+        except Exception: pass
+
+
+
+# =====================================================================
+# NM V4 GUIDE SPAM FIX
+# يمنع رسالة الشرح/الدليل من النزول كل شوي.
+# default: guide disabled unless enabled from settings.
+# persistent per guild in PostgreSQL.
+# =====================================================================
+
+def nm_guide_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_guide_pg_ready():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+def nm_guide_settings(guild_id=None):
+    gid = int(guild_id or nm_guide_gid())
+    try:
+        if "nm_get_settings_unified" in globals():
+            return nm_get_settings_unified(gid)
+        if "get_guild_settings" in globals():
+            return get_guild_settings(gid)
+    except Exception:
+        pass
+    return {}
+
+def nm_guide_save_settings(guild_id, settings):
+    try:
+        if "nm_save_settings_unified" in globals():
+            return nm_save_settings_unified(guild_id, settings)
+        if "save_guild_settings" in globals():
+            return save_guild_settings(guild_id, settings)
+    except Exception:
+        pass
+    return False
+
+def nm_guide_enabled(guild_id=None):
+    settings = nm_guide_settings(guild_id)
+    # Important: default OFF to stop spam.
+    return bool(settings.get("guide_enabled", False))
+
+def nm_guide_interval_seconds(guild_id=None):
+    settings = nm_guide_settings(guild_id)
+    # default 7 days if enabled.
+    return int(settings.get("guide_interval_seconds", 7 * 24 * 60 * 60))
+
+def nm_guide_last_sent(guild_id=None):
+    gid = int(guild_id or nm_guide_gid())
+    settings = nm_guide_settings(gid)
+    return int(settings.get("guide_last_sent_ts", 0) or 0)
+
+def nm_guide_mark_sent(guild_id=None):
+    gid = int(guild_id or nm_guide_gid())
+    settings = nm_guide_settings(gid)
+    settings["guide_last_sent_ts"] = int(time.time())
+    nm_guide_save_settings(gid, settings)
+
+def nm_should_send_guide(guild_id=None):
+    gid = int(guild_id or nm_guide_gid())
+    if not nm_guide_enabled(gid):
+        return False
+    last = nm_guide_last_sent(gid)
+    interval = nm_guide_interval_seconds(gid)
+    return int(time.time()) - int(last or 0) >= int(interval)
+
+def nm_disable_guide(guild_id=None):
+    gid = int(guild_id or nm_guide_gid())
+    settings = nm_guide_settings(gid)
+    settings["guide_enabled"] = False
+    settings["guide_interval_seconds"] = 7 * 24 * 60 * 60
+    settings["guide_last_sent_ts"] = int(time.time())
+    nm_guide_save_settings(gid, settings)
+    return True
+
+def nm_enable_guide(guild_id=None, interval_hours=168):
+    gid = int(guild_id or nm_guide_gid())
+    settings = nm_guide_settings(gid)
+    settings["guide_enabled"] = True
+    settings["guide_interval_seconds"] = max(3600, int(interval_hours) * 3600)
+    settings.setdefault("guide_last_sent_ts", 0)
+    nm_guide_save_settings(gid, settings)
+    return True
+
+# Override common old guide functions if they exist/call these names.
+def should_send_guide(guild_id=None):
+    return nm_should_send_guide(guild_id)
+
+def mark_guide_sent(guild_id=None):
+    return nm_guide_mark_sent(guild_id)
+
+def guide_should_send(guild_id=None):
+    return nm_should_send_guide(guild_id)
+
+def guide_mark_sent(guild_id=None):
+    return nm_guide_mark_sent(guild_id)
+
+@app.route("/dashboard/disable-guide")
+def nm_disable_guide_route():
+    gid = nm_guide_gid()
+    nm_disable_guide(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Guide disabled</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>الشرح/الدليل توقف وما راح ينزل كل شوي.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+@app.route("/dashboard/enable-guide")
+def nm_enable_guide_route():
+    gid = nm_guide_gid()
+    hours = int(request.args.get("hours") or 168)
+    nm_enable_guide(gid, hours)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Guide enabled</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Guide interval: <b>{int(hours)} hours</b></p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
+    </div>
+    """
+
+def nm_guide_boot_disable_spam():
+    try:
+        # Stop all startup guide spam for main guild unless owner enables it manually.
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            settings = nm_guide_settings(gid)
+            if "guide_enabled" not in settings:
+                settings["guide_enabled"] = False
+            settings["guide_interval_seconds"] = int(settings.get("guide_interval_seconds", 7 * 24 * 60 * 60))
+            # Set last sent now to prevent old startup logic from firing immediately.
+            settings["guide_last_sent_ts"] = int(settings.get("guide_last_sent_ts", int(time.time())))
+            nm_guide_save_settings(gid, settings)
+            print("✅ NM guide spam fix active: guide is disabled by default.")
+    except Exception as e:
+        try: print(f"NM guide spam boot fix failed: {e}")
         except Exception: pass
 
 
