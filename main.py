@@ -4790,6 +4790,16 @@ class GameRolesView(discord.ui.View):
 
 app = Flask(__name__)
 
+@app.before_request
+def nm_bridge_before_dashboard_request():
+    try:
+        if request.path.startswith("/dashboard"):
+            nm_bridge_local_restore_to_data("dashboard request")
+    except Exception:
+        pass
+
+
+
 # =========================
 # NM STABLE MULTI-GUILD CORE
 # Safe version: no aggressive rewrites, only selected guild routing + persistence.
@@ -4851,6 +4861,113 @@ def nm_stable_dashboard_before_request():
     except Exception:
         pass
 
+
+
+
+# =========================
+# NM PERSISTENT DATA BRIDGE FIX
+# Fixes Railway Volume + memory restore mismatch.
+# If /data is empty but local restored files have data, copy local -> /data.
+# Never overwrite a non-empty /data file with an empty local file.
+# =========================
+def nm_file_size(path):
+    try:
+        return Path(path).stat().st_size
+    except Exception:
+        return 0
+
+def nm_sqlite_table_count(path):
+    try:
+        if not Path(path).exists() or nm_file_size(path) < 1024:
+            return 0
+        conn = sqlite3.connect(str(path))
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [r[0] for r in cur.fetchall()]
+        score = len(tables)
+        for t in tables:
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {t}")
+                score += int(cur.fetchone()[0] or 0)
+            except Exception:
+                pass
+        conn.close()
+        return score
+    except Exception:
+        return 0
+
+def nm_json_score(path):
+    try:
+        if not Path(path).exists() or nm_file_size(path) <= 2:
+            return 0
+        import json
+        data = json.loads(Path(path).read_text(encoding="utf-8") or "{}")
+        if isinstance(data, dict):
+            return len(data.keys())
+        if isinstance(data, list):
+            return len(data)
+        return 1
+    except Exception:
+        return 0
+
+def nm_data_file_score(path):
+    p = Path(path)
+    if p.suffix.lower() == ".db":
+        return nm_sqlite_table_count(p)
+    if p.suffix.lower() == ".json":
+        return nm_json_score(p)
+    return nm_file_size(p)
+
+def nm_bridge_local_restore_to_data(reason="startup"):
+    """Make /data match the best available restored local files."""
+    try:
+        if "NM_DATA_DIR" not in globals():
+            return
+        data_dir = Path(NM_DATA_DIR)
+        if not data_dir.exists():
+            return
+
+        files = globals().get("NM_MEMORY_FILES", [
+            "nm_system.db",
+            "warnings.json",
+            "log_channels.json",
+            "dashboard_settings.json",
+            "protection_settings.json",
+            "guild_settings.json",
+            "money_audit.json",
+        ])
+
+        changed = []
+        for filename in files:
+            local = Path(filename)
+            target = data_dir / filename
+
+            local_score = nm_data_file_score(local)
+            target_score = nm_data_file_score(target)
+
+            # Copy restored local file into /data only if it is clearly better/non-empty.
+            if local.exists() and local_score > 0 and (not target.exists() or target_score == 0 or local_score > target_score):
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(local, target)
+                    changed.append(f"{filename}: local({local_score}) -> data({target_score})")
+                except Exception as e:
+                    print(f"NM bridge copy failed for {filename}: {e}")
+
+            # If /data has the good copy and local missing, keep local mirror for backup systems.
+            elif target.exists() and target_score > 0 and (not local.exists() or local_score == 0):
+                try:
+                    shutil.copy2(target, local)
+                    changed.append(f"{filename}: data({target_score}) -> local({local_score})")
+                except Exception as e:
+                    print(f"NM bridge mirror failed for {filename}: {e}")
+
+        if changed:
+            print("✅ NM data bridge fixed restored files:", "; ".join(changed))
+        else:
+            print(f"✅ NM data bridge checked: no changes needed ({reason})")
+    except Exception as e:
+        print(f"NM data bridge failed: {e}")
 
 
 # =========================
@@ -11454,6 +11571,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_bridge_local_restore_to_data("on_ready")
     print("✅ NM stable polished build active")
     print(f"✅ NM persistent storage active: {NM_DATA_DIR}")
     try:
