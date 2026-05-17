@@ -11743,6 +11743,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_admin_access_boot()
     nm_v5_discord_sync_boot()
     nm_v5_protection_level_boot()
     nm_v5_coin_persist_boot()
@@ -21558,6 +21559,517 @@ def nm_v5_discord_sync_boot():
         print(f"✅ NM V5 Discord/Dashboard real sync context active. fallback_guild={gid}")
     except Exception:
         pass
+
+
+
+# =====================================================================
+# NM V5 ADMIN ACCESS LIVE PERSIST
+# Admin Access upgrade:
+# - Saves Owner/Admin roles and users per guild in /data/admin_access_v5.json
+# - Live save endpoint; no refresh needed
+# - Dashboard permissions use this saved data
+# - Shows who is Owner/Admin + online/offline when available
+# =====================================================================
+
+def nm_v5_admin_gid():
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v5_admin_store_path():
+    try:
+        p = Path("/data")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "admin_access_v5.json"
+    except Exception:
+        return Path("admin_access_v5.json")
+
+def nm_v5_admin_load_all():
+    try:
+        p = nm_v5_admin_store_path()
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+def nm_v5_admin_save_all(data):
+    try:
+        p = nm_v5_admin_store_path()
+        p.write_text(json.dumps(data if isinstance(data, dict) else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as e:
+        try: print(f"NM V5 admin access save failed: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_admin_pg_ready():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+def nm_v5_admin_default():
+    return {
+        "owner_role_ids": [],
+        "admin_role_ids": [],
+        "owner_user_ids": [],
+        "admin_user_ids": [],
+        "updated_at": 0,
+        "updated_by": "System",
+    }
+
+def nm_v5_admin_clean_ids(values):
+    out, seen = [], set()
+    if values is None:
+        return out
+    if isinstance(values, str):
+        values = values.replace("\n", ",").replace(" ", ",").split(",")
+    if not isinstance(values, (list, tuple, set)):
+        values = [values]
+    for v in values:
+        try:
+            i = int(str(v).strip())
+        except Exception:
+            continue
+        if i > 0 and i not in seen:
+            seen.add(i)
+            out.append(i)
+    return out
+
+def nm_v5_admin_normalize(data):
+    base = nm_v5_admin_default()
+    if isinstance(data, dict):
+        base.update(data)
+
+    owner_roles = set(nm_v5_admin_clean_ids(base.get("owner_role_ids") or base.get("dashboard_owner_role_ids")))
+    admin_roles = set(nm_v5_admin_clean_ids(base.get("admin_role_ids") or base.get("dashboard_admin_role_ids")))
+    owner_users = set(nm_v5_admin_clean_ids(base.get("owner_user_ids") or base.get("dashboard_owner_user_ids")))
+    admin_users = set(nm_v5_admin_clean_ids(base.get("admin_user_ids") or base.get("dashboard_admin_user_ids")))
+
+    # Private owner always wins.
+    try:
+        owner_users |= {int(x) for x in globals().get("DASHBOARD_PRIVATE_OWNER_USER_IDS", set())}
+    except Exception:
+        pass
+
+    # Owner wins over Admin.
+    admin_roles -= owner_roles
+    admin_users -= owner_users
+
+    base["owner_role_ids"] = sorted(owner_roles)
+    base["admin_role_ids"] = sorted(admin_roles)
+    base["owner_user_ids"] = sorted(owner_users)
+    base["admin_user_ids"] = sorted(admin_users)
+
+    # Mirror old dashboard setting keys so old code sees the same values.
+    base["dashboard_owner_role_ids"] = base["owner_role_ids"]
+    base["dashboard_admin_role_ids"] = base["admin_role_ids"]
+    base["dashboard_owner_user_ids"] = base["owner_user_ids"]
+    base["dashboard_admin_user_ids"] = base["admin_user_ids"]
+    return base
+
+def nm_v5_admin_pg_read(gid):
+    if not nm_v5_admin_pg_ready():
+        return {}
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (int(gid),)).fetchone()
+            if not row:
+                return {}
+            raw = row["settings"]
+            data = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+            return {k: data.get(k) for k in (
+                "owner_role_ids","admin_role_ids","owner_user_ids","admin_user_ids",
+                "dashboard_owner_role_ids","dashboard_admin_role_ids","dashboard_owner_user_ids","dashboard_admin_user_ids",
+                "dashboard_access_updated_at","dashboard_access_updated_by"
+            ) if k in data}
+    except Exception as e:
+        try: print(f"NM V5 admin PG read skipped: {e}")
+        except Exception: pass
+    return {}
+
+def nm_v5_admin_pg_save(gid, settings):
+    if not nm_v5_admin_pg_ready():
+        return False
+    try:
+        patch = {
+            "dashboard_owner_role_ids": settings["owner_role_ids"],
+            "dashboard_admin_role_ids": settings["admin_role_ids"],
+            "dashboard_owner_user_ids": settings["owner_user_ids"],
+            "dashboard_admin_user_ids": settings["admin_user_ids"],
+            "dashboard_access_updated_at": int(settings.get("updated_at") or time.time()),
+            "dashboard_access_updated_by": str(settings.get("updated_by") or "Dashboard"),
+        }
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO guild_settings (guild_id, settings, updated_at)
+                VALUES (%s,%s::jsonb,NOW())
+                ON CONFLICT (guild_id)
+                DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+            """, (int(gid), json.dumps(patch, ensure_ascii=False)))
+            conn.commit()
+        return True
+    except Exception as e:
+        try: print(f"NM V5 admin PG save skipped: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_admin_get(guild_id=None):
+    gid = int(guild_id or nm_v5_admin_gid())
+    all_data = nm_v5_admin_load_all()
+    file_row = all_data.get(str(gid), {})
+    if isinstance(file_row, dict) and file_row:
+        return nm_v5_admin_normalize(file_row)
+
+    pg = nm_v5_admin_pg_read(gid)
+    if isinstance(pg, dict) and pg:
+        s = nm_v5_admin_normalize(pg)
+        nm_v5_admin_set(gid, s, mirror_pg=False)
+        return s
+
+    # old dashboard settings fallback
+    old = {}
+    try:
+        if "dashboard_load_settings_file" in globals():
+            old = dashboard_load_settings_file() or {}
+    except Exception:
+        old = {}
+    if isinstance(old, dict):
+        keys = [
+            "dashboard_owner_role_ids", "dashboard_admin_role_ids",
+            "dashboard_owner_user_ids", "dashboard_admin_user_ids",
+        ]
+        if any(k in old for k in keys):
+            s = nm_v5_admin_normalize(old)
+            nm_v5_admin_set(gid, s)
+            return s
+
+    s = nm_v5_admin_normalize({})
+    nm_v5_admin_set(gid, s)
+    return s
+
+def nm_v5_admin_set(guild_id=None, settings=None, mirror_pg=True):
+    gid = int(guild_id or nm_v5_admin_gid())
+    s = nm_v5_admin_normalize(settings or {})
+    s["updated_at"] = int(s.get("updated_at") or time.time())
+    s["updated_by"] = str(s.get("updated_by") or "Dashboard")
+
+    all_data = nm_v5_admin_load_all()
+    if not isinstance(all_data, dict):
+        all_data = {}
+    all_data[str(gid)] = s
+    nm_v5_admin_save_all(all_data)
+
+    # Mirror old settings file so old dashboard permission checks instantly use it too.
+    try:
+        if "dashboard_merge_settings" in globals():
+            dashboard_merge_settings({
+                "dashboard_owner_role_ids": s["owner_role_ids"],
+                "dashboard_admin_role_ids": s["admin_role_ids"],
+                "dashboard_owner_user_ids": s["owner_user_ids"],
+                "dashboard_admin_user_ids": s["admin_user_ids"],
+                "dashboard_access_updated_at": s["updated_at"],
+                "dashboard_access_updated_by": s["updated_by"],
+            })
+    except Exception:
+        pass
+
+    if mirror_pg:
+        nm_v5_admin_pg_save(gid, s)
+
+    return True
+
+# Permission dynamic API overrides.
+def dashboard_dynamic_owner_role_ids():
+    return set(nm_v5_admin_get(nm_v5_admin_gid()).get("owner_role_ids", []))
+
+def dashboard_dynamic_admin_role_ids():
+    return set(nm_v5_admin_get(nm_v5_admin_gid()).get("admin_role_ids", []))
+
+def dashboard_dynamic_owner_user_ids():
+    return set(nm_v5_admin_get(nm_v5_admin_gid()).get("owner_user_ids", []))
+
+def dashboard_dynamic_admin_user_ids():
+    return set(nm_v5_admin_get(nm_v5_admin_gid()).get("admin_user_ids", []))
+
+def nm_v5_member_status(member):
+    try:
+        st = str(getattr(member, "status", "offline"))
+        if st == "online":
+            return "online"
+        if st in ("idle", "dnd", "do_not_disturb"):
+            return st
+        return "offline"
+    except Exception:
+        return "unknown"
+
+def nm_v5_member_card(member, access):
+    try:
+        avatar = member.display_avatar.url
+    except Exception:
+        avatar = ""
+    try:
+        username = getattr(member, "name", str(member.id))
+        display = getattr(member, "display_name", username)
+        uid = int(member.id)
+    except Exception:
+        username, display, uid = "Unknown", "Unknown", 0
+
+    status = nm_v5_member_status(member)
+    dot = "🟢" if status == "online" else ("🟡" if status == "idle" else ("🔴" if status in ("dnd", "do_not_disturb") else "⚫"))
+    return f"""
+    <div class="access-user-card">
+      <img src="{avatar}" class="mini-avatar">
+      <div class="grow">
+        <b>{dash_escape(display, 60)}</b>
+        <div class="muted small">@{dash_escape(username, 60)} • ID: <code>{uid}</code></div>
+      </div>
+      <span class="pill {'ok' if access == 'Owner' else ''}">{access}</span>
+      <span class="pill">{dot} {dash_escape(status, 20)}</span>
+    </div>
+    """
+
+def nm_v5_admin_current_people(gid):
+    s = nm_v5_admin_get(gid)
+    owner_roles, admin_roles = set(s["owner_role_ids"]), set(s["admin_role_ids"])
+    owner_users, admin_users = set(s["owner_user_ids"]), set(s["admin_user_ids"])
+
+    people = []
+    try:
+        members = dashboard_get_guild_members_sync(force_chunk=str(request.args.get("refresh","")) == "1")
+    except Exception:
+        members = []
+
+    for m in members:
+        try:
+            if getattr(m, "bot", False):
+                continue
+            uid = int(m.id)
+            role_ids = {int(r.id) for r in getattr(m, "roles", [])}
+            if uid in owner_users or role_ids.intersection(owner_roles):
+                people.append((m, "Owner"))
+            elif uid in admin_users or role_ids.intersection(admin_roles):
+                people.append((m, "Admin"))
+        except Exception:
+            pass
+
+    # Owners first, then admins, then online first.
+    def key(item):
+        m, access = item
+        status = nm_v5_member_status(m)
+        return (0 if access == "Owner" else 1, 0 if status == "online" else 1, str(getattr(m, "display_name", "")).lower())
+    return sorted(people, key=key)
+
+def nm_v5_admin_access_page():
+    # Owner only
+    if not dashboard_session_is_private_owner(session.get("discord_user") or {}):
+        denied = dashboard_require_owner()
+        if denied:
+            return denied
+    elif not session.get("discord_user"):
+        return redirect("/login")
+
+    gid = nm_v5_admin_gid()
+    s = nm_v5_admin_get(gid)
+    roles = dashboard_get_guild_roles()
+
+    def options(selected_ids):
+        selected = {int(x) for x in selected_ids}
+        html = []
+        for role in roles:
+            try:
+                rid = int(role.id)
+                name = getattr(role, "name", str(rid))
+                sel = "selected" if rid in selected else ""
+                html.append(f"<option value='{rid}' {sel}>{dash_escape(name, 80)} ({rid})</option>")
+            except Exception:
+                pass
+        return "".join(html)
+
+    people_cards = "".join([nm_v5_member_card(m, access) for m, access in nm_v5_admin_current_people(gid)])
+    if not people_cards:
+        people_cards = "<div class='empty'>No saved admin/owner members found yet. Select owner/admin roles or user IDs and save.</div>"
+
+    updated_at = int(s.get("updated_at") or 0)
+    updated_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(updated_at)) if updated_at else "Never"
+    updated_by = dash_escape(s.get("updated_by", "System"), 80)
+
+    owner_users_value = ", ".join(str(x) for x in s.get("owner_user_ids", []))
+    admin_users_value = ", ".join(str(x) for x in s.get("admin_user_ids", []))
+
+    body = f"""
+    <style>
+      .access-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }}
+      .access-user-card {{ display:flex; align-items:center; gap:12px; background:#0b1224; border:1px solid #1e293b; border-radius:18px; padding:12px; margin:10px 0; }}
+      .mini-avatar {{ width:46px; height:46px; border-radius:50%; object-fit:cover; background:#111827; }}
+      .grow {{ flex:1; }}
+      .live-save {{ color:#86efac; font-weight:900; display:none; }}
+      .live-save.show {{ display:inline-block; }}
+      select[multiple] {{ min-height:220px; }}
+      textarea.access-ids {{ min-height:90px; resize:vertical; }}
+      .empty {{ padding:18px; border:1px solid #334155; border-radius:16px; color:#94a3b8; background:#0b1224; }}
+    </style>
+
+    <div class="card">
+      <h2>🔐 Admin Access Live</h2>
+      <p class="muted">هنا تحفظ مين Owner ومين Admin لايف. أي تغيير ينحفظ في <code>/data/admin_access_v5.json</code> وما يضيع بعد التحديث.</p>
+      <p><span class="pill ok">Guild {int(gid)}</span> <span class="pill">Last saved: {updated_text}</span> <span class="pill">By: {updated_by}</span> <span id="liveSaved" class="live-save">Saved ✓</span></p>
+    </div>
+
+    <form id="adminAccessForm" method="POST" action="/dashboard/admin-access-live">
+      <input type="hidden" name="guild_id" value="{int(gid)}">
+      <div class="access-grid">
+        <div class="card">
+          <h3>👑 Owner Roles</h3>
+          <p class="muted small">أي شخص عنده رتبة من هنا يصير Owner في الداشبورد.</p>
+          <select name="owner_roles" multiple>{options(s.get("owner_role_ids", []))}</select>
+        </div>
+        <div class="card">
+          <h3>🛡️ Admin Roles</h3>
+          <p class="muted small">أي شخص عنده رتبة من هنا يصير Admin محدود.</p>
+          <select name="admin_roles" multiple>{options(s.get("admin_role_ids", []))}</select>
+        </div>
+        <div class="card">
+          <h3>👑 Owner User IDs</h3>
+          <p class="muted small">حط ID أشخاص Owner يدويًا. افصل بينهم بفاصلة.</p>
+          <textarea class="access-ids" name="owner_users">{dash_escape(owner_users_value, 2000)}</textarea>
+        </div>
+        <div class="card">
+          <h3>🛡️ Admin User IDs</h3>
+          <p class="muted small">حط ID أشخاص Admin يدويًا. افصل بينهم بفاصلة.</p>
+          <textarea class="access-ids" name="admin_users">{dash_escape(admin_users_value, 2000)}</textarea>
+        </div>
+      </div>
+      <div class="card">
+        <button class="btn primary" type="submit">💾 Save Access</button>
+        <a class="btn" href="/dashboard/admin-access?refresh=1&guild_id={int(gid)}">🔄 Refresh Members</a>
+        <a class="btn" href="/dashboard/admin-access-status?guild_id={int(gid)}">📡 Status</a>
+      </div>
+    </form>
+
+    <div class="card">
+      <h3>📡 Live Saved Access</h3>
+      <p class="muted">الأشخاص اللي لهم وصول الآن حسب الرتب/الأسماء المحفوظة.</p>
+      {people_cards}
+    </div>
+
+    <script>
+      const form = document.getElementById('adminAccessForm');
+      const saved = document.getElementById('liveSaved');
+      let timer = null;
+
+      async function liveSave() {{
+        const fd = new FormData(form);
+        const res = await fetch('/dashboard/admin-access-live', {{ method:'POST', body:fd }});
+        if (res.ok) {{
+          saved.classList.add('show');
+          clearTimeout(timer);
+          timer = setTimeout(() => saved.classList.remove('show'), 1800);
+        }}
+      }}
+
+      form.addEventListener('change', () => liveSave());
+      form.addEventListener('submit', async (e) => {{
+        e.preventDefault();
+        await liveSave();
+        window.location.href = '/dashboard/admin-access?guild_id={int(gid)}';
+      }});
+    </script>
+    """
+    return render_dashboard_page("Admin Access Live", body)
+
+def nm_v5_admin_parse_form():
+    admin_name = "Dashboard"
+    try:
+        admin_name = str((session.get("discord_user") or {}).get("username") or "Dashboard")
+    except Exception:
+        pass
+    owner_roles = nm_v5_admin_clean_ids(request.form.getlist("owner_roles"))
+    admin_roles = nm_v5_admin_clean_ids(request.form.getlist("admin_roles"))
+    owner_users = nm_v5_admin_clean_ids(request.form.get("owner_users", ""))
+    admin_users = nm_v5_admin_clean_ids(request.form.get("admin_users", ""))
+
+    s = {
+        "owner_role_ids": owner_roles,
+        "admin_role_ids": admin_roles,
+        "owner_user_ids": owner_users,
+        "admin_user_ids": admin_users,
+        "updated_at": int(time.time()),
+        "updated_by": admin_name,
+    }
+    return nm_v5_admin_normalize(s)
+
+@app.route("/dashboard/admin-access-live", methods=["POST"])
+def nm_v5_admin_access_live_save():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_v5_admin_gid()
+    s = nm_v5_admin_parse_form()
+    nm_v5_admin_set(gid, s)
+    try:
+        dashboard_log_action("Updated Admin Access Live", f"guild={gid} owner_roles={s['owner_role_ids']} admin_roles={s['admin_role_ids']} owner_users={s['owner_user_ids']} admin_users={s['admin_user_ids']}", s.get("updated_by", "Dashboard"))
+    except Exception:
+        pass
+    if request.headers.get("Accept", "").find("application/json") >= 0 or request.headers.get("X-Requested-With"):
+        return jsonify({"ok": True, "guild_id": gid, "settings": s})
+    return redirect(f"/dashboard/admin-access?guild_id={int(gid)}&msg=Admin%20Access%20Saved")
+
+@app.route("/dashboard/admin-access-status")
+def nm_v5_admin_access_status():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_v5_admin_gid()
+    s = nm_v5_admin_get(gid)
+    people = nm_v5_admin_current_people(gid)
+    cards = "".join(nm_v5_member_card(m, access) for m, access in people) or "<div class='empty'>No members found.</div>"
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Admin Access Status</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Owner Roles: <b>{dash_escape(str(s.get('owner_role_ids')), 500)}</b></p>
+      <p>Admin Roles: <b>{dash_escape(str(s.get('admin_role_ids')), 500)}</b></p>
+      <p>Owner Users: <b>{dash_escape(str(s.get('owner_user_ids')), 500)}</b></p>
+      <p>Admin Users: <b>{dash_escape(str(s.get('admin_user_ids')), 500)}</b></p>
+      <div>{cards}</div>
+      <p><a style="color:#8b5cf6" href="/dashboard/admin-access?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+# Override old page/action endpoints.
+try:
+    app.view_functions["dashboard_admin_access_page"] = nm_v5_admin_access_page
+except Exception as e:
+    try: print(f"NM V5 admin page override skipped: {e}")
+    except Exception: pass
+
+try:
+    # Let old POST route use the live saver too.
+    app.view_functions["dashboard_admin_access_action"] = nm_v5_admin_access_live_save
+except Exception:
+    pass
+
+def nm_v5_admin_access_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            s = nm_v5_admin_get(gid)
+            nm_v5_admin_set(gid, s)
+            print(f"✅ NM V5 admin access live persistence active: guild={gid}, owners={len(s.get('owner_role_ids', []))+len(s.get('owner_user_ids', []))}, admins={len(s.get('admin_role_ids', []))+len(s.get('admin_user_ids', []))}")
+    except Exception as e:
+        try: print(f"NM V5 admin access boot skipped: {e}")
+        except Exception: pass
 
 
 keep_alive()
