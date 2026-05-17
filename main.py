@@ -5138,18 +5138,15 @@ def log_vault_attachments_html(urls, preview=True):
     shown = urls[:4] if preview else urls
     for idx, url in enumerate(shown, 1):
         safe = html.escape(log_vault_clean_url(url))
-        label = f"Attachment {idx}"
-        if log_vault_is_media_url(url):
-            items.append(
-                f"<a class='log-attachment media' href='{safe}' target='_blank' title='Open attachment'>"
-                f"<img loading='lazy' src='{safe}' alt='{html.escape(label)}'>"
-                f"<span>{html.escape(label)}</span></a>"
-            )
-        else:
-            items.append(f"<a class='log-attachment file' href='{safe}' target='_blank'>🔗 {html.escape(label)}</a>")
+        is_media = log_vault_is_media_url(url)
+        icon = "🖼️" if is_media else "📎"
+        label = f"{'Media' if is_media else 'Attachment'} {idx}"
+        items.append(
+            f"<a class='log-attachment compact{' media' if is_media else ' file'}' href='{safe}' target='_blank' title='Open attachment'>{icon} <span>{html.escape(label)}</span></a>"
+        )
     if preview and len(urls) > len(shown):
         items.append(f"<span class='log-attachment more'>+{len(urls)-len(shown)} more</span>")
-    return "<div class='log-attachments'>" + "".join(items) + "</div>"
+    return "<div class='log-attachments compact'>" + "".join(items) + "</div>"
 
 
 def log_vault_strip_and_collect_urls(text):
@@ -9588,11 +9585,11 @@ def dashboard_log_vault_page():
       .log-summary {{ color:var(--muted); line-height:1.55; margin-top:8px; overflow-wrap:anywhere; max-width:100%; }}
       .log-clean-text {{ white-space:normal; word-break:break-word; }}
       .log-attachments {{ display:flex; flex-wrap:wrap; gap:10px; margin-top:10px; }}
-      .log-attachment {{ text-decoration:none; border:1px solid rgba(148,163,184,.16); background:rgba(15,23,42,.72); border-radius:14px; overflow:hidden; color:#dbeafe; font-size:12px; font-weight:900; }}
-      .log-attachment.media {{ width:148px; display:block; }}
-      .log-attachment.media img {{ display:block; width:148px; height:96px; object-fit:cover; background:#020617; }}
-      .log-attachment.media span {{ display:block; padding:7px 9px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
-      .log-attachment.file, .log-attachment.more {{ padding:10px 12px; display:inline-flex; align-items:center; }}
+      .log-attachments.compact {{ gap:8px; }}
+      .log-attachment {{ text-decoration:none; border:1px solid rgba(148,163,184,.16); background:rgba(15,23,42,.72); border-radius:999px; color:#dbeafe; font-size:12px; font-weight:900; }}
+      .log-attachment.compact {{ padding:9px 12px; display:inline-flex; align-items:center; gap:7px; max-width:220px; overflow:hidden; }}
+      .log-attachment.compact span {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+      .log-attachment.more {{ padding:9px 12px; display:inline-flex; align-items:center; border-radius:999px; }}
       .user-chip {{ display:inline-flex; align-items:center; gap:4px; border:1px solid rgba(59,130,246,.28); background:rgba(59,130,246,.12); color:#bfdbfe; border-radius:999px; padding:2px 7px; font-weight:900; white-space:normal; }}
       .log-actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px; }}
       .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
