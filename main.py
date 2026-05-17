@@ -8796,11 +8796,27 @@ async def on_ready():
     for live_guild in bot.guilds:
         create_default_guild_settings(live_guild)
 
+    # =========================
+    # SLASH COMMAND SYNC
+    # =========================
+    # Global commands can take time to appear in Discord.
+    # For faster rollout, we also sync a guild copy to every server the bot is in.
+    # This makes the / commands show almost immediately after redeploy.
     try:
-        synced = await bot.tree.sync()
-        print(f"Slash commands synced globally: {len(synced)}")
+        global_synced = await bot.tree.sync()
+        print(f"✅ Slash commands synced globally: {len(global_synced)}")
     except Exception as e:
-        print(f"Slash sync error: {e}")
+        print(f"❌ Global slash sync error: {type(e).__name__}: {e}")
+
+    try:
+        for live_guild in bot.guilds:
+            guild_obj = discord.Object(id=live_guild.id)
+            bot.tree.copy_global_to(guild=guild_obj)
+            guild_synced = await bot.tree.sync(guild=guild_obj)
+            print(f"✅ Slash commands synced to guild {live_guild.name} ({live_guild.id}): {len(guild_synced)}")
+            await asyncio.sleep(1)
+    except Exception as e:
+        print(f"❌ Guild slash sync error: {type(e).__name__}: {e}")
 
     if guild:
         await ensure_custom_roles(guild)
@@ -12373,6 +12389,26 @@ async def on_command_error(ctx, error):
 
     print(f"Command Error: {error}")
 
+
+
+
+@bot.command(name="syncslash", aliases=["sync_slash", "تحديث_السلاش"])
+async def sync_slash_commands_command(ctx):
+    """Owner-only command to force slash command sync for the current guild."""
+    if not ctx.guild:
+        return
+
+    if not is_dashboard_owner_user(ctx.author.id):
+        await ctx.send("❌ هذا الأمر للـ Owner فقط.", delete_after=8)
+        return
+
+    try:
+        guild_obj = discord.Object(id=ctx.guild.id)
+        bot.tree.copy_global_to(guild=guild_obj)
+        guild_synced = await bot.tree.sync(guild=guild_obj)
+        await ctx.send(f"✅ تم تحديث أوامر / لهذا السيرفر: `{len(guild_synced)}` أمر.")
+    except Exception as e:
+        await ctx.send(f"❌ فشل تحديث أوامر السلاش: `{type(e).__name__}: {str(e)[:300]}`")
 
 keep_alive()
 
