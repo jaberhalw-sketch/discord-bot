@@ -697,6 +697,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dashboard_log_vault (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER DEFAULT 0,
             log_type TEXT DEFAULT 'general',
             title TEXT DEFAULT '',
             description TEXT DEFAULT '',
@@ -711,6 +712,17 @@ def init_db():
             deleted_at INTEGER DEFAULT 0
         )
     """)
+
+    try:
+        cur.execute("PRAGMA table_info(dashboard_log_vault)")
+        existing_columns = {row[1] for row in cur.fetchall()}
+        if "guild_id" not in existing_columns:
+            cur.execute("ALTER TABLE dashboard_log_vault ADD COLUMN guild_id INTEGER DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_guild_time ON dashboard_log_vault (guild_id, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_message ON dashboard_log_vault (discord_message_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_type ON dashboard_log_vault (guild_id, log_type)")
+    except Exception as e:
+        print(f"Log Vault migration error: {e}")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS processed_command_messages (
@@ -2579,6 +2591,7 @@ def log_vault_ensure_table(cur=None):
     cur.execute("""
         CREATE TABLE IF NOT EXISTS dashboard_log_vault (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER DEFAULT 0,
             log_type TEXT DEFAULT 'general',
             title TEXT DEFAULT '',
             description TEXT DEFAULT '',
@@ -2593,6 +2606,17 @@ def log_vault_ensure_table(cur=None):
             deleted_at INTEGER DEFAULT 0
         )
     """)
+
+    try:
+        cur.execute("PRAGMA table_info(dashboard_log_vault)")
+        existing_columns = {row[1] for row in cur.fetchall()}
+        if "guild_id" not in existing_columns:
+            cur.execute("ALTER TABLE dashboard_log_vault ADD COLUMN guild_id INTEGER DEFAULT 0")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_guild_time ON dashboard_log_vault (guild_id, id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_message ON dashboard_log_vault (discord_message_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_log_vault_type ON dashboard_log_vault (guild_id, log_type)")
+    except Exception as e:
+        print(f"Log Vault migration error: {e}")
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS processed_command_messages (
@@ -2616,16 +2640,17 @@ def log_vault_color_value(color):
         return 0
 
 
-def log_vault_record(log_type, title, description, color=0):
+def log_vault_record(log_type, title, description, color=0, guild_id=0):
     try:
         conn = db_connect()
         cur = conn.cursor()
         log_vault_ensure_table(cur)
         cur.execute("""
             INSERT INTO dashboard_log_vault
-            (log_type, title, description, color, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            (guild_id, log_type, title, description, color, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
         """, (
+            int(guild_id or 0),
             str(log_type or "general")[:80],
             str(title or "")[:220],
             str(description or "")[:5000],
@@ -2744,13 +2769,49 @@ async def log_vault_deleted_by_from_audit(guild, bot_message_author_id=None):
     return None
 
 
-def log_vault_recent(limit=120, log_type="all", query="", deleted_filter="all"):
+
+def log_vault_type_meta(log_type):
+    key = str(log_type or "general").lower().strip()
+    meta = {
+        "message": ("💬", "Message"),
+        "member": ("👥", "Member"),
+        "moderation": ("🛡️", "Moderation"),
+        "role": ("🎭", "Roles"),
+        "channel": ("#️⃣", "Channels"),
+        "voice": ("🎙️", "Voice"),
+        "server": ("🏠", "Server"),
+        "game": ("🎮", "Game"),
+        "giveaway": ("🎁", "Giveaway"),
+        "economy": ("🪙", "Economy"),
+        "discord_log": ("📦", "Discord Log"),
+        "general": ("📌", "General"),
+        "protection": ("🛡️", "Protection"),
+    }
+    for prefix, value in meta.items():
+        if key == prefix or key.startswith(prefix):
+            return value
+    return "📄", str(log_type or "general").replace("_", " ").title()
+
+
+def log_vault_short_text(text, limit=240):
+    text = str(text or "").replace("\r", " ").strip()
+    text = re.sub(r"\n{2,}", "\n", text)
+    one_line = re.sub(r"\s+", " ", text)
+    if len(one_line) > limit:
+        return one_line[:limit].rstrip() + "..."
+    return one_line or "No details"
+
+
+def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all"):
     try:
         conn = db_connect()
         cur = conn.cursor()
         log_vault_ensure_table(cur)
         clauses = []
         params = []
+        if int(guild_id or 0):
+            clauses.append("(guild_id = ? OR guild_id = 0)")
+            params.append(int(guild_id))
         if log_type and log_type != "all":
             clauses.append("log_type = ?")
             params.append(str(log_type))
@@ -2759,57 +2820,96 @@ def log_vault_recent(limit=120, log_type="all", query="", deleted_filter="all"):
         elif deleted_filter == "active":
             clauses.append("deleted_from_discord = 0")
         if query:
-            clauses.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ?)")
+            clauses.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ? OR log_type LIKE ?)")
             like = f"%{query}%"
-            params.extend([like, like, like, like])
+            params.extend([like, like, like, like, like])
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         cur.execute(f"""
-            SELECT id, log_type, title, description, discord_channel_id, discord_channel_name,
+            SELECT id, guild_id, log_type, title, description, discord_channel_id, discord_channel_name,
                    discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
             FROM dashboard_log_vault
             {where}
             ORDER BY id DESC
+            LIMIT ? OFFSET ?
+        """, tuple(params + [int(limit), int(offset)]))
+        rows = cur.fetchall()
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where}", tuple(params))
+        total_matches = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return rows, total_matches
+    except Exception as e:
+        print(f"Log Vault recent error: {e}")
+        return [], 0
+
+
+def log_vault_counts(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        where = ""
+        params = []
+        if int(guild_id or 0):
+            where = "WHERE (guild_id = ? OR guild_id = 0)"
+            params.append(int(guild_id))
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where}", tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where + (' AND' if where else 'WHERE')} deleted_from_discord = 1", tuple(params))
+        deleted = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault {where}", tuple(params))
+        types = int(cur.fetchone()[0] or 0)
+        since = int(time.time()) - 86400
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where + (' AND' if where else 'WHERE')} created_at >= ?", tuple(params + [since]))
+        today = int(cur.fetchone()[0] or 0)
+        conn.close()
+        return total, deleted, types, today
+    except Exception as e:
+        print(f"Log Vault counts error: {e}")
+        return 0, 0, 0, 0
+
+
+def log_vault_types(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        where = ""
+        params = []
+        if int(guild_id or 0):
+            where = "WHERE (guild_id = ? OR guild_id = 0)"
+            params.append(int(guild_id))
+        cur.execute(f"SELECT log_type, COUNT(*) FROM dashboard_log_vault {where} GROUP BY log_type ORDER BY COUNT(*) DESC")
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+
+def log_vault_top_channels(guild_id=0, limit=8):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        where = "WHERE discord_channel_name != ''"
+        params = []
+        if int(guild_id or 0):
+            where += " AND (guild_id = ? OR guild_id = 0)"
+            params.append(int(guild_id))
+        cur.execute(f"""
+            SELECT discord_channel_name, COUNT(*)
+            FROM dashboard_log_vault
+            {where}
+            GROUP BY discord_channel_name
+            ORDER BY COUNT(*) DESC
             LIMIT ?
         """, tuple(params + [int(limit)]))
         rows = cur.fetchall()
         conn.close()
         return rows
-    except Exception as e:
-        print(f"Log Vault recent error: {e}")
-        return []
-
-
-def log_vault_counts():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault")
-        total = int(cur.fetchone()[0] or 0)
-        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault WHERE deleted_from_discord = 1")
-        deleted = int(cur.fetchone()[0] or 0)
-        cur.execute("SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault")
-        types = int(cur.fetchone()[0] or 0)
-        since = int(time.time()) - 86400
-        cur.execute("SELECT COUNT(*) FROM dashboard_log_vault WHERE created_at >= ?", (since,))
-        today = int(cur.fetchone()[0] or 0)
-        conn.close()
-        return total, deleted, types, today
-    except Exception:
-        return 0, 0, 0, 0
-
-
-def log_vault_types():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        log_vault_ensure_table(cur)
-        cur.execute("SELECT log_type, COUNT(*) FROM dashboard_log_vault GROUP BY log_type ORDER BY COUNT(*) DESC")
-        rows = cur.fetchall()
-        conn.close()
-        return rows
     except Exception:
         return []
+
 
 
 async def send_log(guild, title, description, color=COLOR_GREY, log_type="general"):
@@ -2827,7 +2927,7 @@ async def send_log(guild, title, description, color=COLOR_GREY, log_type="genera
 
     embed.set_footer(text=f"NM System | {log_type} logs")
 
-    vault_id = log_vault_record(log_type, title, description, color)
+    vault_id = log_vault_record(log_type, title, description, color, guild_id=getattr(guild, "id", 0))
 
     try:
         sent_message = await channel.send(embed=embed)
@@ -9031,16 +9131,24 @@ def dashboard_log_vault_page():
     log_type = request.args.get("type", "all").strip() or "all"
     deleted_filter = request.args.get("deleted", "all").strip() or "all"
     query = request.args.get("q", "").strip()[:120]
+    view_mode = request.args.get("view", "compact").strip() or "compact"
     try:
-        limit = max(25, min(300, int(request.args.get("limit", "150"))))
+        page = max(1, int(request.args.get("page", "1")))
     except Exception:
-        limit = 150
+        page = 1
+    try:
+        limit = max(25, min(120, int(request.args.get("limit", "50"))))
+    except Exception:
+        limit = 50
+    offset = (page - 1) * limit
 
-    total, deleted_total, types_count, today = log_vault_counts()
+    total, deleted_total, types_count, today = log_vault_counts(selected_guild_id)
+    type_rows = log_vault_types(selected_guild_id)
     type_options = '<option value="all">All log types</option>'
-    for t, count in log_vault_types():
+    for t, count in type_rows:
         selected = "selected" if str(t) == log_type else ""
-        type_options += f'<option value="{dash_escape(t, 80)}" {selected}>{dash_escape(t, 80)} ({int(count)})</option>'
+        icon, label = log_vault_type_meta(t)
+        type_options += f'<option value="{dash_escape(t, 80)}" {selected}>{icon} {dash_escape(label, 80)} ({int(count)})</option>'
 
     deleted_options = "".join([
         f'<option value="all" {"selected" if deleted_filter == "all" else ""}>All logs</option>',
@@ -9048,57 +9156,160 @@ def dashboard_log_vault_page():
         f'<option value="deleted" {"selected" if deleted_filter == "deleted" else ""}>Deleted from Discord</option>',
     ])
 
-    rows = log_vault_recent(limit=limit, log_type=log_type, query=query, deleted_filter=deleted_filter)
+    rows, total_matches = log_vault_recent(
+        guild_id=selected_guild_id,
+        limit=limit,
+        offset=offset,
+        log_type=log_type,
+        query=query,
+        deleted_filter=deleted_filter,
+    )
+    total_pages = max(1, (total_matches + limit - 1) // limit)
+
+    def vault_url(**updates):
+        params = {
+            "guild_id": selected_guild_id,
+            "q": query,
+            "type": log_type,
+            "deleted": deleted_filter,
+            "limit": limit,
+            "view": view_mode,
+            "page": page,
+        }
+        params.update(updates)
+        return "/dashboard/log-vault?" + urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
+
+    type_chips = []
+    type_chips.append(f'<a class="vault-chip {"active" if log_type == "all" else ""}" href="{vault_url(type="all", page=1)}">📦 All</a>')
+    for t, count in type_rows[:10]:
+        icon, label = log_vault_type_meta(t)
+        active = "active" if str(t) == log_type else ""
+        type_chips.append(f'<a class="vault-chip {active}" href="{vault_url(type=str(t), page=1)}">{icon} {dash_escape(label, 40)} <b>{int(count)}</b></a>')
+    type_chips_html = "".join(type_chips)
+
+    channel_rows = log_vault_top_channels(selected_guild_id, 7)
+    channel_html = "".join([
+        f"<div class='mini-row'><span>#{dash_escape(name, 50)}</span><b>{int(count)}</b></div>"
+        for name, count in channel_rows
+    ]) or "<p class='muted'>No channel data yet.</p>"
+
     cards = ""
     for row in rows:
-        vault_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
-        status = "<span class='pill ok'>Saved</span>"
+        vault_id, row_guild_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
+        icon, type_label = log_vault_type_meta(row_type)
+        title_text = dash_escape(title or "Untitled log", 180)
+        summary = dash_escape(log_vault_short_text(description, 260), 320)
+        full_desc = dash_escape(description, 6000)
+        status = "<span class='vault-status saved'>Saved</span>"
         deleted_line = ""
         if int(deleted_flag or 0) == 1:
             deleter = dashboard_member_name(deleted_by_id) if deleted_by_id else dash_escape(deleted_by_name or "Unknown", 80)
-            deleted_line = f"<div class='muted small'>Deleted from Discord by: {deleter} • {cc_time(deleted_at)}</div>"
-            status = "<span class='pill bad'>Deleted in Discord</span>"
+            deleted_line = f"<div class='vault-deleted'>Deleted by {deleter} • {cc_time(deleted_at)}</div>"
+            status = "<span class='vault-status deleted'>Deleted in Discord</span>"
         channel_label = f"#{dash_escape(channel_name, 80)}" if channel_name else "Unknown channel"
         msg_link = ""
-        if channel_id and message_id:
-            msg_link = f"<a class='btn' target='_blank' href='https://discord.com/channels/{GUILD_ID}/{int(channel_id)}/{int(message_id)}'>Open Discord Log</a>"
+        if selected_guild_id and channel_id and message_id:
+            msg_link = f"<a class='btn sm' target='_blank' href='https://discord.com/channels/{int(selected_guild_id)}/{int(channel_id)}/{int(message_id)}'>Open</a>"
+        source_tag = ""
+        if row_guild_id and selected_guild_id and int(row_guild_id) != int(selected_guild_id):
+            source_tag = f"<span class='pill warn'>Legacy / Global</span>"
         cards += f"""
-        <div class="card" style="margin-bottom:12px">
-          <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start;flex-wrap:wrap">
-            <div>
-              <span class="pill cyan">{dash_escape(row_type, 80)}</span>
-              {status}
-              <span class="pill">{channel_label}</span>
-              <div class="muted small" style="margin-top:8px">Vault ID #{int(vault_id)} • {cc_time(created_at)} • Discord Message ID: <code>{int(message_id or 0)}</code></div>
+        <div class="vault-item" data-type="{dash_escape(row_type, 80)}">
+          <div class="vault-main">
+            <div class="vault-icon">{icon}</div>
+            <div class="vault-content">
+              <div class="vault-topline">
+                <span class="vault-type">{dash_escape(type_label, 80)}</span>
+                {status}
+                {source_tag}
+                <span class="vault-time">{cc_time(created_at)}</span>
+              </div>
+              <div class="vault-title">{title_text}</div>
+              <div class="vault-summary">{summary}</div>
+              {deleted_line}
+              <details class="vault-details">
+                <summary>Show full log</summary>
+                <pre>{full_desc}</pre>
+              </details>
             </div>
-            <div>{msg_link}</div>
           </div>
-          <div class="prodivider"></div>
-          <h3 style="margin-bottom:8px">{dash_escape(title, 180)}</h3>
-          <pre style="white-space:pre-wrap;word-break:break-word;background:rgba(2,6,23,.58);border:1px solid var(--line);border-radius:18px;padding:14px;max-height:260px;overflow:auto">{dash_escape(description, 4000)}</pre>
-          {deleted_line}
+          <div class="vault-side">
+            <span class="pill">{channel_label}</span>
+            <span class="muted small">ID #{int(vault_id)}</span>
+            <span class="muted small">Msg <code>{int(message_id or 0)}</code></span>
+            {msg_link}
+          </div>
         </div>
         """
     if not cards:
-        cards = "<div class='card'><h3>No logs found</h3><p class='muted'>جرب تغير الفلتر أو انتظر لين البوت يسجل لوقات جديدة.</p></div>"
+        cards = "<div class='card'><h3>No logs found</h3><p class='muted'>غير الفلاتر أو انتظر لين البوت يسجل لوقات جديدة.</p></div>"
+
+    prev_link = vault_url(page=max(1, page - 1))
+    next_link = vault_url(page=min(total_pages, page + 1))
+    pagination = f"""
+    <div class="vault-pagination">
+      <a class="btn {'disabled' if page <= 1 else ''}" href="{prev_link}">← Previous</a>
+      <span class="pill">Page {page:,} / {total_pages:,}</span>
+      <span class="muted">Showing {len(rows):,} of {total_matches:,}</span>
+      <a class="btn {'disabled' if page >= total_pages else ''}" href="{next_link}">Next →</a>
+    </div>
+    """
 
     body = f"""
     {dashboard_toast_html()}
     {guild_banner}
-    <div class="hero">
+    <style>
+      .vault-hero {{ display:grid; grid-template-columns: 1.4fr .8fr; gap:14px; }}
+      .vault-toolbar {{ position:sticky; top:0; z-index:5; background:rgba(3,7,18,.72); backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:22px; padding:14px; }}
+      .vault-chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
+      .vault-chip {{ text-decoration:none; color:var(--text); border:1px solid var(--line); background:rgba(15,23,42,.55); border-radius:999px; padding:8px 11px; font-weight:800; font-size:13px; }}
+      .vault-chip.active, .vault-chip:hover {{ border-color:rgba(124,58,237,.7); background:rgba(124,58,237,.18); }}
+      .vault-list {{ display:flex; flex-direction:column; gap:10px; }}
+      .vault-item {{ display:grid; grid-template-columns: 1fr 210px; gap:12px; border:1px solid var(--line); background:linear-gradient(135deg, rgba(15,23,42,.82), rgba(2,6,23,.68)); border-radius:22px; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.18); }}
+      .vault-main {{ display:flex; gap:12px; min-width:0; }}
+      .vault-icon {{ width:46px; height:46px; border-radius:16px; display:grid; place-items:center; background:rgba(124,58,237,.16); border:1px solid rgba(124,58,237,.28); font-size:22px; flex:0 0 auto; }}
+      .vault-content {{ min-width:0; width:100%; }}
+      .vault-topline {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:6px; }}
+      .vault-type {{ color:#c4b5fd; font-weight:900; font-size:13px; }}
+      .vault-time {{ color:var(--muted); font-size:12px; margin-inline-start:auto; }}
+      .vault-title {{ font-size:17px; font-weight:950; margin:3px 0 5px; overflow-wrap:anywhere; }}
+      .vault-summary {{ color:var(--muted); line-height:1.55; overflow-wrap:anywhere; }}
+      .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
+      .vault-status.saved {{ color:#86efac; background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.25); }}
+      .vault-status.deleted {{ color:#fca5a5; background:rgba(239,68,68,.13); border:1px solid rgba(239,68,68,.25); }}
+      .vault-deleted {{ margin-top:8px; color:#fca5a5; font-size:13px; font-weight:800; }}
+      .vault-side {{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; text-align:right; }}
+      .vault-details {{ margin-top:9px; }}
+      .vault-details summary {{ cursor:pointer; color:#93c5fd; font-weight:900; }}
+      .vault-details pre {{ white-space:pre-wrap; word-break:break-word; background:rgba(2,6,23,.64); border:1px solid var(--line); border-radius:16px; padding:12px; max-height:260px; overflow:auto; margin-top:8px; }}
+      .mini-row {{ display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid rgba(148,163,184,.12); }}
+      .vault-pagination {{ display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; margin:16px 0; }}
+      .btn.sm {{ padding:7px 10px; font-size:12px; }}
+      .btn.disabled {{ pointer-events:none; opacity:.45; }}
+      @media (max-width: 980px) {{
+        .vault-hero {{ grid-template-columns:1fr; }}
+        .vault-item {{ grid-template-columns:1fr; }}
+        .vault-side {{ align-items:flex-start; text-align:left; flex-direction:row; flex-wrap:wrap; }}
+        .vault-time {{ margin-inline-start:0; }}
+      }}
+    </style>
+
+    <div class="vault-hero">
       <div class="card">
         <div class="big">🗄️ Log Vault</div>
-        <p class="muted">كل لوقات الديسكورد تنحفظ هنا داخل الداشبورد كنسخة مستقلة. حتى لو أحد حذف رسالة اللوق من الروم، النسخة تبقى هنا وتظهر كـ Deleted in Discord.</p>
+        <p class="muted">نسخة مرتبة ومحفوظة من كل لوقات السيرفر. إذا أحد حذف رسالة اللوق من Discord، تظل محفوظة هنا وتظهر كـ Deleted in Discord.</p>
         <div style="height:10px"></div>
-        <span class="pill ok">Tamper-resistant dashboard copy</span>
-        <span class="pill">Discord logs mirror</span>
+        <span class="pill ok">Owner Only</span>
+        <span class="pill">Tamper-resistant</span>
+        <span class="pill">Per-server view</span>
       </div>
       <div class="card">
-        <h3>🛡️ Protection</h3>
-        <p class="muted">إذا أحد حذف لوق من رومات اللوق، البوت يحاول يجيب اسم اللي حذفه من Audit Log ويعلّم عليه هنا.</p>
+        <h3>Top Log Channels</h3>
+        {channel_html}
       </div>
     </div>
 
+    <div style="height:14px"></div>
     <div class="grid">
       <div class="card stat"><div class="icon">📦</div><div class="num">{total:,}</div><div class="label">Saved logs</div></div>
       <div class="card stat"><div class="icon">🗑️</div><div class="num">{deleted_total:,}</div><div class="label">Deleted from Discord</div></div>
@@ -9107,19 +9318,21 @@ def dashboard_log_vault_page():
     </div>
 
     <div style="height:14px"></div>
-    <div class="card">
-      <h3>🔎 Filters</h3>
+    <div class="vault-toolbar">
       <form method="get" class="formgrid">
-        <div><label>Search</label><input name="q" value="{dash_escape(query, 120)}" placeholder="title, text, channel, deleter"></div>
+        <input type="hidden" name="guild_id" value="{int(selected_guild_id or 0)}">
+        <div><label>Search</label><input name="q" value="{dash_escape(query, 120)}" placeholder="title, text, channel, deleter, type"></div>
         <div><label>Type</label><select name="type">{type_options}</select></div>
         <div><label>Status</label><select name="deleted">{deleted_options}</select></div>
         <div><label>Limit</label><input name="limit" value="{limit}"></div>
-        <div style="display:flex;align-items:end;gap:8px"><button class="btn primary" type="submit">Apply</button><a class="btn" href="/dashboard/log-vault">Reset</a></div>
+        <div style="display:flex;align-items:end;gap:8px"><button class="btn primary" type="submit">Apply</button><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">Reset</a></div>
       </form>
+      <div class="vault-chips">{type_chips_html}</div>
     </div>
 
-    <div style="height:14px"></div>
-    {cards}
+    {pagination}
+    <div class="vault-list">{cards}</div>
+    {pagination}
     """
     return render_dashboard_page("Log Vault", body)
 
