@@ -3140,8 +3140,9 @@ async def apply_punishment(member, channel, count):
 
 async def handle_violation(message, reason):
     old_message = message.content
+    settings = get_guild_protection_settings(message.guild.id) if message.guild else protection_default_settings()
 
-    if PROTECTION_DELETE_MESSAGES and not PROTECTION_LOG_ONLY_MODE:
+    if settings.get("delete_messages") and not settings.get("log_only"):
         try:
             await message.delete()
         except:
@@ -3157,9 +3158,9 @@ async def handle_violation(message, reason):
         channel_name=getattr(message.channel, "name", "unknown"),
         details=f"{reason} | Warning #{count} | Message: {old_message[:300]}"
     )
-    if PROTECTION_LOG_ONLY_MODE:
+    if settings.get("log_only"):
         punishment = "Log only / بدون عقوبة"
-    elif PROTECTION_TIMEOUTS_ENABLED:
+    elif settings.get("timeouts"):
         punishment = await apply_punishment(message.author, message.channel, count)
     else:
         punishment = "تحذير فقط / Timeouts disabled"
@@ -8785,121 +8786,156 @@ def dashboard_command_center_page():
 
 @app.route("/dashboard/protection", methods=["GET"])
 def dashboard_protection_page():
-    denied = dashboard_require_owner()
+    denied = dashboard_require_admin()
     if denied:
         return denied
 
-    def checked(value):
-        return "checked" if bool(value) else ""
+    selected_guild_id = dashboard_get_active_guild_id()
+    if not dashboard_can_manage_guild(selected_guild_id):
+        return dashboard_access_denied_html("ما عندك صلاحية إدارة حماية هذا السيرفر.")
 
-    whitelist_text = "\n".join(PROTECTION_LINK_WHITELIST)
-    ignored_channels_text = "\n".join(str(x) for x in sorted({int(v) for v in PROTECTION_IGNORED_CHANNEL_IDS}))
+    settings = get_guild_protection_settings(selected_guild_id)
+    guild = bot.get_guild(int(selected_guild_id)) if bot else None
+
+    def checked(key):
+        return "checked" if bool(settings.get(key)) else ""
+
+    def option(value, label):
+        selected = "selected" if settings.get("punishment") == value else ""
+        return f"<option value='{value}' {selected}>{label}</option>"
+
+    channels = []
+    roles = []
+    if guild:
+        channels = sorted(guild.text_channels, key=lambda c: (c.category.name if c.category else "", c.position))
+        roles = [r for r in sorted(guild.roles, key=lambda r: r.position, reverse=True) if r.name != "@everyone"]
+
+    ignored_channels = {int(x) for x in settings.get("ignored_channels", [])}
+    ignored_roles = {int(x) for x in settings.get("ignored_roles", [])}
+    channel_options = "".join([
+        f"<label class='mini-check'><input type='checkbox' name='ignored_channels' value='{c.id}' {'checked' if c.id in ignored_channels else ''}> #{dash_escape(c.name, 80)}</label>"
+        for c in channels[:160]
+    ]) or "<p class='muted'>ما قدرت أقرأ رومات السيرفر. تأكد البوت داخل السيرفر وعنده صلاحيات.</p>"
+    role_options = "".join([
+        f"<label class='mini-check'><input type='checkbox' name='ignored_roles' value='{r.id}' {'checked' if r.id in ignored_roles else ''}> {dash_escape(r.name, 80)}</label>"
+        for r in roles[:120]
+    ]) or "<p class='muted'>ما قدرت أقرأ رتب السيرفر.</p>"
+
+    whitelist_text = "\n".join(settings.get("link_whitelist", []))
 
     modules = [
-        ("protection_enabled", "Master Protection", protection_enabled, "القفل الرئيسي للحماية. إذا طفيته كل أنظمة الحماية توقف."),
-        ("PROTECTION_BAD_WORDS_ENABLED", "Bad Words Filter", PROTECTION_BAD_WORDS_ENABLED, "فلتر السب والكلمات الممنوعة."),
-        ("PROTECTION_LINKS_ENABLED", "Anti Links", PROTECTION_LINKS_ENABLED, "منع الروابط والدعوات إلا اللي تضيفها في whitelist."),
-        ("PROTECTION_SPAM_ENABLED", "Anti Spam", PROTECTION_SPAM_ENABLED, "يمسك السبام حسب عدد الرسائل والمدة."),
-        ("PROTECTION_MASS_MENTION_ENABLED", "Mass Mention Guard", PROTECTION_MASS_MENTION_ENABLED, "يمسك المنشن الكثير و @everyone."),
-        ("PROTECTION_DELETE_MESSAGES", "Delete Violating Message", PROTECTION_DELETE_MESSAGES, "يحذف رسالة المخالفة تلقائيًا."),
-        ("PROTECTION_TIMEOUTS_ENABLED", "Auto Timeouts", PROTECTION_TIMEOUTS_ENABLED, "يفعل تصعيد العقوبات حسب عدد الإنذارات."),
-        ("PROTECTION_BYPASS_ADMINS", "Bypass Admins", PROTECTION_BYPASS_ADMINS, "الأدمن والـ bypass IDs ما تنطبق عليهم الحماية."),
-        ("PROTECTION_LOG_ONLY_MODE", "Log Only Mode", PROTECTION_LOG_ONLY_MODE, "يسجل الإنذار فقط بدون حذف وبدون تايم آوت. مفيد للتجربة."),
+        ("protection_enabled", "Master Protection", "القفل الرئيسي لكل أنظمة الحماية."),
+        ("bad_words", "Bad Words Filter", "فلتر الكلمات الممنوعة والسب بدون ظلم الكلمات الطبيعية."),
+        ("links", "Anti Links", "منع الروابط العامة غير المسموحة."),
+        ("invites", "Anti Discord Invites", "منع دعوات الديسكورد غير المصرح بها."),
+        ("spam", "Anti Spam", "يمسك الرسائل المتكررة خلال مدة قصيرة."),
+        ("mass_mentions", "Mass Mention Guard", "يمسك المنشن الجماعي و@everyone."),
+        ("anti_bot_join", "Anti Bot Join", "يراقب دخول البوتات الجديدة للسيرفر."),
+        ("anti_raid", "Anti Raid", "يراقب دخول عدد كبير من الأعضاء خلال وقت قصير."),
+        ("anti_channel_create", "Anti Channel Create", "يراقب إنشاء الرومات المفاجئ."),
+        ("anti_channel_delete", "Anti Channel Delete", "يراقب حذف الرومات ويحفظ اللوق."),
+        ("anti_channel_rename", "Anti Channel Rename", "يراقب تغيير أسماء الرومات."),
+        ("anti_channel_permission_update", "Anti Channel Permission Update", "يراقب تعديل صلاحيات الرومات."),
+        ("anti_role_create", "Anti Role Create", "يراقب إنشاء الرتب."),
+        ("anti_role_delete", "Anti Role Delete", "يراقب حذف الرتب."),
+        ("anti_role_permission_update", "Anti Role Permission Update", "يراقب تعديل صلاحيات الرتب الخطيرة."),
+        ("anti_ban_abuse", "Anti Ban Abuse", "يراقب الباندات المشبوهة من الأدمنز."),
+        ("anti_kick_abuse", "Anti Kick Abuse", "يراقب الطرد المشبوه."),
+        ("anti_webhook_update", "Anti Webhook Abuse", "يراقب إنشاء/تعديل الويب هوك."),
+        ("anti_emoji_delete", "Anti Emoji Delete", "يراقب حذف الإيموجيات."),
+        ("anti_guild_update", "Anti Server Update", "يراقب تغيير اسم/صورة السيرفر."),
+        ("anti_invite_delete", "Anti Invite Delete", "يراقب حذف الدعوات."),
     ]
 
     module_cards = "".join([
         f"""
         <label class='protect-switch'>
-          <input type='checkbox' name='{key}' {checked(enabled)}>
-          <div>
-            <b>{title}</b>
-            <span>{desc}</span>
-          </div>
-          <em>{'ON' if enabled else 'OFF'}</em>
+          <input type='checkbox' name='{key}' {checked(key)}>
+          <div><b>{title}</b><span>{desc}</span></div>
+          <em>{'ON' if settings.get(key) else 'OFF'}</em>
         </label>
         """
-        for key, title, enabled, desc in modules
+        for key, title, desc in modules
     ])
 
+    guild_banner = dashboard_guild_banner(selected_guild_id, "Protection Guild")
     body = f"""
     {dashboard_toast_html()}
+    {guild_banner}
     <style>
-      .protect-hero{{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(260px,.7fr);gap:16px}}
+      .protect-hero{{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:16px}}
       .protect-switch{{display:grid;grid-template-columns:54px minmax(0,1fr) 48px;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045);margin-bottom:10px}}
       .protect-switch:hover{{border-color:rgba(139,92,246,.45);background:rgba(255,255,255,.07)}}
       .protect-switch input{{width:22px;height:22px;accent-color:var(--purple)}}
       .protect-switch b{{display:block;font-size:14px}}
       .protect-switch span{{display:block;color:var(--muted);font-size:12px;margin-top:4px;line-height:1.35}}
       .protect-switch em{{font-style:normal;font-size:11px;font-weight:1000;color:#dbeafe;background:rgba(88,101,242,.2);border:1px solid rgba(88,101,242,.28);padding:6px 8px;border-radius:999px;text-align:center}}
-      .protect-tip{{padding:13px;border:1px solid var(--line);border-radius:16px;background:rgba(2,6,23,.35);margin-top:10px;color:var(--muted);font-size:13px;line-height:1.55}}
+      .mini-check{{display:block;padding:10px 11px;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.035);margin:6px 0;color:#dbeafe;font-weight:800}}
+      .mini-check input{{margin-right:8px;accent-color:var(--purple)}}
+      .scrollbox{{max-height:330px;overflow:auto;padding-right:6px}}
       textarea{{min-height:120px;resize:vertical}}
       @media(max-width:950px){{.protect-hero{{grid-template-columns:1fr}}}}
     </style>
 
     <div class='protect-hero'>
       <div class='card'>
-        <div class='big'>🛡️ Protection Control</div>
-        <p class='muted'>تحكم كامل ومريح بأنظمة الحماية من الداشبورد. افتح أو اقفل اللي تبيه بدون تعديل الكود.</p>
+        <div class='big'>🛡️ NM Protection Core</div>
+        <p class='muted'>مركز حماية شامل للسيرفر المختار. كل إعداد هنا خاص بهذا السيرفر فقط.</p>
         <div style='height:10px'></div>
-        <span class='pill {'ok' if protection_enabled else 'danger'}'>Master: {'ON' if protection_enabled else 'OFF'}</span>
-        <span class='pill'>Spam: {SPAM_LIMIT}/{SPAM_SECONDS}s</span>
-        <span class='pill'>Mentions: {MASS_MENTION_LIMIT}</span>
+        <span class='pill {'ok' if settings.get('protection_enabled') else 'danger'}'>Master: {'ON' if settings.get('protection_enabled') else 'OFF'}</span>
+        <span class='pill'>Spam: {settings.get('spam_limit')}/{settings.get('spam_seconds')}s</span>
+        <span class='pill'>Raid: {settings.get('raid_join_limit')}/{settings.get('raid_seconds')}s</span>
       </div>
       <div class='card'>
-        <h3>⚡ Quick Explain</h3>
-        <p class='muted'>Log Only Mode يخليك تجرب الفلتر بدون حذف رسائل أو تايم آوت.</p>
-        <p class='muted'>Ignored Channels توقف الحماية في رومات معيّنة مثل روم أوامر أو تجارب.</p>
-        <p class='muted'>Whitelist يسمح بروابط معيّنة حتى لو Anti Links شغال.</p>
+        <h3>⚡ Action Mode</h3>
+        <p class='muted'>اختر كيف يتصرف البوت مع التخريب الإداري مثل حذف الرومات أو تعديل صلاحيات الرتب.</p>
+        <p><span class='pill gold'>Log Only للتجربة</span> <span class='pill danger'>Ban/Kick بحذر</span></p>
       </div>
     </div>
 
     <div style='height:16px'></div>
-
-    <form method='post' action='/dashboard/protection'>
+    <form method='post' action='/dashboard/protection?guild_id={int(selected_guild_id)}'>
+      <input type='hidden' name='guild_id' value='{int(selected_guild_id)}'>
       <div class='grid2'>
+        <div class='card'><h3>🔌 Protection Modules</h3>{module_cards}</div>
         <div class='card'>
-          <h3>🔌 Protection Modules</h3>
-          {module_cards}
-        </div>
-        <div class='card'>
-          <h3>⚙️ Thresholds</h3>
-          <label>Spam Limit</label>
-          <input name='SPAM_LIMIT' value='{SPAM_LIMIT}'>
-          <p class='muted'>عدد الرسائل قبل ما يعتبره سبام.</p>
-
-          <label>Spam Window Seconds</label>
-          <input name='SPAM_SECONDS' value='{SPAM_SECONDS}'>
-          <p class='muted'>خلال كم ثانية ينحسب السبام.</p>
-
-          <label>Mass Mention Limit</label>
-          <input name='MASS_MENTION_LIMIT' value='{MASS_MENTION_LIMIT}'>
-          <p class='muted'>كم منشن قبل ما يعطي مخالفة.</p>
-
-          <div class='protect-tip'>
-            الإعداد المقترح للسيرفرات الصغيرة: Spam = 8 رسائل / 5 ثواني، والمنشن = 6 إلى 8.
-          </div>
+          <h3>⚙️ Thresholds & Punishment</h3>
+          <label>Default Punishment for Anti-Abuse</label>
+          <select name='punishment'>
+            {option('log_only', 'Log only / تسجيل فقط')}
+            {option('warn', 'Warn executor')}
+            {option('timeout_10m', 'Timeout 10 minutes')}
+            {option('timeout_1h', 'Timeout 1 hour')}
+            {option('quarantine', 'Quarantine role')}
+            {option('kick', 'Kick executor')}
+            {option('ban', 'Ban executor')}
+          </select>
+          <label>Spam Limit</label><input name='spam_limit' value='{int(settings.get('spam_limit'))}'>
+          <label>Spam Window Seconds</label><input name='spam_seconds' value='{int(settings.get('spam_seconds'))}'>
+          <label>Mass Mention Limit</label><input name='mass_mention_limit' value='{int(settings.get('mass_mention_limit'))}'>
+          <label>Raid Join Limit</label><input name='raid_join_limit' value='{int(settings.get('raid_join_limit'))}'>
+          <label>Raid Window Seconds</label><input name='raid_seconds' value='{int(settings.get('raid_seconds'))}'>
+          <label>Quarantine Role Name</label><input name='quarantine_role_name' value='{dash_escape(settings.get('quarantine_role_name'), 80)}'>
+          <label class='mini-check'><input type='checkbox' name='delete_messages' {checked('delete_messages')}> Delete violating messages</label>
+          <label class='mini-check'><input type='checkbox' name='timeouts' {checked('timeouts')}> Auto timeouts for warnings</label>
+          <label class='mini-check'><input type='checkbox' name='bypass_admins' {checked('bypass_admins')}> Bypass administrators</label>
+          <label class='mini-check'><input type='checkbox' name='log_only' {checked('log_only')}> Log Only Mode</label>
         </div>
       </div>
 
       <div style='height:16px'></div>
-
       <div class='grid2'>
-        <div class='card'>
-          <h3>✅ Link Whitelist</h3>
-          <p class='muted'>اكتب دومين أو رابط في كل سطر. أي رسالة تحتويه ما تنمسك من Anti Links.</p>
-          <textarea name='PROTECTION_LINK_WHITELIST' placeholder='youtube.com\ntwitch.tv\nyour-site.com'>{dash_escape(whitelist_text, 3000)}</textarea>
-        </div>
-        <div class='card'>
-          <h3>🚪 Ignored Channels</h3>
-          <p class='muted'>اكتب Channel ID في كل سطر. الحماية ما تشتغل داخل هذي الرومات.</p>
-          <textarea name='PROTECTION_IGNORED_CHANNEL_IDS' placeholder='123456789\n987654321'>{dash_escape(ignored_channels_text, 3000)}</textarea>
-        </div>
+        <div class='card'><h3>✅ Link Whitelist</h3><p class='muted'>دومين أو رابط في كل سطر.</p><textarea name='link_whitelist'>{dash_escape(whitelist_text, 3000)}</textarea></div>
+        <div class='card'><h3>🚪 Ignored Channels</h3><p class='muted'>اختر الرومات اللي ما تشتغل فيها الحماية.</p><div class='scrollbox'>{channel_options}</div></div>
       </div>
+
+      <div style='height:16px'></div>
+      <div class='card'><h3>🎭 Ignored Roles</h3><p class='muted'>أي عضو معه رتبة من هنا ما تنطبق عليه الحماية.</p><div class='scrollbox'>{role_options}</div></div>
 
       <div style='height:16px'></div>
       <button class='btn primary' type='submit'>💾 Save Protection Settings</button>
-      <a class='btn' href='/dashboard/command-center'>🧠 Open Command Center</a>
-      <a class='btn' href='/dashboard/warnings'>⚠️ Open Warnings</a>
+      <a class='btn' href='/dashboard/guild/{int(selected_guild_id)}/command-center'>🧠 Command Center</a>
+      <a class='btn' href='/dashboard/guild/{int(selected_guild_id)}/log-vault'>📦 Log Vault</a>
     </form>
     """
     return render_dashboard_page("Protection", body)
@@ -8907,53 +8943,36 @@ def dashboard_protection_page():
 
 @app.route("/dashboard/protection", methods=["POST"])
 def dashboard_protection_action():
-    denied = dashboard_require_owner()
+    denied = dashboard_require_admin()
     if denied:
         return denied
+    guild_id = int(request.form.get("guild_id") or request.args.get("guild_id") or dashboard_get_active_guild_id())
+    if not dashboard_can_manage_guild(guild_id):
+        return dashboard_access_denied_html("ما عندك صلاحية تعديل حماية هذا السيرفر.")
 
-    global protection_enabled, ANTI_LINKS, SPAM_LIMIT, SPAM_SECONDS, MASS_MENTION_LIMIT
-    global PROTECTION_BAD_WORDS_ENABLED, PROTECTION_LINKS_ENABLED, PROTECTION_SPAM_ENABLED, PROTECTION_MASS_MENTION_ENABLED
-    global PROTECTION_DELETE_MESSAGES, PROTECTION_TIMEOUTS_ENABLED, PROTECTION_BYPASS_ADMINS, PROTECTION_LOG_ONLY_MODE
-    global PROTECTION_LINK_WHITELIST, PROTECTION_IGNORED_CHANNEL_IDS
-
-    try:
-        protection_enabled = "protection_enabled" in request.form
-        PROTECTION_BAD_WORDS_ENABLED = "PROTECTION_BAD_WORDS_ENABLED" in request.form
-        PROTECTION_LINKS_ENABLED = "PROTECTION_LINKS_ENABLED" in request.form
-        ANTI_LINKS = PROTECTION_LINKS_ENABLED
-        PROTECTION_SPAM_ENABLED = "PROTECTION_SPAM_ENABLED" in request.form
-        PROTECTION_MASS_MENTION_ENABLED = "PROTECTION_MASS_MENTION_ENABLED" in request.form
-        PROTECTION_DELETE_MESSAGES = "PROTECTION_DELETE_MESSAGES" in request.form
-        PROTECTION_TIMEOUTS_ENABLED = "PROTECTION_TIMEOUTS_ENABLED" in request.form
-        PROTECTION_BYPASS_ADMINS = "PROTECTION_BYPASS_ADMINS" in request.form
-        PROTECTION_LOG_ONLY_MODE = "PROTECTION_LOG_ONLY_MODE" in request.form
-        SPAM_LIMIT = parse_int_field(request.form.get("SPAM_LIMIT"), SPAM_LIMIT, 2)
-        SPAM_SECONDS = parse_int_field(request.form.get("SPAM_SECONDS"), SPAM_SECONDS, 1)
-        MASS_MENTION_LIMIT = parse_int_field(request.form.get("MASS_MENTION_LIMIT"), MASS_MENTION_LIMIT, 1)
-        PROTECTION_LINK_WHITELIST = parse_text_list(request.form.get("PROTECTION_LINK_WHITELIST", ""))
-        PROTECTION_IGNORED_CHANNEL_IDS = set(parse_dashboard_int_list(request.form.get("PROTECTION_IGNORED_CHANNEL_IDS", "")))
-
-        dashboard_merge_settings({
-            "protection_enabled": protection_enabled,
-            "PROTECTION_BAD_WORDS_ENABLED": PROTECTION_BAD_WORDS_ENABLED,
-            "PROTECTION_LINKS_ENABLED": PROTECTION_LINKS_ENABLED,
-            "ANTI_LINKS": PROTECTION_LINKS_ENABLED,
-            "PROTECTION_SPAM_ENABLED": PROTECTION_SPAM_ENABLED,
-            "PROTECTION_MASS_MENTION_ENABLED": PROTECTION_MASS_MENTION_ENABLED,
-            "PROTECTION_DELETE_MESSAGES": PROTECTION_DELETE_MESSAGES,
-            "PROTECTION_TIMEOUTS_ENABLED": PROTECTION_TIMEOUTS_ENABLED,
-            "PROTECTION_BYPASS_ADMINS": PROTECTION_BYPASS_ADMINS,
-            "PROTECTION_LOG_ONLY_MODE": PROTECTION_LOG_ONLY_MODE,
-            "SPAM_LIMIT": SPAM_LIMIT,
-            "SPAM_SECONDS": SPAM_SECONDS,
-            "MASS_MENTION_LIMIT": MASS_MENTION_LIMIT,
-            "PROTECTION_LINK_WHITELIST": PROTECTION_LINK_WHITELIST,
-            "PROTECTION_IGNORED_CHANNEL_IDS": sorted([int(x) for x in PROTECTION_IGNORED_CHANNEL_IDS]),
-        })
-        dashboard_log_action("Protection updated", "Protection Control settings were changed", session.get("discord_user"))
-        return redirect("/dashboard/protection?msg=" + urllib.parse.quote("Protection settings saved."))
-    except Exception as e:
-        return redirect("/dashboard/protection?err=" + urllib.parse.quote(str(e)))
+    keys = [
+        "protection_enabled", "bad_words", "links", "invites", "spam", "mass_mentions",
+        "anti_bot_join", "anti_raid", "anti_channel_create", "anti_channel_delete", "anti_channel_rename",
+        "anti_channel_permission_update", "anti_role_create", "anti_role_delete", "anti_role_permission_update",
+        "anti_ban_abuse", "anti_kick_abuse", "anti_webhook_update", "anti_emoji_delete", "anti_guild_update", "anti_invite_delete",
+        "delete_messages", "timeouts", "bypass_admins", "log_only"
+    ]
+    settings = get_guild_protection_settings(guild_id)
+    for key in keys:
+        settings[key] = key in request.form
+    settings["punishment"] = request.form.get("punishment", settings.get("punishment", "timeout_10m"))
+    settings["spam_limit"] = parse_int_field(request.form.get("spam_limit"), settings.get("spam_limit", 8), 2)
+    settings["spam_seconds"] = parse_int_field(request.form.get("spam_seconds"), settings.get("spam_seconds", 5), 1)
+    settings["mass_mention_limit"] = parse_int_field(request.form.get("mass_mention_limit"), settings.get("mass_mention_limit", 8), 1)
+    settings["raid_join_limit"] = parse_int_field(request.form.get("raid_join_limit"), settings.get("raid_join_limit", 8), 2)
+    settings["raid_seconds"] = parse_int_field(request.form.get("raid_seconds"), settings.get("raid_seconds", 20), 5)
+    settings["quarantine_role_name"] = request.form.get("quarantine_role_name", "NM Quarantine")[:80]
+    settings["link_whitelist"] = parse_text_list(request.form.get("link_whitelist", ""))
+    settings["ignored_channels"] = parse_dashboard_int_list(request.form.getlist("ignored_channels"))
+    settings["ignored_roles"] = parse_dashboard_int_list(request.form.getlist("ignored_roles"))
+    save_guild_protection_settings(guild_id, settings)
+    dashboard_log_action("Protection updated", f"Protection settings changed for guild {guild_id}", session.get("discord_user"))
+    return redirect(f"/dashboard/protection?guild_id={guild_id}&msg=" + urllib.parse.quote("Protection settings saved."))
 
 
 @app.route("/dashboard/settings", methods=["GET"])
@@ -9409,7 +9428,7 @@ async def on_message(message):
         # The bot will not reply in DMs or forward DMs privately.
         return
 
-    if not message.guild or message.guild.id != GUILD_ID:
+    if not message.guild or not is_guild_enabled(message.guild.id):
         return
 
     raw_content = (message.content or "").strip().lower()
@@ -9460,49 +9479,60 @@ async def on_message(message):
                 delete_after=10
             )
 
-    protection_skip_member = is_bypass(message.author) if PROTECTION_BYPASS_ADMINS else (message.author.id in BYPASS_USER_IDS)
+    protection_settings = get_guild_protection_settings(message.guild.id)
+    protection_skip_member = False
+    if message.author.id in BYPASS_USER_IDS:
+        protection_skip_member = True
+    elif protection_settings.get("bypass_admins") and is_bypass(message.author):
+        protection_skip_member = True
+    elif protection_member_ignored_by_role(protection_settings, message.author):
+        protection_skip_member = True
 
-    if protection_enabled and is_system_enabled("protection") and not protection_skip_member and not protection_channel_ignored(message.channel.id):
+    if protection_settings.get("protection_enabled") and is_system_enabled("protection") and not protection_skip_member and not protection_channel_ignored_for(protection_settings, message.channel.id):
 
-        if PROTECTION_BAD_WORDS_ENABLED and contains_bad_word(content):
+        if protection_settings.get("bad_words") and contains_bad_word(content):
             await handle_violation(message, "كلمة ممنوعة / سب")
             return
 
-        if PROTECTION_LINKS_ENABLED:
-            link_words = ["discord.gg", "discord.com/invite", "http://", "https://"]
-
-            if any(link in content for link in link_words) and not protection_link_allowed(content):
-                await handle_violation(message, "إرسال رابط ممنوع")
+        if protection_settings.get("links"):
+            link_words = ["http://", "https://"]
+            invite_words = ["discord.gg", "discord.com/invite", "discordapp.com/invite"]
+            blocked_link = any(link in content for link in link_words)
+            blocked_invite = protection_settings.get("invites") and any(link in content for link in invite_words)
+            if (blocked_link or blocked_invite) and not protection_link_allowed_for(protection_settings, content):
+                await handle_violation(message, "إرسال رابط أو دعوة ممنوعة")
                 return
 
-        if PROTECTION_MASS_MENTION_ENABLED:
+        if protection_settings.get("mass_mentions"):
             mentions_count = len(message.mentions) + len(message.role_mentions)
 
             if message.mention_everyone:
                 mentions_count += 10
 
-            if mentions_count >= MASS_MENTION_LIMIT:
+            if mentions_count >= int(protection_settings.get("mass_mention_limit", MASS_MENTION_LIMIT)):
                 await handle_violation(message, f"منشن كثير ({mentions_count})")
                 return
 
-        if PROTECTION_SPAM_ENABLED:
-            user_id = message.author.id
+        if protection_settings.get("spam"):
+            user_key = (message.guild.id, message.author.id)
             msg_now = time.time()
+            spam_seconds = int(protection_settings.get("spam_seconds", SPAM_SECONDS))
+            spam_limit = int(protection_settings.get("spam_limit", SPAM_LIMIT))
 
-            if user_id not in user_message_times:
-                user_message_times[user_id] = []
+            if user_key not in user_message_times:
+                user_message_times[user_key] = []
 
-            user_message_times[user_id].append(msg_now)
-            user_message_times[user_id] = [
-                t for t in user_message_times[user_id]
-                if msg_now - t <= SPAM_SECONDS
+            user_message_times[user_key].append(msg_now)
+            user_message_times[user_key] = [
+                t for t in user_message_times[user_key]
+                if msg_now - t <= spam_seconds
             ]
 
-            if len(user_message_times[user_id]) >= SPAM_LIMIT:
-                user_message_times[user_id] = []
+            if len(user_message_times[user_key]) >= spam_limit:
+                user_message_times[user_key] = []
                 await handle_violation(
                     message,
-                    f"سبام: {SPAM_LIMIT} رسائل خلال {SPAM_SECONDS} ثواني"
+                    f"سبام: {spam_limit} رسائل خلال {spam_seconds} ثواني"
                 )
                 return
 
@@ -9603,7 +9633,7 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_member_join(member):
-    if member.guild.id != GUILD_ID:
+    if not is_guild_enabled(member.guild.id):
         return
 
     cc_record_event(
@@ -9612,6 +9642,31 @@ async def on_member_join(member):
         user_name=str(member),
         details="Member joined the server"
     )
+
+    protection_settings = get_guild_protection_settings(member.guild.id)
+    if protection_settings.get("protection_enabled"):
+        if member.bot and protection_settings.get("anti_bot_join"):
+            await send_log(
+                member.guild,
+                "🛡️ Anti Bot Join",
+                f"**Bot:** {member.mention} (`{member.id}`) دخل السيرفر.\nراجع Audit Log لمعرفة من أضافه.",
+                COLOR_YELLOW,
+                log_type="server"
+            )
+        if not member.bot and protection_settings.get("anti_raid"):
+            now_ts = time.time()
+            gid = int(member.guild.id)
+            raid_join_times.setdefault(gid, [])
+            raid_join_times[gid].append(now_ts)
+            raid_join_times[gid] = [t for t in raid_join_times[gid] if now_ts - t <= int(protection_settings.get("raid_seconds", 20))]
+            if len(raid_join_times[gid]) >= int(protection_settings.get("raid_join_limit", 8)):
+                await send_log(
+                    member.guild,
+                    "🚨 Anti Raid Alert",
+                    f"دخل **{len(raid_join_times[gid])}** أعضاء خلال **{protection_settings.get('raid_seconds', 20)} ثانية**.",
+                    COLOR_RED,
+                    log_type="member"
+                )
 
     created = int(member.created_at.timestamp())
 
@@ -9631,7 +9686,7 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
-    if member.guild.id != GUILD_ID:
+    if not is_guild_enabled(member.guild.id):
         return
 
     cc_record_event(
@@ -9680,6 +9735,17 @@ async def on_member_remove(member):
 
     except Exception as e:
         print(f"Leave audit check error: {e}")
+
+    if action_type == "👢 انطرد" and get_guild_protection_settings(guild.id).get("anti_kick_abuse"):
+        await protection_handle_audit_event(
+            guild,
+            discord.AuditLogAction.kick,
+            member.id,
+            "anti_kick_abuse",
+            "Anti Kick Abuse",
+            f"تم طرد العضو `{member}` (`{member.id}`)",
+            log_type="moderation"
+        )
 
     roles_text, roles_count = format_roles_list(member)
 
@@ -9764,12 +9830,23 @@ async def on_member_remove(member):
 
 @bot.event
 async def on_member_ban(guild, user):
-    if guild.id != GUILD_ID:
+    if not is_guild_enabled(guild.id):
         return
 
     entry = await get_audit_executor(guild, discord.AuditLogAction.ban, user.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
     reason_text = entry.reason if entry and entry.reason else "بدون سبب مكتوب"
+
+    if get_guild_protection_settings(guild.id).get("anti_ban_abuse"):
+        await protection_handle_audit_event(
+            guild,
+            discord.AuditLogAction.ban,
+            user.id,
+            "anti_ban_abuse",
+            "Anti Ban Abuse",
+            f"تم حظر العضو `{user}` (`{user.id}`)",
+            log_type="moderation"
+        )
 
     await send_log(
         guild,
@@ -9787,7 +9864,7 @@ async def on_member_ban(guild, user):
 
 @bot.event
 async def on_member_unban(guild, user):
-    if guild.id != GUILD_ID:
+    if not is_guild_enabled(guild.id):
         return
 
     entry = await get_audit_executor(guild, discord.AuditLogAction.unban, user.id)
@@ -9810,7 +9887,7 @@ async def on_member_unban(guild, user):
 
 @bot.event
 async def on_member_update(before, after):
-    if before.guild.id != GUILD_ID:
+    if not is_guild_enabled(before.guild.id):
         return
 
     before_roles = set(before.roles)
@@ -9908,11 +9985,22 @@ async def on_member_update(before, after):
 
 @bot.event
 async def on_guild_channel_create(channel):
-    if channel.guild.id != GUILD_ID:
+    if not is_guild_enabled(channel.guild.id):
         return
 
     entry = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_create, channel.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+
+    if get_guild_protection_settings(channel.guild.id).get("anti_channel_create"):
+        await protection_handle_audit_event(
+            channel.guild,
+            discord.AuditLogAction.channel_create,
+            channel.id,
+            "anti_channel_create",
+            "Anti Channel Create",
+            f"تم إنشاء روم `{channel.name}`",
+            log_type="channel"
+        )
 
     await send_log(
         channel.guild,
@@ -9929,11 +10017,22 @@ async def on_guild_channel_create(channel):
 
 @bot.event
 async def on_guild_channel_delete(channel):
-    if channel.guild.id != GUILD_ID:
+    if not is_guild_enabled(channel.guild.id):
         return
 
     entry = await get_audit_executor(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+
+    if get_guild_protection_settings(channel.guild.id).get("anti_channel_delete"):
+        await protection_handle_audit_event(
+            channel.guild,
+            discord.AuditLogAction.channel_delete,
+            channel.id,
+            "anti_channel_delete",
+            "Anti Channel Delete",
+            f"تم حذف روم `{channel.name}`",
+            log_type="channel"
+        )
 
     await send_log(
         channel.guild,
@@ -9949,7 +10048,7 @@ async def on_guild_channel_delete(channel):
 
 @bot.event
 async def on_guild_channel_update(before, after):
-    if before.guild.id != GUILD_ID:
+    if not is_guild_enabled(before.guild.id):
         return
 
     changes = []
@@ -9971,6 +10070,23 @@ async def on_guild_channel_update(before, after):
     entry = await get_audit_executor(after.guild, discord.AuditLogAction.channel_update, after.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
+    protection_settings = get_guild_protection_settings(after.guild.id)
+    channel_setting_key = None
+    if before.name != after.name and protection_settings.get("anti_channel_rename"):
+        channel_setting_key = "anti_channel_rename"
+    elif before.overwrites != after.overwrites and protection_settings.get("anti_channel_permission_update"):
+        channel_setting_key = "anti_channel_permission_update"
+    if channel_setting_key:
+        await protection_handle_audit_event(
+            after.guild,
+            discord.AuditLogAction.channel_update,
+            after.id,
+            channel_setting_key,
+            "Anti Channel Update",
+            f"تم تعديل روم `{before.name}` → `{after.name}`",
+            log_type="channel"
+        )
+
     await send_log(
         after.guild,
         "📝 تعديل روم",
@@ -9982,11 +10098,22 @@ async def on_guild_channel_update(before, after):
 
 @bot.event
 async def on_guild_role_create(role):
-    if role.guild.id != GUILD_ID:
+    if not is_guild_enabled(role.guild.id):
         return
 
     entry = await get_audit_executor(role.guild, discord.AuditLogAction.role_create, role.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+
+    if get_guild_protection_settings(role.guild.id).get("anti_role_create"):
+        await protection_handle_audit_event(
+            role.guild,
+            discord.AuditLogAction.role_create,
+            role.id,
+            "anti_role_create",
+            "Anti Role Create",
+            f"تم إنشاء رتبة `{role.name}`",
+            log_type="role"
+        )
 
     await send_log(
         role.guild,
@@ -10003,11 +10130,22 @@ async def on_guild_role_create(role):
 
 @bot.event
 async def on_guild_role_delete(role):
-    if role.guild.id != GUILD_ID:
+    if not is_guild_enabled(role.guild.id):
         return
 
     entry = await get_audit_executor(role.guild, discord.AuditLogAction.role_delete, role.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+
+    if get_guild_protection_settings(role.guild.id).get("anti_role_delete"):
+        await protection_handle_audit_event(
+            role.guild,
+            discord.AuditLogAction.role_delete,
+            role.id,
+            "anti_role_delete",
+            "Anti Role Delete",
+            f"تم حذف رتبة `{role.name}`",
+            log_type="role"
+        )
 
     await send_log(
         role.guild,
@@ -10023,7 +10161,7 @@ async def on_guild_role_delete(role):
 
 @bot.event
 async def on_guild_role_update(before, after):
-    if before.guild.id != GUILD_ID:
+    if not is_guild_enabled(before.guild.id):
         return
 
     changes = []
@@ -10048,6 +10186,17 @@ async def on_guild_role_update(before, after):
 
     entry = await get_audit_executor(after.guild, discord.AuditLogAction.role_update, after.id)
     executor_text = entry.user.mention if entry and entry.user else "غير معروف"
+
+    if before.permissions.value != after.permissions.value and get_guild_protection_settings(after.guild.id).get("anti_role_permission_update"):
+        await protection_handle_audit_event(
+            after.guild,
+            discord.AuditLogAction.role_update,
+            after.id,
+            "anti_role_permission_update",
+            "Anti Role Update",
+            f"تم تعديل صلاحيات رتبة `{after.name}`",
+            log_type="role"
+        )
 
     await send_log(
         after.guild,
@@ -10110,7 +10259,7 @@ async def on_voice_state_update(member, before, after):
 
 @bot.event
 async def on_guild_update(before, after):
-    if before.id != GUILD_ID:
+    if not is_guild_enabled(before.id):
         return
 
     changes = []
@@ -10124,6 +10273,17 @@ async def on_guild_update(before, after):
     if not changes:
         return
 
+    if get_guild_protection_settings(after.id).get("anti_guild_update"):
+        await protection_handle_audit_event(
+            after,
+            discord.AuditLogAction.guild_update,
+            after.id,
+            "anti_guild_update",
+            "Anti Server Update",
+            "تم تعديل معلومات السيرفر",
+            log_type="server"
+        )
+
     await send_log(
         after,
         "⚙️ تعديل السيرفر",
@@ -10131,6 +10291,89 @@ async def on_guild_update(before, after):
         COLOR_YELLOW,
         log_type="server"
     )
+
+
+
+@bot.event
+async def on_webhooks_update(channel):
+    try:
+        if not channel or not getattr(channel, "guild", None) or not is_guild_enabled(channel.guild.id):
+            return
+        if get_guild_protection_settings(channel.guild.id).get("anti_webhook_update"):
+            await protection_handle_audit_event(
+                channel.guild,
+                discord.AuditLogAction.webhook_create,
+                None,
+                "anti_webhook_update",
+                "Anti Webhook Update",
+                f"تغيرت Webhooks في الروم {getattr(channel, 'mention', channel.name)}",
+                log_type="server"
+            )
+        await send_log(
+            channel.guild,
+            "🪝 Webhook Update",
+            f"**الروم:** {getattr(channel, 'mention', channel.name)}",
+            COLOR_YELLOW,
+            log_type="server"
+        )
+    except Exception as e:
+        print(f"Webhook update log error: {e}")
+
+
+@bot.event
+async def on_guild_emojis_update(guild, before, after):
+    try:
+        if not is_guild_enabled(guild.id):
+            return
+        removed = [emoji for emoji in before if emoji not in after]
+        if removed and get_guild_protection_settings(guild.id).get("anti_emoji_delete"):
+            names = ", ".join([str(e.name) for e in removed[:10]])
+            await protection_handle_audit_event(
+                guild,
+                discord.AuditLogAction.emoji_delete,
+                None,
+                "anti_emoji_delete",
+                "Anti Emoji Delete",
+                f"تم حذف إيموجيات: `{clean_text(names, 400)}`",
+                log_type="server"
+            )
+        if removed:
+            await send_log(
+                guild,
+                "🗑️ Emoji Deleted",
+                "\n".join([f"• `{e.name}`" for e in removed[:20]]),
+                COLOR_RED,
+                log_type="server"
+            )
+    except Exception as e:
+        print(f"Emoji update log error: {e}")
+
+
+@bot.event
+async def on_invite_delete(invite):
+    try:
+        guild = invite.guild
+        if not guild or not is_guild_enabled(guild.id):
+            return
+        if get_guild_protection_settings(guild.id).get("anti_invite_delete"):
+            await protection_handle_audit_event(
+                guild,
+                discord.AuditLogAction.invite_delete,
+                None,
+                "anti_invite_delete",
+                "Anti Invite Delete",
+                f"تم حذف دعوة: `{getattr(invite, 'code', 'unknown')}`",
+                log_type="server"
+            )
+        await send_log(
+            guild,
+            "🗑️ Invite Deleted",
+            f"**Code:** `{getattr(invite, 'code', 'unknown')}`",
+            COLOR_YELLOW,
+            log_type="server"
+        )
+    except Exception as e:
+        print(f"Invite delete log error: {e}")
 
 
 # =========================
