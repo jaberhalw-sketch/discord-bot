@@ -18,6 +18,69 @@ import urllib.request
 import urllib.error
 
 # =========================
+# NM SYSTEM PERSISTENT STORAGE PATCH
+# Railway redeploy-safe storage.
+# If a Railway Volume is mounted at /data, all important files are stored there.
+# If /data does not exist, the bot falls back to the current folder.
+# =========================
+from pathlib import Path as _NMPath
+import os as _nmos
+import shutil as _nmshutil
+import sqlite3 as _nmsqlite3
+
+NM_DATA_DIR = _NMPath(_nmos.getenv("NM_DATA_DIR", "/data"))
+try:
+    NM_DATA_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    NM_DATA_DIR = _NMPath(".")
+
+NM_MEMORY_FILES = [
+    "nm_system.db",
+    "warnings.json",
+    "log_channels.json",
+    "dashboard_settings.json",
+    "protection_settings.json",
+    "guild_settings.json",
+    "money_audit.json",
+]
+
+def nm_data_path(filename: str) -> str:
+    return str(NM_DATA_DIR / filename)
+
+def nm_migrate_local_file_to_data(filename: str):
+    """Move/copy old local data into /data the first time persistent storage is enabled."""
+    try:
+        local = _NMPath(filename)
+        target = NM_DATA_DIR / filename
+        if local.exists() and not target.exists() and local.resolve() != target.resolve():
+            _nmshutil.copy2(local, target)
+            print(f"✅ Migrated {filename} to persistent storage: {target}")
+    except Exception as e:
+        print(f"⚠️ Could not migrate {filename} to persistent storage: {e}")
+
+for _nm_file in NM_MEMORY_FILES:
+    nm_migrate_local_file_to_data(_nm_file)
+
+# Force common file constants to persistent paths.
+DB_FILE = nm_data_path("nm_system.db")
+DATABASE_FILE = DB_FILE
+DATABASE_PATH = DB_FILE
+WARNINGS_FILE = nm_data_path("warnings.json")
+LOG_CHANNELS_FILE = nm_data_path("log_channels.json")
+DASHBOARD_SETTINGS_FILE = nm_data_path("dashboard_settings.json")
+PROTECTION_SETTINGS_FILE = nm_data_path("protection_settings.json")
+GUILD_SETTINGS_FILE = nm_data_path("guild_settings.json")
+MONEY_AUDIT_FILE = nm_data_path("money_audit.json")
+
+def nm_open_json_path(filename):
+    return nm_data_path(filename)
+
+def nm_persistent_sqlite_connect(*args, **kwargs):
+    return _nmsqlite3.connect(DB_FILE, check_same_thread=False)
+
+
+
+# =========================
 # CONFIG
 # =========================
 
@@ -55,10 +118,10 @@ DM_DELAY_SECONDS = 2
 # Keep all outbound DM commands disabled. Use !اعلان or normal channels instead.
 DM_COMMANDS_ENABLED = False
 
-DB_FILE = "nm_system.db"
-WARNINGS_FILE = "warnings.json"
-LOG_CHANNELS_FILE = "log_channels.json"
-DASHBOARD_SETTINGS_FILE = "dashboard_settings.json"
+DB_FILE = nm_data_path("nm_system.db")
+WARNINGS_FILE = nm_data_path("warnings.json")
+LOG_CHANNELS_FILE = nm_data_path("log_channels.json")
+DASHBOARD_SETTINGS_FILE = nm_data_path("dashboard_settings.json")
 
 PREFIX = "!"
 
@@ -444,7 +507,7 @@ def save_log_channels():
 # =========================
 
 def db_connect():
-    return sqlite3.connect(DB_FILE)
+    return sqlite3.connect(DB_FILE, check_same_thread=False)
 
 
 def init_db():
@@ -4726,6 +4789,51 @@ class GameRolesView(discord.ui.View):
 # =========================
 
 app = Flask(__name__)
+
+# =========================
+# NM DASHBOARD CHANGE PERSIST HOOK
+# Any dashboard POST is immediately flushed to persistent storage and memory backup.
+# =========================
+def nm_dashboard_persist_now(reason="dashboard change"):
+    try:
+        if "save_dashboard_settings" in globals():
+            save_dashboard_settings()
+    except Exception as e:
+        print(f"save_dashboard_settings failed: {e}")
+
+    try:
+        if "sync_warnings_json_from_history" in globals():
+            sync_warnings_json_from_history()
+    except Exception:
+        pass
+
+    try:
+        if bot and getattr(bot, "loop", None) and bot.loop.is_running():
+            async def _nm_backup():
+                try:
+                    if "memory_backup_now" in globals():
+                        try:
+                            await memory_backup_now(reason=reason)
+                        except TypeError:
+                            await memory_backup_now()
+                    elif "send_memory_backup" in globals():
+                        await send_memory_backup()
+                except Exception as e:
+                    print(f"NM memory backup failed: {e}")
+            asyncio.run_coroutine_threadsafe(_nm_backup(), bot.loop)
+    except Exception as e:
+        print(f"NM backup schedule failed: {e}")
+
+@app.after_request
+def nm_persist_dashboard_after_request(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            nm_dashboard_persist_now(f"dashboard post {request.path}")
+    except Exception as e:
+        print(f"NM dashboard persist hook failed: {e}")
+    return response
+
+
 
 # =========================
 # NM SYSTEM STRICT MULTI-GUILD ISOLATION
@@ -11269,6 +11377,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    print(f"✅ NM persistent storage active: {NM_DATA_DIR}")
     try:
         await nm_sync_slash_commands()
     except Exception:
