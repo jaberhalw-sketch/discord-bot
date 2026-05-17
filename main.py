@@ -2802,7 +2802,7 @@ def log_vault_short_text(text, limit=240):
     return one_line or "No details"
 
 
-def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all"):
+def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
     try:
         conn = db_connect()
         cur = conn.cursor()
@@ -2815,6 +2815,12 @@ def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", d
         if log_type and log_type != "all":
             clauses.append("log_type = ?")
             params.append(str(log_type))
+        if channel_id and str(channel_id) != "all":
+            try:
+                clauses.append("discord_channel_id = ?")
+                params.append(int(channel_id))
+            except Exception:
+                pass
         if deleted_filter == "deleted":
             clauses.append("deleted_from_discord = 1")
         elif deleted_filter == "active":
@@ -2908,6 +2914,35 @@ def log_vault_top_channels(guild_id=0, limit=8):
         conn.close()
         return rows
     except Exception:
+        return []
+
+
+def log_vault_channels(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        clauses = ["discord_channel_id != 0"]
+        params = []
+        if int(guild_id or 0):
+            clauses.append("(guild_id = ? OR guild_id = 0)")
+            params.append(int(guild_id))
+        where = "WHERE " + " AND ".join(clauses)
+        cur.execute(f"""
+            SELECT discord_channel_id, COALESCE(NULLIF(discord_channel_name, ''), 'unknown') AS name,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN deleted_from_discord = 1 THEN 1 ELSE 0 END) AS deleted_total,
+                   MAX(created_at) AS last_time
+            FROM dashboard_log_vault
+            {where}
+            GROUP BY discord_channel_id, name
+            ORDER BY last_time DESC, total DESC
+        """, tuple(params))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Log Vault channels error: {e}")
         return []
 
 
@@ -9130,20 +9165,28 @@ def dashboard_log_vault_page():
     guild_banner = dashboard_guild_banner(selected_guild_id, "Log Vault Guild")
     log_type = request.args.get("type", "all").strip() or "all"
     deleted_filter = request.args.get("deleted", "all").strip() or "all"
+    channel_filter = request.args.get("channel_id", "all").strip() or "all"
     query = request.args.get("q", "").strip()[:120]
-    view_mode = request.args.get("view", "compact").strip() or "compact"
     try:
         page = max(1, int(request.args.get("page", "1")))
     except Exception:
         page = 1
     try:
-        limit = max(25, min(120, int(request.args.get("limit", "50"))))
+        limit = max(25, min(100, int(request.args.get("limit", "50"))))
     except Exception:
         limit = 50
     offset = (page - 1) * limit
 
     total, deleted_total, types_count, today = log_vault_counts(selected_guild_id)
     type_rows = log_vault_types(selected_guild_id)
+    channel_rows = log_vault_channels(selected_guild_id)
+
+    selected_channel_name = "All log rooms"
+    for cid, cname, ctotal, cdeleted, clast in channel_rows:
+        if str(cid) == str(channel_filter):
+            selected_channel_name = f"#{cname}"
+            break
+
     type_options = '<option value="all">All log types</option>'
     for t, count in type_rows:
         selected = "selected" if str(t) == log_type else ""
@@ -9163,6 +9206,7 @@ def dashboard_log_vault_page():
         log_type=log_type,
         query=query,
         deleted_filter=deleted_filter,
+        channel_id=channel_filter,
     )
     total_pages = max(1, (total_matches + limit - 1) // limit)
 
@@ -9172,33 +9216,40 @@ def dashboard_log_vault_page():
             "q": query,
             "type": log_type,
             "deleted": deleted_filter,
+            "channel_id": channel_filter,
             "limit": limit,
-            "view": view_mode,
             "page": page,
         }
         params.update(updates)
         return "/dashboard/log-vault?" + urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "")})
 
-    type_chips = []
-    type_chips.append(f'<a class="vault-chip {"active" if log_type == "all" else ""}" href="{vault_url(type="all", page=1)}">📦 All</a>')
-    for t, count in type_rows[:10]:
-        icon, label = log_vault_type_meta(t)
-        active = "active" if str(t) == log_type else ""
-        type_chips.append(f'<a class="vault-chip {active}" href="{vault_url(type=str(t), page=1)}">{icon} {dash_escape(label, 40)} <b>{int(count)}</b></a>')
-    type_chips_html = "".join(type_chips)
-
-    channel_rows = log_vault_top_channels(selected_guild_id, 7)
-    channel_html = "".join([
-        f"<div class='mini-row'><span>#{dash_escape(name, 50)}</span><b>{int(count)}</b></div>"
-        for name, count in channel_rows
-    ]) or "<p class='muted'>No channel data yet.</p>"
+    all_active = "active" if channel_filter == "all" else ""
+    channel_nav = f"""
+      <a class="vault-room {all_active}" href="{vault_url(channel_id='all', page=1)}">
+        <div class="room-icon">📁</div>
+        <div class="room-main"><b>All log rooms</b><span>كل اللوقات</span></div>
+        <div class="room-count">{total:,}</div>
+      </a>
+    """
+    for cid, cname, ctotal, cdeleted, clast in channel_rows:
+        active = "active" if str(cid) == str(channel_filter) else ""
+        danger = " danger" if int(cdeleted or 0) else ""
+        channel_nav += f"""
+          <a class="vault-room {active}" href="{vault_url(channel_id=str(cid), page=1)}">
+            <div class="room-icon">#</div>
+            <div class="room-main"><b>#{dash_escape(cname, 55)}</b><span>Last: {cc_time(clast)}</span></div>
+            <div class="room-count{danger}">{int(ctotal):,}</div>
+          </a>
+        """
+    if len(channel_rows) == 0:
+        channel_nav += "<div class='muted' style='padding:12px'>No log channels saved yet.</div>"
 
     cards = ""
     for row in rows:
         vault_id, row_guild_id, row_type, title, description, channel_id, channel_name, message_id, deleted_flag, deleted_by_id, deleted_by_name, created_at, deleted_at = row
         icon, type_label = log_vault_type_meta(row_type)
         title_text = dash_escape(title or "Untitled log", 180)
-        summary = dash_escape(log_vault_short_text(description, 260), 320)
+        summary = dash_escape(log_vault_short_text(description, 360), 420)
         full_desc = dash_escape(description, 6000)
         status = "<span class='vault-status saved'>Saved</span>"
         deleted_line = ""
@@ -9209,40 +9260,37 @@ def dashboard_log_vault_page():
         channel_label = f"#{dash_escape(channel_name, 80)}" if channel_name else "Unknown channel"
         msg_link = ""
         if selected_guild_id and channel_id and message_id:
-            msg_link = f"<a class='btn sm' target='_blank' href='https://discord.com/channels/{int(selected_guild_id)}/{int(channel_id)}/{int(message_id)}'>Open</a>"
+            msg_link = f"<a class='btn sm' target='_blank' href='https://discord.com/channels/{int(selected_guild_id)}/{int(channel_id)}/{int(message_id)}'>Open Discord</a>"
         source_tag = ""
         if row_guild_id and selected_guild_id and int(row_guild_id) != int(selected_guild_id):
             source_tag = f"<span class='pill warn'>Legacy / Global</span>"
         cards += f"""
-        <div class="vault-item" data-type="{dash_escape(row_type, 80)}">
-          <div class="vault-main">
-            <div class="vault-icon">{icon}</div>
-            <div class="vault-content">
-              <div class="vault-topline">
-                <span class="vault-type">{dash_escape(type_label, 80)}</span>
-                {status}
-                {source_tag}
-                <span class="vault-time">{cc_time(created_at)}</span>
-              </div>
-              <div class="vault-title">{title_text}</div>
-              <div class="vault-summary">{summary}</div>
-              {deleted_line}
-              <details class="vault-details">
-                <summary>Show full log</summary>
-                <pre>{full_desc}</pre>
-              </details>
+        <div class="discord-log-row">
+          <div class="log-avatar">{icon}</div>
+          <div class="log-body">
+            <div class="log-head">
+              <b>{dash_escape(type_label, 80)}</b>
+              <span class="pill">{channel_label}</span>
+              {status}
+              {source_tag}
+              <span class="log-time">{cc_time(created_at)}</span>
             </div>
-          </div>
-          <div class="vault-side">
-            <span class="pill">{channel_label}</span>
-            <span class="muted small">ID #{int(vault_id)}</span>
-            <span class="muted small">Msg <code>{int(message_id or 0)}</code></span>
-            {msg_link}
+            <div class="log-title">{title_text}</div>
+            <div class="log-summary">{summary}</div>
+            {deleted_line}
+            <details class="vault-details">
+              <summary>Show full log</summary>
+              <pre>{full_desc}</pre>
+            </details>
+            <div class="log-actions">
+              <span class="muted small">Vault ID #{int(vault_id)} • Msg <code>{int(message_id or 0)}</code></span>
+              {msg_link}
+            </div>
           </div>
         </div>
         """
     if not cards:
-        cards = "<div class='card'><h3>No logs found</h3><p class='muted'>غير الفلاتر أو انتظر لين البوت يسجل لوقات جديدة.</p></div>"
+        cards = "<div class='empty-vault'><h3>No logs in this room</h3><p class='muted'>اختر روم ثاني من اليسار أو غير الفلاتر.</p></div>"
 
     prev_link = vault_url(page=max(1, page - 1))
     next_link = vault_url(page=min(total_pages, page + 1))
@@ -9259,80 +9307,89 @@ def dashboard_log_vault_page():
     {dashboard_toast_html()}
     {guild_banner}
     <style>
-      .vault-hero {{ display:grid; grid-template-columns: 1.4fr .8fr; gap:14px; }}
-      .vault-toolbar {{ position:sticky; top:0; z-index:5; background:rgba(3,7,18,.72); backdrop-filter:blur(14px); border:1px solid var(--line); border-radius:22px; padding:14px; }}
-      .vault-chips {{ display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }}
-      .vault-chip {{ text-decoration:none; color:var(--text); border:1px solid var(--line); background:rgba(15,23,42,.55); border-radius:999px; padding:8px 11px; font-weight:800; font-size:13px; }}
-      .vault-chip.active, .vault-chip:hover {{ border-color:rgba(124,58,237,.7); background:rgba(124,58,237,.18); }}
-      .vault-list {{ display:flex; flex-direction:column; gap:10px; }}
-      .vault-item {{ display:grid; grid-template-columns: 1fr 210px; gap:12px; border:1px solid var(--line); background:linear-gradient(135deg, rgba(15,23,42,.82), rgba(2,6,23,.68)); border-radius:22px; padding:14px; box-shadow:0 10px 30px rgba(0,0,0,.18); }}
-      .vault-main {{ display:flex; gap:12px; min-width:0; }}
-      .vault-icon {{ width:46px; height:46px; border-radius:16px; display:grid; place-items:center; background:rgba(124,58,237,.16); border:1px solid rgba(124,58,237,.28); font-size:22px; flex:0 0 auto; }}
-      .vault-content {{ min-width:0; width:100%; }}
-      .vault-topline {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-bottom:6px; }}
-      .vault-type {{ color:#c4b5fd; font-weight:900; font-size:13px; }}
-      .vault-time {{ color:var(--muted); font-size:12px; margin-inline-start:auto; }}
-      .vault-title {{ font-size:17px; font-weight:950; margin:3px 0 5px; overflow-wrap:anywhere; }}
-      .vault-summary {{ color:var(--muted); line-height:1.55; overflow-wrap:anywhere; }}
+      .vault-shell {{ display:grid; grid-template-columns: 320px 1fr; gap:16px; align-items:start; }}
+      .vault-rooms {{ position:sticky; top:12px; max-height:calc(100vh - 120px); overflow:auto; border:1px solid var(--line); border-radius:24px; background:rgba(2,6,23,.55); padding:12px; }}
+      .vault-rooms h3 {{ margin:6px 8px 10px; }}
+      .vault-room {{ display:grid; grid-template-columns:38px 1fr auto; gap:10px; align-items:center; padding:11px; border-radius:16px; color:var(--text); text-decoration:none; border:1px solid transparent; margin-bottom:6px; }}
+      .vault-room:hover, .vault-room.active {{ background:rgba(124,58,237,.16); border-color:rgba(124,58,237,.36); }}
+      .room-icon {{ width:36px; height:36px; border-radius:14px; display:grid; place-items:center; background:rgba(15,23,42,.9); color:#a78bfa; font-weight:950; }}
+      .room-main {{ min-width:0; }}
+      .room-main b {{ display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }}
+      .room-main span {{ display:block; color:var(--muted); font-size:12px; margin-top:2px; }}
+      .room-count {{ border-radius:999px; padding:5px 8px; background:rgba(59,130,246,.13); color:#93c5fd; font-weight:900; font-size:12px; }}
+      .room-count.danger {{ background:rgba(239,68,68,.13); color:#fca5a5; }}
+      .vault-panel {{ min-width:0; }}
+      .vault-toolbar {{ border:1px solid var(--line); border-radius:24px; background:rgba(15,23,42,.55); padding:14px; margin-bottom:12px; }}
+      .vault-titlebar {{ display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }}
+      .discord-log-list {{ border:1px solid var(--line); border-radius:24px; overflow:hidden; background:rgba(2,6,23,.40); }}
+      .discord-log-row {{ display:flex; gap:12px; padding:14px 16px; border-bottom:1px solid rgba(148,163,184,.12); }}
+      .discord-log-row:last-child {{ border-bottom:0; }}
+      .discord-log-row:hover {{ background:rgba(15,23,42,.50); }}
+      .log-avatar {{ width:42px; height:42px; border-radius:999px; flex:0 0 auto; display:grid; place-items:center; background:rgba(124,58,237,.16); border:1px solid rgba(124,58,237,.28); font-size:21px; }}
+      .log-body {{ min-width:0; flex:1; }}
+      .log-head {{ display:flex; flex-wrap:wrap; gap:8px; align-items:center; }}
+      .log-head b {{ color:#ddd6fe; }}
+      .log-time {{ color:var(--muted); font-size:12px; margin-inline-start:auto; }}
+      .log-title {{ font-weight:950; font-size:16px; margin-top:6px; overflow-wrap:anywhere; }}
+      .log-summary {{ color:var(--muted); line-height:1.55; margin-top:5px; overflow-wrap:anywhere; }}
+      .log-actions {{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-top:10px; }}
       .vault-status {{ border-radius:999px; padding:5px 9px; font-size:12px; font-weight:900; }}
       .vault-status.saved {{ color:#86efac; background:rgba(34,197,94,.12); border:1px solid rgba(34,197,94,.25); }}
       .vault-status.deleted {{ color:#fca5a5; background:rgba(239,68,68,.13); border:1px solid rgba(239,68,68,.25); }}
       .vault-deleted {{ margin-top:8px; color:#fca5a5; font-size:13px; font-weight:800; }}
-      .vault-side {{ display:flex; flex-direction:column; align-items:flex-end; gap:8px; text-align:right; }}
       .vault-details {{ margin-top:9px; }}
       .vault-details summary {{ cursor:pointer; color:#93c5fd; font-weight:900; }}
       .vault-details pre {{ white-space:pre-wrap; word-break:break-word; background:rgba(2,6,23,.64); border:1px solid var(--line); border-radius:16px; padding:12px; max-height:260px; overflow:auto; margin-top:8px; }}
-      .mini-row {{ display:flex; justify-content:space-between; gap:10px; padding:8px 0; border-bottom:1px solid rgba(148,163,184,.12); }}
-      .vault-pagination {{ display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; margin:16px 0; }}
+      .vault-pagination {{ display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap; margin:14px 0; }}
       .btn.sm {{ padding:7px 10px; font-size:12px; }}
       .btn.disabled {{ pointer-events:none; opacity:.45; }}
-      @media (max-width: 980px) {{
-        .vault-hero {{ grid-template-columns:1fr; }}
-        .vault-item {{ grid-template-columns:1fr; }}
-        .vault-side {{ align-items:flex-start; text-align:left; flex-direction:row; flex-wrap:wrap; }}
-        .vault-time {{ margin-inline-start:0; }}
-      }}
+      .empty-vault {{ text-align:center; padding:40px 20px; }}
+      @media (max-width: 980px) {{ .vault-shell {{ grid-template-columns:1fr; }} .vault-rooms {{ position:relative; max-height:360px; }} .log-time {{ margin-inline-start:0; }} }}
     </style>
 
-    <div class="vault-hero">
-      <div class="card">
-        <div class="big">🗄️ Log Vault</div>
-        <p class="muted">نسخة مرتبة ومحفوظة من كل لوقات السيرفر. إذا أحد حذف رسالة اللوق من Discord، تظل محفوظة هنا وتظهر كـ Deleted in Discord.</p>
-        <div style="height:10px"></div>
-        <span class="pill ok">Owner Only</span>
-        <span class="pill">Tamper-resistant</span>
-        <span class="pill">Per-server view</span>
-      </div>
-      <div class="card">
-        <h3>Top Log Channels</h3>
-        {channel_html}
-      </div>
+    <div class="card">
+      <div class="big">🗄️ Log Vault</div>
+      <p class="muted">صار مثل Discord: اختر روم اللوق من اليسار، وتشوف لوقات هذا الروم فقط. اللوقات المحذوفة من Discord تظل محفوظة هنا.</p>
+      <div style="height:10px"></div>
+      <span class="pill ok">Owner Only</span>
+      <span class="pill">Room-based view</span>
+      <span class="pill">Per-server vault</span>
+      <span class="pill">Saved: {total:,}</span>
+      <span class="pill danger">Deleted: {deleted_total:,}</span>
     </div>
 
     <div style="height:14px"></div>
-    <div class="grid">
-      <div class="card stat"><div class="icon">📦</div><div class="num">{total:,}</div><div class="label">Saved logs</div></div>
-      <div class="card stat"><div class="icon">🗑️</div><div class="num">{deleted_total:,}</div><div class="label">Deleted from Discord</div></div>
-      <div class="card stat"><div class="icon">🧩</div><div class="num">{types_count:,}</div><div class="label">Log types</div></div>
-      <div class="card stat"><div class="icon">⏱️</div><div class="num">{today:,}</div><div class="label">Saved today</div></div>
-    </div>
+    <div class="vault-shell">
+      <aside class="vault-rooms">
+        <h3>Log Rooms</h3>
+        {channel_nav}
+      </aside>
 
-    <div style="height:14px"></div>
-    <div class="vault-toolbar">
-      <form method="get" class="formgrid">
-        <input type="hidden" name="guild_id" value="{int(selected_guild_id or 0)}">
-        <div><label>Search</label><input name="q" value="{dash_escape(query, 120)}" placeholder="title, text, channel, deleter, type"></div>
-        <div><label>Type</label><select name="type">{type_options}</select></div>
-        <div><label>Status</label><select name="deleted">{deleted_options}</select></div>
-        <div><label>Limit</label><input name="limit" value="{limit}"></div>
-        <div style="display:flex;align-items:end;gap:8px"><button class="btn primary" type="submit">Apply</button><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">Reset</a></div>
-      </form>
-      <div class="vault-chips">{type_chips_html}</div>
-    </div>
+      <main class="vault-panel">
+        <div class="vault-toolbar">
+          <div class="vault-titlebar">
+            <div>
+              <h2 style="margin:0">{dash_escape(selected_channel_name, 90)}</h2>
+              <p class="muted" style="margin:4px 0 0">{total_matches:,} logs match your filters</p>
+            </div>
+            <a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">All rooms</a>
+          </div>
+          <form method="get" class="formgrid">
+            <input type="hidden" name="guild_id" value="{int(selected_guild_id or 0)}">
+            <input type="hidden" name="channel_id" value="{dash_escape(channel_filter, 80)}">
+            <div><label>Search</label><input name="q" value="{dash_escape(query, 120)}" placeholder="title, text, deleter, type"></div>
+            <div><label>Type</label><select name="type">{type_options}</select></div>
+            <div><label>Status</label><select name="deleted">{deleted_options}</select></div>
+            <div><label>Limit</label><input name="limit" value="{limit}"></div>
+            <div style="display:flex;align-items:end;gap:8px"><button class="btn primary" type="submit">Apply</button><a class="btn" href="{vault_url(channel_id=channel_filter, q='', type='all', deleted='all', page=1)}">Reset</a></div>
+          </form>
+        </div>
 
-    {pagination}
-    <div class="vault-list">{cards}</div>
-    {pagination}
+        {pagination}
+        <div class="discord-log-list">{cards}</div>
+        {pagination}
+      </main>
+    </div>
     """
     return render_dashboard_page("Log Vault", body)
 
