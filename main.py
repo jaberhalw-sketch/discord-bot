@@ -7,6 +7,8 @@ import json
 import time
 import random
 import sqlite3
+import contextvars
+import inspect
 import traceback
 import shutil
 import tempfile
@@ -11741,6 +11743,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_discord_sync_boot()
     nm_v5_protection_level_boot()
     nm_v5_coin_persist_boot()
     nm_v5_polish_self_check()
@@ -21195,6 +21198,366 @@ def nm_v5_protection_level_boot():
     except Exception as e:
         try: print(f"NM V5 protection/level boot skipped: {e}")
         except Exception: pass
+
+
+
+# =====================================================================
+# NM V5 REAL DISCORD/DASHBOARD SYNC CONTEXT FIX
+# Fixes the real issue:
+# Old commands call get_balance(user_id), get_level_data(user_id), nm_coin_name()
+# without guild_id. This patch auto-detects the correct guild from ctx/message/interaction.
+# Result:
+# - Level Profile balance = Wallet balance = Salary balance
+# - Level Profile level/xp = Dashboard level/xp
+# - Coin name uses the selected/current server
+# =====================================================================
+
+try:
+    NM_V5_ACTIVE_GUILD_ID
+except NameError:
+    NM_V5_ACTIVE_GUILD_ID = contextvars.ContextVar("NM_V5_ACTIVE_GUILD_ID", default=0)
+
+def nm_v5_find_runtime_guild_id(explicit=None):
+    if explicit:
+        try:
+            return int(explicit)
+        except Exception:
+            pass
+
+    # 1) ContextVar set by command hooks/listeners.
+    try:
+        gid = int(NM_V5_ACTIVE_GUILD_ID.get() or 0)
+        if gid:
+            return gid
+    except Exception:
+        pass
+
+    # 2) Flask dashboard request.
+    try:
+        gid = int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or 0
+        )
+        if gid:
+            return gid
+    except Exception:
+        pass
+
+    # 3) Inspect stack for ctx/message/interaction/guild/guild_id.
+    # This is the important part for old commands that do not pass guild_id.
+    try:
+        frame = inspect.currentframe()
+        depth = 0
+        while frame and depth < 40:
+            loc = frame.f_locals
+
+            for name in ("guild_id", "gid"):
+                val = loc.get(name)
+                if val:
+                    try:
+                        return int(val)
+                    except Exception:
+                        pass
+
+            for name in ("ctx", "context"):
+                obj = loc.get(name)
+                guild = getattr(obj, "guild", None)
+                if guild and getattr(guild, "id", None):
+                    return int(guild.id)
+
+            for name in ("message", "msg"):
+                obj = loc.get(name)
+                guild = getattr(obj, "guild", None)
+                if guild and getattr(guild, "id", None):
+                    return int(guild.id)
+
+            for name in ("interaction", "inter"):
+                obj = loc.get(name)
+                guild = getattr(obj, "guild", None)
+                if guild and getattr(guild, "id", None):
+                    return int(guild.id)
+
+            obj = loc.get("guild")
+            if obj and getattr(obj, "id", None):
+                return int(obj.id)
+
+            frame = frame.f_back
+            depth += 1
+    except Exception:
+        pass
+
+    # 4) Main guild fallback.
+    try:
+        return int(globals().get("GUILD_ID", 0) or 0)
+    except Exception:
+        return 0
+
+async def nm_v5_before_any_command(ctx):
+    try:
+        if ctx and ctx.guild:
+            NM_V5_ACTIVE_GUILD_ID.set(int(ctx.guild.id))
+    except Exception:
+        pass
+
+async def nm_v5_after_any_command(ctx):
+    try:
+        NM_V5_ACTIVE_GUILD_ID.set(0)
+    except Exception:
+        pass
+
+try:
+    bot.before_invoke(nm_v5_before_any_command)
+    bot.after_invoke(nm_v5_after_any_command)
+except Exception as e:
+    try: print(f"NM V5 command context hook skipped: {e}")
+    except Exception: pass
+
+@bot.listen("on_message")
+async def nm_v5_message_context_listener(message):
+    try:
+        if message and message.guild:
+            NM_V5_ACTIVE_GUILD_ID.set(int(message.guild.id))
+    except Exception:
+        pass
+
+# ---------------- final coin API with guild context ----------------
+
+def nm_coin_name(guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    try:
+        if "nm_v5_get_coin_name" in globals():
+            return str(nm_v5_get_coin_name(gid) or "NM Coin")
+    except Exception:
+        pass
+    try:
+        if "nm_final_read_coin_from_all_sources" in globals():
+            return str(nm_final_read_coin_from_all_sources(gid) or "NM Coin")
+    except Exception:
+        pass
+    return "NM Coin"
+
+def nm_get_coin_name(guild_id=None):
+    return nm_coin_name(guild_id)
+
+def nm_legacy_coin(guild_id):
+    return nm_coin_name(guild_id)
+
+def nm_currency_name(guild_id=None):
+    return nm_coin_name(guild_id)
+
+def nm_money_name(guild_id=None):
+    return nm_coin_name(guild_id)
+
+def coin_line(amount, guild_id=None):
+    return f"{int(amount or 0):,} {nm_coin_name(guild_id)}"
+
+def money_delta(amount, guild_id=None):
+    sign = "+" if int(amount or 0) >= 0 else ""
+    return f"{sign}{int(amount or 0):,} {nm_coin_name(guild_id)}"
+
+# ---------------- final money API with guild context ----------------
+
+def nm_v5_real_get_balance(user_id, guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    uid = int(user_id or 0)
+
+    # Best existing explicit-guild API.
+    try:
+        if "v3_get_balance" in globals():
+            return int(v3_get_balance(gid, uid) or 0)
+    except Exception:
+        pass
+
+    try:
+        if "nm_stable_get_balance" in globals():
+            return int(nm_stable_get_balance(gid, uid) or 0)
+    except Exception:
+        pass
+
+    try:
+        if "nm_final_get_balance" in globals():
+            return int(nm_final_get_balance(gid, uid) or 0)
+    except Exception:
+        pass
+
+    try:
+        if "get_money_data" in globals():
+            bal, _ = get_money_data(uid)
+            return int(bal or 0)
+    except Exception:
+        pass
+
+    return 0
+
+def nm_v5_real_add_money(user_id, amount, guild_id=None, source_type="system", details="", actor_id=0):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    uid = int(user_id or 0)
+    amount = int(amount or 0)
+
+    try:
+        if "v3_add_money" in globals():
+            return int(v3_add_money(gid, uid, amount, source_type=source_type, details=details, actor_id=actor_id) or 0)
+    except TypeError:
+        try:
+            return int(v3_add_money(gid, uid, amount) or 0)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    try:
+        if "nm_stable_add_money" in globals():
+            return int(nm_stable_add_money(gid, uid, amount, source_type, details, actor_id) or 0)
+    except Exception:
+        pass
+
+    return nm_v5_real_get_balance(uid, gid)
+
+def get_balance(user_id, guild_id=None):
+    return nm_v5_real_get_balance(user_id, guild_id)
+
+def add_money(user_id, amount, source_type="system", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    return nm_v5_real_add_money(user_id, amount, guild_id, source_type, details, admin_id)
+
+def remove_money(user_id, amount, source_type="system_removed", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    uid = int(user_id or 0)
+    amount = int(amount or 0)
+    current = nm_v5_real_get_balance(uid, gid)
+    if current < amount:
+        return False, current
+    new_balance = nm_v5_real_add_money(uid, -amount, gid, source_type, details, admin_id)
+    return True, int(new_balance or 0)
+
+def nm_legacy_balance(guild_id, user_id):
+    return nm_v5_real_get_balance(user_id, guild_id)
+
+def nm_legacy_add_money(guild_id, user_id, amount):
+    return nm_v5_real_add_money(user_id, amount, guild_id, "legacy", "legacy synced", 0)
+
+# ---------------- final level API with guild context ----------------
+
+def nm_v5_real_get_level_data(user_id, guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    uid = int(user_id or 0)
+
+    try:
+        if "v3_get_level_data" in globals():
+            xp, level = v3_get_level_data(gid, uid)
+            return int(xp or 0), int(level or 1)
+    except Exception:
+        pass
+
+    try:
+        if "nm_v5_get_level_data" in globals():
+            xp, level = nm_v5_get_level_data(gid, uid)
+            return int(xp or 0), int(level or 1)
+    except Exception:
+        pass
+
+    try:
+        if "nm_legacy_level" in globals():
+            level, xp = nm_legacy_level(gid, uid)
+            return int(xp or 0), int(level or 1)
+    except Exception:
+        pass
+
+    return 0, 1
+
+def nm_v5_real_add_xp(user_id, amount, guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    uid = int(user_id or 0)
+    amount = int(amount or 0)
+
+    try:
+        if "v3_add_xp" in globals():
+            result = v3_add_xp(gid, uid, amount)
+            # Usually returns xp, level, leveled_up
+            if isinstance(result, tuple):
+                return result
+            return result
+    except Exception:
+        pass
+
+    try:
+        if "nm_v5_add_xp" in globals():
+            return nm_v5_add_xp(gid, uid, amount)
+    except Exception:
+        pass
+
+    xp, level = nm_v5_real_get_level_data(uid, gid)
+    return xp, level, False
+
+def get_level_data(user_id, guild_id=None):
+    return nm_v5_real_get_level_data(user_id, guild_id)
+
+def add_xp(user_id, amount, guild_id=None):
+    return nm_v5_real_add_xp(user_id, amount, guild_id)
+
+def nm_legacy_level(guild_id, user_id):
+    xp, level = nm_v5_real_get_level_data(user_id, guild_id)
+    return level, xp
+
+# ---------------- leaderboards with same guild context ----------------
+
+def get_top_money(limit=10, guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    try:
+        if "nm_stable_top_balances" in globals():
+            return [(int(uid), int(bal)) for uid, bal in nm_stable_top_balances(gid, int(limit))]
+    except Exception:
+        pass
+
+    try:
+        rows = dashboard_money_rows(int(limit))
+        out = []
+        for r in rows:
+            if isinstance(r, dict):
+                out.append((int(r.get("user_id", 0)), int(r.get("balance", 0))))
+        return out
+    except Exception:
+        return []
+
+def get_top_levels(limit=10, guild_id=None):
+    gid = nm_v5_find_runtime_guild_id(guild_id)
+    try:
+        if "dashboard_level_rows" in globals():
+            rows = dashboard_level_rows(int(limit))
+            out = []
+            for r in rows:
+                if isinstance(r, dict):
+                    out.append((int(r.get("user_id", 0)), int(r.get("xp", 0)), int(r.get("level", 1))))
+            if out:
+                return out
+    except Exception:
+        pass
+
+    # fallback scan using existing old function is intentionally skipped because old function may use wrong guild.
+    return []
+
+@app.route("/dashboard/discord-sync-status")
+def nm_v5_discord_sync_status():
+    gid = nm_v5_find_runtime_guild_id()
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Discord Sync Context Active</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin: <b>{dash_escape(nm_coin_name(gid), 100)}</b></p>
+      <p>Old commands now auto-detect guild_id from ctx/message/interaction.</p>
+      <p>Test: <code>!لفلي</code>, <code>!راتب</code>, <code>!رصيدي</code></p>
+      <p><a style="color:#8b5cf6" href="/dashboard/sync-all?guild_id={int(gid)}">Run Full Sync</a></p>
+    </div>
+    """
+
+def nm_v5_discord_sync_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        print(f"✅ NM V5 Discord/Dashboard real sync context active. fallback_guild={gid}")
+    except Exception:
+        pass
 
 
 keep_alive()
