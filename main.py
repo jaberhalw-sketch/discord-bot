@@ -11731,6 +11731,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_hotfix_boot()
     nm_guide_boot_disable_spam()
     nm_coin_boot_check()
     nm_final_polish_boot()
@@ -17395,7 +17396,7 @@ def save_guild_settings(guild_id, settings):
     return nm_v4_save_settings(guild_id, settings)
 
 def nm_get_coin_name(guild_id=None):
-    return nm_v4_get_settings(guild_id).get("coin_name", nm_coin_name(nm_coin_gid()))
+    return nm_v4_get_settings(guild_id).get("coin_name", "NM Coin")
 
 def nm_get_brand_name(guild_id=None):
     return nm_v4_get_settings(guild_id).get("bot_brand", "NM System")
@@ -17703,7 +17704,7 @@ def nm_set_custom_coin_route():
         </div>
         """
 
-    current = nm_v4_get_settings(gid).get("coin_name", nm_coin_name(nm_coin_gid()))
+    current = nm_v4_get_settings(gid).get("coin_name", "NM Coin")
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
       <h1>Set Custom Coin</h1>
@@ -18231,7 +18232,7 @@ def save_guild_settings(guild_id, settings):
     return nm_final_save_settings(guild_id, settings)
 
 def nm_coin_name(guild_id=None):
-    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", nm_coin_name(nm_coin_gid()))
+    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", "NM Coin")
 
 def nm_legacy_coin(guild_id):
     return nm_coin_name(guild_id)
@@ -18489,7 +18490,7 @@ def save_guild_settings(guild_id, settings):
     return nm_save_settings_unified(guild_id, settings)
 
 def nm_coin_name(guild_id=None):
-    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", nm_coin_name(nm_coin_gid()))
+    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", "NM Coin")
 
 def nm_get_coin_name(guild_id=None):
     return nm_coin_name(guild_id)
@@ -18755,6 +18756,313 @@ def nm_guide_boot_disable_spam():
             print("✅ NM guide spam fix active: guide is disabled by default.")
     except Exception as e:
         try: print(f"NM guide spam boot fix failed: {e}")
+        except Exception: pass
+
+
+
+# =====================================================================
+# NM EMERGENCY HOTFIX 500 / RECURSION / CC EVENT
+# Fixes:
+# 1) nm_coin_name recursion crash
+# 2) cc_record_event unexpected keyword argument guild_id
+# 3) Works even if DATABASE_URL is missing
+# =====================================================================
+
+def nm_hotfix_get_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_hotfix_postgres_ready():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+def nm_hotfix_read_json_settings():
+    data = {}
+    for p in [Path("/data/dashboard_settings.json"), Path("dashboard_settings.json")]:
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                raw = json.loads(p.read_text(encoding="utf-8") or "{}")
+                if isinstance(raw, dict):
+                    data.update(raw)
+        except Exception:
+            pass
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            data.update(dashboard_settings)
+    except Exception:
+        pass
+    return data
+
+def nm_hotfix_write_json_settings(patch):
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(patch)
+
+        path = Path("/data/dashboard_settings.json")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            path = Path("dashboard_settings.json")
+
+        current = {}
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                current = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            current = {}
+        if not isinstance(current, dict):
+            current = {}
+        current.update(patch)
+        path.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        try: print(f"NM hotfix json save failed: {e}")
+        except Exception: pass
+
+def nm_hotfix_settings(guild_id=None):
+    gid = int(guild_id or nm_hotfix_get_gid())
+    settings = {}
+
+    # PG if ready
+    if nm_hotfix_postgres_ready():
+        try:
+            with nm_pg_conn() as conn:
+                row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (gid,)).fetchone()
+                if row:
+                    val = row["settings"]
+                    if isinstance(val, dict):
+                        settings.update(val)
+                    else:
+                        settings.update(json.loads(val or "{}"))
+        except Exception as e:
+            try: print(f"NM hotfix PG read failed: {e}")
+            except Exception: pass
+
+    # JSON fallback only for missing keys
+    js = nm_hotfix_read_json_settings()
+    for k, v in js.items():
+        if settings.get(k) in (None, ""):
+            settings[k] = v
+
+    coin = (
+        settings.get("coin_name")
+        or settings.get("currency_name")
+        or settings.get("economy_coin_name")
+        or settings.get("money_name")
+        or settings.get("coin")
+        or "NM Coin"
+    )
+    coin = str(coin).strip() or "NM Coin"
+
+    brand = (
+        settings.get("bot_brand")
+        or settings.get("brand_name")
+        or settings.get("bot_name")
+        or "NM System"
+    )
+    brand = str(brand).strip() or "NM System"
+
+    settings["coin_name"] = coin
+    settings["currency_name"] = coin
+    settings["economy_coin_name"] = coin
+    settings["money_name"] = coin
+    settings["coin"] = coin
+    settings["bot_brand"] = brand
+    settings["brand_name"] = brand
+    settings["bot_name"] = brand
+    return settings
+
+def nm_hotfix_save_settings(guild_id=None, settings=None):
+    gid = int(guild_id or nm_hotfix_get_gid())
+    merged = nm_hotfix_settings(gid)
+    if settings:
+        merged.update(dict(settings))
+
+    coin = (
+        merged.get("coin_name")
+        or merged.get("currency_name")
+        or merged.get("economy_coin_name")
+        or merged.get("money_name")
+        or merged.get("coin")
+        or "NM Coin"
+    )
+    coin = str(coin).strip() or "NM Coin"
+    brand = merged.get("bot_brand") or merged.get("brand_name") or merged.get("bot_name") or "NM System"
+    brand = str(brand).strip() or "NM System"
+
+    patch = {
+        "coin_name": coin,
+        "currency_name": coin,
+        "economy_coin_name": coin,
+        "money_name": coin,
+        "coin": coin,
+        "bot_brand": brand,
+        "brand_name": brand,
+        "bot_name": brand,
+    }
+
+    if nm_hotfix_postgres_ready():
+        try:
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO guild_settings (guild_id, settings, updated_at)
+                    VALUES (%s,%s::jsonb,NOW())
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+                """, (gid, json.dumps(patch, ensure_ascii=False)))
+                conn.commit()
+        except Exception as e:
+            try: print(f"NM hotfix PG save failed: {e}")
+            except Exception: pass
+
+    nm_hotfix_write_json_settings(patch)
+    return True
+
+def nm_hotfix_coin_name(guild_id=None):
+    # IMPORTANT: no recursive calls here.
+    try:
+        return str(nm_hotfix_settings(guild_id or nm_hotfix_get_gid()).get("coin_name") or "NM Coin")
+    except Exception:
+        return "NM Coin"
+
+# FINAL coin/settings overrides
+def nm_coin_name(guild_id=None):
+    return nm_hotfix_coin_name(guild_id)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_hotfix_coin_name(guild_id)
+
+def nm_legacy_coin(guild_id):
+    return nm_hotfix_coin_name(guild_id)
+
+def nm_get_brand_name(guild_id=None):
+    try:
+        return str(nm_hotfix_settings(guild_id or nm_hotfix_get_gid()).get("bot_brand") or "NM System")
+    except Exception:
+        return "NM System"
+
+def get_guild_settings(guild_id):
+    return nm_hotfix_settings(guild_id)
+
+def save_guild_settings(guild_id, settings):
+    return nm_hotfix_save_settings(guild_id, settings)
+
+# Command center event safe wrapper: accepts guild_id and any future kwargs.
+def cc_record_event(event_type=None, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0, **kwargs):
+    try:
+        if nm_hotfix_postgres_ready():
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO command_center_events
+                    (guild_id,event_type,user_id,user_name,channel_id,channel_name,amount,details,created_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, (
+                    int(guild_id or nm_hotfix_get_gid()),
+                    str(event_type or kwargs.get("type") or ""),
+                    int(user_id or 0),
+                    str(user_name or ""),
+                    int(channel_id or 0),
+                    str(channel_name or ""),
+                    int(amount or 0),
+                    str(details or ""),
+                    int(time.time())
+                ))
+                conn.commit()
+        # No crash if PG missing.
+    except Exception as e:
+        try: print(f"NM hotfix cc_record_event ignored error: {e}")
+        except Exception: pass
+
+@app.after_request
+def nm_hotfix_coin_dashboard_post(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("money_name")
+                or request.form.get("coin")
+            )
+            brand = request.form.get("bot_brand") or request.form.get("brand_name") or request.form.get("bot_name")
+            if coin or brand:
+                gid = nm_hotfix_get_gid()
+                s = nm_hotfix_settings(gid)
+                if coin and str(coin).strip():
+                    s["coin_name"] = str(coin).strip()
+                if brand and str(brand).strip():
+                    s["bot_brand"] = str(brand).strip()
+                nm_hotfix_save_settings(gid, s)
+    except Exception as e:
+        try: print(f"NM hotfix after_request ignored error: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/coin-hotfix")
+def nm_hotfix_coin_page():
+    gid = nm_hotfix_get_gid()
+    s = nm_hotfix_settings(gid)
+    nm_hotfix_save_settings(gid, s)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Coin Hotfix OK</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin: <b>{dash_escape(nm_hotfix_coin_name(gid), 100)}</b></p>
+      <p>Recursion fixed. cc_record_event fixed.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+@app.route("/dashboard/set-custom-coin", methods=["GET", "POST"])
+def nm_hotfix_set_coin_page():
+    gid = nm_hotfix_get_gid()
+    if request.method == "POST":
+        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        s = nm_hotfix_settings(gid)
+        s["coin_name"] = coin
+        nm_hotfix_save_settings(gid, s)
+        return redirect(f"/dashboard/coin-hotfix?guild_id={int(gid)}")
+    current = nm_hotfix_coin_name(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Set Server Coin</h1>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <label>Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+def nm_hotfix_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            nm_hotfix_save_settings(gid, nm_hotfix_settings(gid))
+        print(f"✅ NM EMERGENCY HOTFIX active. coin={nm_hotfix_coin_name(gid if 'gid' in locals() else None)}")
+    except Exception as e:
+        try: print(f"NM emergency hotfix boot ignored error: {e}")
         except Exception: pass
 
 
