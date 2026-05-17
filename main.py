@@ -32,6 +32,14 @@ import os as _nmos
 import shutil as _nmshutil
 import sqlite3 as _nmsqlite3
 
+# NM EARLY SAFE FALLBACKS - must exist before constants
+def nm_coin_name(guild_id=None):
+    return "NM Coin"
+
+def nm_get_coin_name(guild_id=None):
+    return "NM Coin"
+
+
 NM_DATA_DIR = _NMPath(_nmos.getenv("NM_DATA_DIR", "/data"))
 try:
     NM_DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -159,7 +167,7 @@ MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
 MEMORY_BACKUP_HISTORY_LIMIT = 100
 MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE, DASHBOARD_SETTINGS_FILE]
 
-COIN_NAME = nm_coin_name(guild_id if "guild_id" in locals() else None)
+COIN_NAME = "NM Coin"
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
@@ -20274,6 +20282,61 @@ def nm_v5_polish_self_check():
         print("✅ NM V5 self-check: compile OK, shutil OK, Log Vault endpoint override installed")
     except Exception:
         pass
+
+
+
+# =====================================================================
+# NM V5 FINAL NO-CRASH COIN OVERRIDE
+# Prevents startup NameError and uses saved coin when available.
+# =====================================================================
+def nm_v5_final_coin_from_files(guild_id=None):
+    try:
+        gid = int(guild_id or globals().get("GUILD_ID", 0) or 0)
+    except Exception:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+    try:
+        # per-guild stable file first
+        p = Path("/data/guild_settings_v4.json")
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+            row = data.get(str(gid), {}) if isinstance(data, dict) else {}
+            if isinstance(row, dict):
+                for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                    v = row.get(k)
+                    if v is not None and str(v).strip():
+                        return str(v).strip()
+    except Exception:
+        pass
+    try:
+        # old dashboard settings fallback
+        for p in [Path("/data/dashboard_settings.json"), Path("dashboard_settings.json")]:
+            if p.exists() and p.stat().st_size > 0:
+                data = json.loads(p.read_text(encoding="utf-8") or "{}")
+                if isinstance(data, dict):
+                    for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin", "COIN_NAME"):
+                        v = data.get(k)
+                        if v is not None and str(v).strip():
+                            return str(v).strip()
+    except Exception:
+        pass
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin", "COIN_NAME"):
+                v = dashboard_settings.get(k)
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+    except Exception:
+        pass
+    return "NM Coin"
+
+def nm_coin_name(guild_id=None):
+    return nm_v5_final_coin_from_files(guild_id)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_v5_final_coin_from_files(guild_id)
+
+def nm_legacy_coin(guild_id=None):
+    return nm_v5_final_coin_from_files(guild_id)
 
 
 keep_alive()
