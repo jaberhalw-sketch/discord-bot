@@ -2641,6 +2641,8 @@ def log_vault_color_value(color):
 
 
 def log_vault_record(log_type, title, description, color=0, guild_id=0):
+    if not guild_id:
+        guild_id = nm_safe_int(globals().get('CURRENT_LOG_GUILD_ID', 0) or GUILD_ID, GUILD_ID)
     try:
         conn = db_connect()
         cur = conn.cursor()
@@ -4724,6 +4726,126 @@ class GameRolesView(discord.ui.View):
 # =========================
 
 app = Flask(__name__)
+
+# =========================
+# NM DURABLE DASHBOARD SAVE + GUILD ISOLATION PATCH
+# =========================
+
+def nm_safe_int(value, default=0):
+    try:
+        return int(value)
+    except:
+        return default
+
+
+def nm_current_dashboard_guild_id():
+    return nm_safe_int(
+        request.args.get("guild_id")
+        or request.form.get("guild_id")
+        or session.get("selected_guild_id")
+        or GUILD_ID,
+        GUILD_ID
+    )
+
+
+def nm_schedule_memory_backup(reason="dashboard change"):
+    """Push updated files/db to memory backup after dashboard changes so Railway redeploy will not restore old state."""
+    try:
+        if not bot or not getattr(bot, "loop", None) or not bot.loop.is_running():
+            return
+
+        async def _backup():
+            try:
+                # Most current builds use memory_backup_now(), some use auto backup wrappers.
+                if "memory_backup_now" in globals():
+                    try:
+                        await memory_backup_now(reason=reason)
+                    except TypeError:
+                        await memory_backup_now()
+                elif "send_memory_backup" in globals():
+                    await send_memory_backup()
+            except Exception as e:
+                print(f"NM memory backup failed: {e}")
+
+        asyncio.run_coroutine_threadsafe(_backup(), bot.loop)
+    except Exception as e:
+        print(f"NM schedule backup failed: {e}")
+
+
+def nm_persist_everything(reason="dashboard change"):
+    try:
+        if "save_dashboard_settings" in globals():
+            save_dashboard_settings()
+    except Exception as e:
+        print(f"save_dashboard_settings failed: {e}")
+
+    try:
+        if "sync_warnings_json_from_history" in globals():
+            sync_warnings_json_from_history()
+    except Exception as e:
+        print(f"sync_warnings_json_from_history failed: {e}")
+
+    nm_schedule_memory_backup(reason)
+
+
+def nm_set_coin_name_everywhere(guild_id, name):
+    name = clean_text(str(name or "NM Coin"), 40) if "clean_text" in globals() else str(name or "NM Coin")[:40]
+    if not name.strip():
+        name = "NM Coin"
+    guild_id = nm_safe_int(guild_id, GUILD_ID)
+
+    # Per-guild settings if available
+    try:
+        if "get_guild_settings" in globals() and "save_guild_settings" in globals():
+            settings = get_guild_settings(guild_id)
+            settings["coin_name"] = name
+            settings["currency_name"] = name
+            settings["economy_coin_name"] = name
+            save_guild_settings(guild_id, settings)
+    except Exception as e:
+        print(f"Per-guild coin save failed: {e}")
+
+    # Global fallback for old pages
+    try:
+        if "dashboard_settings" in globals():
+            dashboard_settings["coin_name"] = name
+            dashboard_settings["currency_name"] = name
+            dashboard_settings["economy_coin_name"] = name
+            if "save_dashboard_settings" in globals():
+                save_dashboard_settings()
+    except Exception as e:
+        print(f"Global coin save failed: {e}")
+
+    # Also update global variable if code uses COIN_NAME at runtime.
+    try:
+        globals()["COIN_NAME"] = name
+    except Exception:
+        pass
+
+    nm_persist_everything("coin name changed")
+    return name
+
+
+@app.after_request
+def nm_dashboard_post_persist_after_request(response):
+    """Any dashboard POST means state changed; immediately backup so redeploy doesn't revert it."""
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("coin")
+            )
+            if coin is not None:
+                nm_set_coin_name_everywhere(nm_current_dashboard_guild_id(), coin)
+            else:
+                nm_persist_everything(f"dashboard post {request.path}")
+    except Exception as e:
+        print(f"NM dashboard post persist failed: {e}")
+    return response
+
+
 app.secret_key = DASHBOARD_SECRET_KEY
 
 
@@ -9540,6 +9662,151 @@ def dashboard_audit_page():
 
 
 
+
+# =========================
+# NM LOG VAULT STRICT GUILD FILTER OVERRIDE
+# =========================
+
+def nm_log_vault_where(guild_id=0, log_type="all", query="", deleted_filter="all", channel_id="all", include_legacy=False):
+    where = []
+    params = []
+
+    gid = nm_safe_int(guild_id, 0)
+    if gid:
+        if include_legacy:
+            where.append("(guild_id = ? OR guild_id IS NULL OR guild_id = 0)")
+            params.append(gid)
+        else:
+            where.append("guild_id = ?")
+            params.append(gid)
+
+    if log_type and str(log_type) != "all":
+        where.append("log_type = ?")
+        params.append(str(log_type))
+
+    if channel_id and str(channel_id) != "all":
+        try:
+            where.append("discord_channel_id = ?")
+            params.append(int(channel_id))
+        except:
+            pass
+
+    if deleted_filter == "deleted":
+        where.append("deleted_from_discord = 1")
+    elif deleted_filter == "saved":
+        where.append("(deleted_from_discord IS NULL OR deleted_from_discord = 0)")
+
+    if query:
+        like = f"%{str(query)[:120]}%"
+        where.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ?)")
+        params.extend([like, like, like, like])
+
+    where_sql = "WHERE " + " AND ".join(where) if where else ""
+    return where_sql, params
+
+
+def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_vault_where(guild_id, log_type, query, deleted_filter, channel_id, include_legacy)
+
+        cur.execute(f"""
+            SELECT id, guild_id, log_type, title, description, discord_channel_id, discord_channel_name,
+                   discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
+            FROM dashboard_log_vault
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+        """, tuple(params + [int(limit), int(offset)]))
+        rows = cur.fetchall()
+
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+
+        conn.close()
+        return rows, total
+    except Exception as e:
+        print(f"Log Vault recent error: {e}")
+        return [], 0
+
+
+def log_vault_counts(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
+        since = int(time.time()) - 86400
+
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql + (' AND' if where_sql else 'WHERE')} deleted_from_discord = 1", tuple(params))
+        deleted = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault {where_sql}", tuple(params))
+        types = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql + (' AND' if where_sql else 'WHERE')} created_at >= ?", tuple(params + [since]))
+        today = int(cur.fetchone()[0] or 0)
+
+        conn.close()
+        return total, deleted, types, today
+    except Exception as e:
+        print(f"Log Vault counts error: {e}")
+        return 0, 0, 0, 0
+
+
+def log_vault_types(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
+
+        cur.execute(f"""
+            SELECT log_type, COUNT(*)
+            FROM dashboard_log_vault
+            {where_sql}
+            GROUP BY log_type
+            ORDER BY COUNT(*) DESC
+        """, tuple(params))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Log Vault types error: {e}")
+        return []
+
+
+def log_vault_channels(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_vault_where(guild_id, "all", "", "all", "all", include_legacy)
+
+        cur.execute(f"""
+            SELECT discord_channel_id, discord_channel_name, COUNT(*)
+            FROM dashboard_log_vault
+            {where_sql}
+            GROUP BY discord_channel_id, discord_channel_name
+            ORDER BY COUNT(*) DESC
+        """, tuple(params))
+        rows = cur.fetchall()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Log Vault channels error: {e}")
+        return []
+
+
 @app.route("/dashboard/log-vault", methods=["GET"])
 def dashboard_log_vault_page():
     denied = dashboard_require_owner()
@@ -9779,7 +10046,7 @@ def dashboard_log_vault_page():
       <div style="height:10px"></div>
       <span class="pill ok">Owner Only</span>
       <span class="pill">Room-based view</span>
-      <span class="pill">Per-server vault</span>
+      <span class="pill">Per-server vault</span><span class="pill ok">Legacy hidden</span>
       <span class="pill">Saved: {total:,}</span>
       <span class="pill danger">Deleted: {deleted_total:,}</span>
     </div>
@@ -9798,7 +10065,7 @@ def dashboard_log_vault_page():
               <h2 style="margin:0">{dash_escape(selected_channel_name, 90)}</h2>
               <p class="muted" style="margin:4px 0 0">{total_matches:,} logs match your filters</p>
             </div>
-            <a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">All rooms</a>
+            <a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">All rooms</a><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}&legacy=1">Show legacy</a>
           </div>
           <form method="get" class="formgrid">
             <input type="hidden" name="guild_id" value="{int(selected_guild_id or 0)}">
