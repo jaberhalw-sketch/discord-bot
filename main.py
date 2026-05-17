@@ -11731,6 +11731,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_pg_boot()
     nm_auto_restore_bundled_memory("on_ready")
     await nm_restore_latest_discord_memory_backup("on_ready")
     nm_bridge_local_restore_to_data("on_ready")
@@ -16855,6 +16856,432 @@ def nm_dashboard_memory_upload_page():
         return f"<h2>Memory upload error</h2><pre>{dash_escape(str(e), 1200)}</pre>"
 
 
+
+
+# =========================
+# NM SYSTEM V4 FULL POSTGRES PATCH
+# PostgreSQL becomes the main persistent database.
+# DATABASE_URL must exist in Railway variables.
+# Requires: psycopg[binary]>=3.2.0
+# =========================
+
+NM_V4_POSTGRES_ENABLED = False
+NM_PG_AUTO_MIGRATE_DONE = False
+NM_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except Exception as _e:
+    psycopg = None
+    dict_row = None
+    print(f"⚠️ NM V4 Postgres disabled: psycopg import failed: {_e}")
+
+NM_PG_SCHEMA_SQL = '''
+CREATE TABLE IF NOT EXISTS nm_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS guild_settings (guild_id BIGINT PRIMARY KEY, settings JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS guild_channels (guild_id BIGINT NOT NULL, channel_key TEXT NOT NULL, channel_id BIGINT NOT NULL DEFAULT 0, channel_name TEXT NOT NULL DEFAULT '', updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, channel_key));
+CREATE TABLE IF NOT EXISTS guild_protection_settings (guild_id BIGINT PRIMARY KEY, settings JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS economy (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, balance BIGINT NOT NULL DEFAULT 0, admin_given BIGINT NOT NULL DEFAULT 0, earned_money BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS levels (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, xp BIGINT NOT NULL DEFAULT 0, level INTEGER NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS salary_cooldowns (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, last_claim BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id));
+CREATE TABLE IF NOT EXISTS reward_locks (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, reward_key TEXT NOT NULL, last_ts BIGINT NOT NULL DEFAULT 0, PRIMARY KEY (guild_id, user_id, reward_key));
+CREATE TABLE IF NOT EXISTS warnings (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, reason TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', moderator_id BIGINT NOT NULL DEFAULT 0, moderator_name TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), cleared_at TIMESTAMPTZ, cleared_by BIGINT NOT NULL DEFAULT 0, clear_reason TEXT NOT NULL DEFAULT '');
+CREATE INDEX IF NOT EXISTS idx_nm_warnings_guild_user ON warnings(guild_id, user_id);
+CREATE INDEX IF NOT EXISTS idx_nm_warnings_status ON warnings(guild_id, status);
+CREATE TABLE IF NOT EXISTS log_vault (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, log_type TEXT NOT NULL DEFAULT '', title TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '', color BIGINT NOT NULL DEFAULT 0, discord_channel_id BIGINT NOT NULL DEFAULT 0, discord_channel_name TEXT NOT NULL DEFAULT '', discord_message_id BIGINT NOT NULL DEFAULT 0, deleted_from_discord BOOLEAN NOT NULL DEFAULT FALSE, deleted_by_id BIGINT NOT NULL DEFAULT 0, deleted_by_name TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0, deleted_at BIGINT NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_nm_log_vault_guild_time ON log_vault(guild_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_nm_log_vault_channel ON log_vault(guild_id, discord_channel_id);
+CREATE INDEX IF NOT EXISTS idx_nm_log_vault_type ON log_vault(guild_id, log_type);
+CREATE TABLE IF NOT EXISTS command_center_events (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, event_type TEXT NOT NULL DEFAULT '', user_id BIGINT NOT NULL DEFAULT 0, user_name TEXT NOT NULL DEFAULT '', channel_id BIGINT NOT NULL DEFAULT 0, channel_name TEXT NOT NULL DEFAULT '', amount BIGINT NOT NULL DEFAULT 0, details TEXT NOT NULL DEFAULT '', created_at BIGINT NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_nm_command_center_guild_time ON command_center_events(guild_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_nm_command_center_type ON command_center_events(guild_id, event_type);
+CREATE TABLE IF NOT EXISTS money_audit (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, amount BIGINT NOT NULL DEFAULT 0, new_balance BIGINT NOT NULL DEFAULT 0, source_type TEXT NOT NULL DEFAULT '', details TEXT NOT NULL DEFAULT '', actor_id BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS idx_nm_money_audit_guild_time ON money_audit(guild_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_nm_money_audit_user ON money_audit(guild_id, user_id);
+CREATE TABLE IF NOT EXISTS dashboard_admin_access (guild_id BIGINT NOT NULL, target_type TEXT NOT NULL, target_id BIGINT NOT NULL, access_level TEXT NOT NULL DEFAULT 'admin', granted_by BIGINT NOT NULL DEFAULT 0, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY (guild_id, target_type, target_id));
+CREATE TABLE IF NOT EXISTS shop_purchases (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, user_id BIGINT NOT NULL DEFAULT 0, item_key TEXT NOT NULL DEFAULT '', price BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS lootbox_history (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, user_id BIGINT NOT NULL DEFAULT 0, reward TEXT NOT NULL DEFAULT '', amount BIGINT NOT NULL DEFAULT 0, created_at BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS real_estate_properties (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, property_key TEXT NOT NULL DEFAULT '', owner_id BIGINT NOT NULL DEFAULT 0, data JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS real_estate_auctions (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, property_key TEXT NOT NULL DEFAULT '', data JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+CREATE TABLE IF NOT EXISTS timed_roles (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, user_id BIGINT NOT NULL DEFAULT 0, role_id BIGINT NOT NULL DEFAULT 0, expires_at BIGINT NOT NULL DEFAULT 0, data JSONB NOT NULL DEFAULT '{}'::jsonb);
+CREATE TABLE IF NOT EXISTS giveaways (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, channel_id BIGINT NOT NULL DEFAULT 0, message_id BIGINT NOT NULL DEFAULT 0, data JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS suggestions (id BIGSERIAL PRIMARY KEY, guild_id BIGINT NOT NULL DEFAULT 0, user_id BIGINT NOT NULL DEFAULT 0, content TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', created_at BIGINT NOT NULL DEFAULT 0);
+'''
+
+def nm_pg_available():
+    return bool(psycopg and NM_DATABASE_URL)
+
+def nm_pg_conn():
+    return psycopg.connect(NM_DATABASE_URL, row_factory=dict_row)
+
+def nm_pg_json(data):
+    try:
+        return json.dumps(data or {}, ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+def nm_pg_unjson(raw):
+    if isinstance(raw, dict):
+        return raw
+    try:
+        return json.loads(raw or "{}")
+    except Exception:
+        return {}
+
+def nm_pg_init():
+    global NM_V4_POSTGRES_ENABLED
+    if not nm_pg_available():
+        print("⚠️ NM V4 Postgres is not active. Missing DATABASE_URL or psycopg.")
+        return False
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute(NM_PG_SCHEMA_SQL)
+            conn.commit()
+        NM_V4_POSTGRES_ENABLED = True
+        print("✅ NM V4 Postgres schema ready.")
+        return True
+    except Exception as e:
+        NM_V4_POSTGRES_ENABLED = False
+        print(f"❌ NM V4 Postgres schema failed: {type(e).__name__}: {e}")
+        return False
+
+def nm_pg_meta_get(key, default=""):
+    try:
+        if not NM_V4_POSTGRES_ENABLED:
+            return default
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT value FROM nm_meta WHERE key=%s", (str(key),)).fetchone()
+            return row["value"] if row else default
+    except Exception:
+        return default
+
+def nm_pg_meta_set(key, value):
+    try:
+        if not NM_V4_POSTGRES_ENABLED:
+            return
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO nm_meta (key,value,updated_at) VALUES (%s,%s,NOW()) ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()", (str(key), str(value)))
+            conn.commit()
+    except Exception as e:
+        print(f"PG meta save failed: {e}")
+
+def nm_pg_sqlite_rows(table):
+    try:
+        candidates = [Path("nm_system.db"), Path("/data/nm_system.db")]
+        db_path = next((p for p in candidates if p.exists() and p.stat().st_size > 0), None)
+        if not db_path:
+            return []
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        if not cur.fetchone():
+            conn.close()
+            return []
+        cur.execute(f"SELECT * FROM {table}")
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"PG migrate sqlite skip {table}: {type(e).__name__}: {e}")
+        return []
+
+def nm_pg_load_json_file(name):
+    for p in [Path(name), Path("/data") / name]:
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                return json.loads(p.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            pass
+    return {}
+
+def nm_pg_migrate_once():
+    global NM_PG_AUTO_MIGRATE_DONE
+    if not NM_V4_POSTGRES_ENABLED or NM_PG_AUTO_MIGRATE_DONE:
+        return
+    if nm_pg_meta_get("sqlite_migrated_v4", "0") == "1":
+        NM_PG_AUTO_MIGRATE_DONE = True
+        print("✅ NM V4 Postgres migration already done.")
+        return
+    counts = {}
+    try:
+        print("⏳ NM V4 Postgres auto migration started...")
+        with nm_pg_conn() as conn:
+            main_gid = int(globals().get("GUILD_ID", 0) or 0)
+            ds = nm_pg_load_json_file("dashboard_settings.json")
+            if ds and main_gid:
+                conn.execute("INSERT INTO guild_settings (guild_id,settings,updated_at) VALUES (%s,%s::jsonb,NOW()) ON CONFLICT (guild_id) DO UPDATE SET settings=guild_settings.settings || EXCLUDED.settings, updated_at=NOW()", (main_gid, nm_pg_json(ds)))
+                counts["dashboard_settings"] = len(ds)
+            lc = nm_pg_load_json_file("log_channels.json")
+            for key, cid in (lc.items() if isinstance(lc, dict) else []):
+                if main_gid:
+                    conn.execute("INSERT INTO guild_channels (guild_id,channel_key,channel_id,updated_at) VALUES (%s,%s,%s,NOW()) ON CONFLICT (guild_id,channel_key) DO UPDATE SET channel_id=EXCLUDED.channel_id, updated_at=NOW()", (main_gid, str(key), int(cid or 0)))
+                    counts["log_channels"] = counts.get("log_channels", 0) + 1
+            wj = nm_pg_load_json_file("warnings.json")
+            for uid, items in (wj.items() if isinstance(wj, dict) else []):
+                for item in (items if isinstance(items, list) else []):
+                    conn.execute("INSERT INTO warnings (guild_id,user_id,reason,message,moderator_name,status) VALUES (%s,%s,%s,%s,%s,'active')", (main_gid, int(uid), str(item.get("reason","")), str(item.get("message","")), str(item.get("moderator",""))))
+                    counts["warnings_json"] = counts.get("warnings_json", 0) + 1
+            for r in nm_pg_sqlite_rows("economy"):
+                gid, uid = int(r.get("guild_id") or 0), int(r.get("user_id") or 0)
+                if uid:
+                    conn.execute("INSERT INTO economy (guild_id,user_id,balance,admin_given,earned_money,updated_at) VALUES (%s,%s,%s,%s,%s,NOW()) ON CONFLICT (guild_id,user_id) DO UPDATE SET balance=EXCLUDED.balance, admin_given=GREATEST(economy.admin_given,EXCLUDED.admin_given), earned_money=GREATEST(economy.earned_money,EXCLUDED.earned_money), updated_at=NOW()", (gid, uid, int(r.get("balance") or 0), int(r.get("admin_given") or 0), int(r.get("earned_money") or 0)))
+                    counts["economy"] = counts.get("economy", 0) + 1
+            for r in nm_pg_sqlite_rows("levels"):
+                gid, uid = int(r.get("guild_id") or 0), int(r.get("user_id") or 0)
+                if uid:
+                    conn.execute("INSERT INTO levels (guild_id,user_id,xp,level,updated_at) VALUES (%s,%s,%s,%s,NOW()) ON CONFLICT (guild_id,user_id) DO UPDATE SET xp=EXCLUDED.xp, level=EXCLUDED.level, updated_at=NOW()", (gid, uid, int(r.get("xp") or 0), int(r.get("level") or 1)))
+                    counts["levels"] = counts.get("levels", 0) + 1
+            for table in ("guild_settings", "guild_protection_settings"):
+                for r in nm_pg_sqlite_rows(table):
+                    gid = int(r.get("guild_id") or 0)
+                    if not gid:
+                        continue
+                    data = {k:v for k,v in r.items() if k not in ("guild_id","id","created_at","updated_at")}
+                    conn.execute(f"INSERT INTO {table} (guild_id,settings,updated_at) VALUES (%s,%s::jsonb,NOW()) ON CONFLICT (guild_id) DO UPDATE SET settings={table}.settings || EXCLUDED.settings, updated_at=NOW()", (gid, nm_pg_json(data)))
+                    counts[table] = counts.get(table, 0) + 1
+            for r in nm_pg_sqlite_rows("dashboard_log_vault"):
+                conn.execute("INSERT INTO log_vault (guild_id,log_type,title,description,color,discord_channel_id,discord_channel_name,discord_message_id,deleted_from_discord,deleted_by_id,deleted_by_name,created_at,deleted_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)", (int(r.get("guild_id") or 0), str(r.get("log_type") or ""), str(r.get("title") or ""), str(r.get("description") or ""), int(r.get("color") or 0), int(r.get("discord_channel_id") or 0), str(r.get("discord_channel_name") or ""), int(r.get("discord_message_id") or 0), bool(int(r.get("deleted_from_discord") or 0)), int(r.get("deleted_by_id") or 0), str(r.get("deleted_by_name") or ""), int(r.get("created_at") or time.time()), int(r.get("deleted_at") or 0)))
+                counts["log_vault"] = counts.get("log_vault", 0) + 1
+            for r in nm_pg_sqlite_rows("command_center_events"):
+                conn.execute("INSERT INTO command_center_events (guild_id,event_type,user_id,user_name,channel_id,channel_name,amount,details,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (int(r.get("guild_id") or 0), str(r.get("event_type") or ""), int(r.get("user_id") or 0), str(r.get("user_name") or ""), int(r.get("channel_id") or 0), str(r.get("channel_name") or ""), int(r.get("amount") or 0), str(r.get("details") or ""), int(r.get("created_at") or time.time())))
+                counts["command_center_events"] = counts.get("command_center_events", 0) + 1
+            for r in nm_pg_sqlite_rows("money_audit"):
+                conn.execute("INSERT INTO money_audit (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (int(r.get("guild_id") or 0), int(r.get("user_id") or 0), int(r.get("amount") or 0), int(r.get("new_balance") or 0), str(r.get("source_type") or ""), str(r.get("details") or ""), int(r.get("actor_id") or 0), int(r.get("created_at") or time.time())))
+                counts["money_audit"] = counts.get("money_audit", 0) + 1
+            conn.execute("INSERT INTO nm_meta (key,value,updated_at) VALUES ('sqlite_migrated_v4','1',NOW()) ON CONFLICT (key) DO UPDATE SET value='1', updated_at=NOW()")
+            conn.commit()
+        NM_PG_AUTO_MIGRATE_DONE = True
+        print("✅ NM V4 Postgres auto migration completed:", counts)
+    except Exception as e:
+        print(f"❌ NM V4 Postgres auto migration failed: {type(e).__name__}: {e}")
+
+def pg_get_guild_settings(guild_id):
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (int(guild_id),)).fetchone()
+            return nm_pg_unjson(row["settings"]) if row else {}
+    except Exception as e:
+        print(f"PG get settings failed: {e}")
+        return {}
+
+def pg_save_guild_settings(guild_id, settings):
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO guild_settings (guild_id,settings,updated_at) VALUES (%s,%s::jsonb,NOW()) ON CONFLICT (guild_id) DO UPDATE SET settings=EXCLUDED.settings, updated_at=NOW()", (int(guild_id), nm_pg_json(settings)))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"PG save settings failed: {e}")
+        return False
+
+def pg_get_balance(guild_id, user_id):
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT balance FROM economy WHERE guild_id=%s AND user_id=%s", (int(guild_id), int(user_id))).fetchone()
+            if row:
+                return int(row["balance"] or 0)
+            conn.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (%s,%s,0) ON CONFLICT DO NOTHING", (int(guild_id), int(user_id)))
+            conn.commit()
+            return 0
+    except Exception as e:
+        print(f"PG balance failed: {e}")
+        return 0
+
+def pg_add_money(guild_id, user_id, amount, source_type="earned", details="", actor_id=0):
+    try:
+        guild_id, user_id, amount = int(guild_id), int(user_id), int(amount)
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO economy (guild_id,user_id,balance) VALUES (%s,%s,0) ON CONFLICT DO NOTHING", (guild_id, user_id))
+            if amount > 0 and source_type in ("admin","admin_give","give_all","dashboard_admin"):
+                conn.execute("UPDATE economy SET balance=balance+%s, admin_given=admin_given+%s, updated_at=NOW() WHERE guild_id=%s AND user_id=%s", (amount, amount, guild_id, user_id))
+            elif amount > 0:
+                conn.execute("UPDATE economy SET balance=balance+%s, earned_money=earned_money+%s, updated_at=NOW() WHERE guild_id=%s AND user_id=%s", (amount, amount, guild_id, user_id))
+            else:
+                conn.execute("UPDATE economy SET balance=balance+%s, updated_at=NOW() WHERE guild_id=%s AND user_id=%s", (amount, guild_id, user_id))
+            row = conn.execute("SELECT balance FROM economy WHERE guild_id=%s AND user_id=%s", (guild_id, user_id)).fetchone()
+            bal = int(row["balance"] or 0)
+            conn.execute("INSERT INTO money_audit (guild_id,user_id,amount,new_balance,source_type,details,actor_id,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)", (guild_id,user_id,amount,bal,str(source_type),str(details),int(actor_id or 0),int(time.time())))
+            conn.commit()
+            return bal
+    except Exception as e:
+        print(f"PG add money failed: {e}")
+        return 0
+
+def pg_claim_salary(guild_id, user_id, level=1):
+    now = int(time.time())
+    cooldown = int(globals().get("HOURLY_REWARD_COOLDOWN_SECONDS", 3600))
+    reward = int(globals().get("DAILY_REWARD_BASE", 250)) + int(level or 1) * 25
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO salary_cooldowns (guild_id,user_id,last_claim) VALUES (%s,%s,0) ON CONFLICT DO NOTHING", (int(guild_id), int(user_id)))
+            row = conn.execute("SELECT last_claim FROM salary_cooldowns WHERE guild_id=%s AND user_id=%s", (int(guild_id), int(user_id))).fetchone()
+            last = int(row["last_claim"] or 0) if row else 0
+            rem = cooldown - (now - last)
+            if rem > 0:
+                return False, rem, pg_get_balance(guild_id,user_id), 0
+            conn.execute("UPDATE salary_cooldowns SET last_claim=%s WHERE guild_id=%s AND user_id=%s", (now, int(guild_id), int(user_id)))
+            conn.commit()
+        bal = pg_add_money(guild_id, user_id, reward, "salary", "Postgres salary")
+        return True, 0, bal, reward
+    except Exception as e:
+        print(f"PG salary failed: {e}")
+        return False, cooldown, pg_get_balance(guild_id,user_id), 0
+
+def pg_get_level_data(guild_id, user_id):
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT xp,level FROM levels WHERE guild_id=%s AND user_id=%s", (int(guild_id), int(user_id))).fetchone()
+            if row:
+                return int(row["xp"] or 0), int(row["level"] or 1)
+            conn.execute("INSERT INTO levels (guild_id,user_id,xp,level) VALUES (%s,%s,0,1) ON CONFLICT DO NOTHING", (int(guild_id), int(user_id)))
+            conn.commit()
+            return 0,1
+    except Exception as e:
+        print(f"PG level failed: {e}")
+        return 0,1
+
+def pg_get_protection_settings(guild_id):
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_protection_settings WHERE guild_id=%s", (int(guild_id),)).fetchone()
+        base = protection_default_settings() if "protection_default_settings" in globals() else {}
+        if row:
+            base.update(nm_pg_unjson(row["settings"]))
+        return base
+    except Exception:
+        return protection_default_settings() if "protection_default_settings" in globals() else {}
+
+def pg_save_protection_settings(guild_id, settings):
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO guild_protection_settings (guild_id,settings,updated_at) VALUES (%s,%s::jsonb,NOW()) ON CONFLICT (guild_id) DO UPDATE SET settings=EXCLUDED.settings, updated_at=NOW()", (int(guild_id), nm_pg_json(settings)))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"PG protection save failed: {e}")
+        return False
+
+def pg_log_vault_record(log_type, title, description, color=0, guild_id=0):
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("INSERT INTO log_vault (guild_id,log_type,title,description,color,created_at) VALUES (%s,%s,%s,%s,%s,%s) RETURNING id", (int(guild_id or globals().get("GUILD_ID",0) or 0), str(log_type), str(title), str(description), int(color or 0), int(time.time()))).fetchone()
+            conn.commit()
+            return int(row["id"])
+    except Exception as e:
+        print(f"PG log vault failed: {e}")
+        return 0
+
+def pg_log_vault_attach_discord_message(vault_id, channel_id=0, channel_name="", message_id=0):
+    try:
+        if not vault_id:
+            return
+        with nm_pg_conn() as conn:
+            conn.execute("UPDATE log_vault SET discord_channel_id=%s, discord_channel_name=%s, discord_message_id=%s WHERE id=%s", (int(channel_id or 0), str(channel_name or ""), int(message_id or 0), int(vault_id)))
+            conn.commit()
+    except Exception as e:
+        print(f"PG log attach failed: {e}")
+
+def pg_log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
+    try:
+        wh = ["guild_id=%s"]; params=[int(guild_id or 0)]
+        if log_type and log_type!="all": wh.append("log_type=%s"); params.append(str(log_type))
+        if channel_id and str(channel_id)!="all": wh.append("discord_channel_id=%s"); params.append(int(channel_id))
+        if deleted_filter=="deleted": wh.append("deleted_from_discord=TRUE")
+        if deleted_filter=="saved": wh.append("deleted_from_discord=FALSE")
+        if query:
+            q=f"%{str(query)[:120]}%"; wh.append("(title ILIKE %s OR description ILIKE %s OR discord_channel_name ILIKE %s)"); params += [q,q,q]
+        where=" WHERE "+" AND ".join(wh)
+        with nm_pg_conn() as conn:
+            rows = conn.execute("SELECT * FROM log_vault "+where+" ORDER BY id DESC LIMIT %s OFFSET %s", tuple(params+[int(limit),int(offset)])).fetchall()
+            total = conn.execute("SELECT COUNT(*) AS c FROM log_vault "+where, tuple(params)).fetchone()["c"]
+        out=[]
+        for r in rows:
+            out.append((r["id"],r["guild_id"],r["log_type"],r["title"],r["description"],r["discord_channel_id"],r["discord_channel_name"],r["discord_message_id"],int(bool(r["deleted_from_discord"])),r["deleted_by_id"],r["deleted_by_name"],r["created_at"],r["deleted_at"]))
+        return out, int(total)
+    except Exception as e:
+        print(f"PG log recent failed: {e}")
+        return [],0
+
+def pg_log_vault_counts(guild_id=0):
+    try:
+        gid=int(guild_id or 0)
+        with nm_pg_conn() as conn:
+            total=conn.execute("SELECT COUNT(*) AS c FROM log_vault WHERE guild_id=%s",(gid,)).fetchone()["c"]
+            deleted=conn.execute("SELECT COUNT(*) AS c FROM log_vault WHERE guild_id=%s AND deleted_from_discord=TRUE",(gid,)).fetchone()["c"]
+            types=conn.execute("SELECT COUNT(DISTINCT log_type) AS c FROM log_vault WHERE guild_id=%s",(gid,)).fetchone()["c"]
+            today=conn.execute("SELECT COUNT(*) AS c FROM log_vault WHERE guild_id=%s AND created_at >= %s",(gid,int(time.time())-86400)).fetchone()["c"]
+        return int(total),int(deleted),int(types),int(today)
+    except Exception: return 0,0,0,0
+
+def pg_log_vault_channels(guild_id=0):
+    try:
+        with nm_pg_conn() as conn:
+            rows=conn.execute("SELECT discord_channel_id,discord_channel_name,COUNT(*) AS c FROM log_vault WHERE guild_id=%s GROUP BY discord_channel_id,discord_channel_name ORDER BY c DESC",(int(guild_id or 0),)).fetchall()
+            return [(r["discord_channel_id"],r["discord_channel_name"],r["c"]) for r in rows]
+    except Exception: return []
+
+def pg_log_vault_types(guild_id=0):
+    try:
+        with nm_pg_conn() as conn:
+            rows=conn.execute("SELECT log_type,COUNT(*) AS c FROM log_vault WHERE guild_id=%s GROUP BY log_type ORDER BY c DESC",(int(guild_id or 0),)).fetchall()
+            return [(r["log_type"],r["c"]) for r in rows]
+    except Exception: return []
+
+def pg_cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0):
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("INSERT INTO command_center_events (guild_id,event_type,user_id,user_name,channel_id,channel_name,amount,details,created_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)", (int(guild_id or 0),str(event_type),int(user_id or 0),str(user_name or ""),int(channel_id or 0),str(channel_name or ""),int(amount or 0),str(details or ""),int(time.time())))
+            conn.commit()
+    except Exception as e:
+        print(f"PG cc record failed: {e}")
+
+def nm_pg_install_overrides():
+    if not NM_V4_POSTGRES_ENABLED:
+        return
+    g=globals()
+    g["get_guild_settings"]=pg_get_guild_settings
+    g["save_guild_settings"]=pg_save_guild_settings
+    g["v3_get_balance"]=pg_get_balance
+    g["v3_add_money"]=pg_add_money
+    g["v3_claim_salary"]=pg_claim_salary
+    g["v3_get_level_data"]=pg_get_level_data
+    g["get_guild_protection_settings"]=pg_get_protection_settings
+    g["save_guild_protection_settings"]=pg_save_protection_settings
+    g["log_vault_record"]=pg_log_vault_record
+    g["log_vault_attach_discord_message"]=pg_log_vault_attach_discord_message
+    g["log_vault_recent"]=pg_log_vault_recent
+    g["log_vault_counts"]=pg_log_vault_counts
+    g["log_vault_channels"]=pg_log_vault_channels
+    g["log_vault_types"]=pg_log_vault_types
+    g["cc_record_event"]=pg_cc_record_event
+    print("✅ NM V4 Postgres overrides installed.")
+
+def nm_pg_boot():
+    if nm_pg_init():
+        nm_pg_migrate_once()
+        nm_pg_install_overrides()
+
+@app.route("/dashboard/postgres-status")
+def nm_pg_status_page():
+    ok=bool(NM_V4_POSTGRES_ENABLED)
+    counts={}
+    if ok:
+        try:
+            with nm_pg_conn() as conn:
+                for t in ["guild_settings","guild_channels","guild_protection_settings","economy","levels","warnings","log_vault","command_center_events","money_audit","salary_cooldowns","reward_locks"]:
+                    try: counts[t]=int(conn.execute(f"SELECT COUNT(*) AS c FROM {t}").fetchone()["c"])
+                    except Exception as e: counts[t]=f"ERR {type(e).__name__}"
+        except Exception as e: counts["error"]=str(e)
+    rows="".join(f"<tr><td>{dash_escape(str(k),100)}</td><td>{dash_escape(str(v),100)}</td></tr>" for k,v in counts.items())
+    color = "#22c55e" if ok else "#ef4444"
+    status = "ACTIVE" if ok else "NOT ACTIVE"
+    dbtxt = "found" if NM_DATABASE_URL else "missing"
+    return f"<div style='font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px'><h1>NM V4 PostgreSQL Status</h1><p>Status: <b style='color:{color}'>{status}</b></p><p>DATABASE_URL: {dbtxt}</p><table style='border-collapse:collapse;min-width:520px'><tr><th style='text-align:left;padding:8px;border-bottom:1px solid #334155'>Table</th><th style='text-align:left;padding:8px;border-bottom:1px solid #334155'>Rows</th></tr>{rows}</table><p><a style='color:#8b5cf6' href='/dashboard'>Back</a></p></div>"
+
+
+nm_pg_boot()
 
 keep_alive()
 
