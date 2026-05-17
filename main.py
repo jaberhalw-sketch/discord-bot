@@ -11,7 +11,7 @@ import re
 import html
 import asyncio
 from pathlib import Path
-from flask import Flask, request, redirect, session, render_template_string
+from flask import Flask, request, redirect, session, render_template_string, jsonify
 from threading import Thread
 import urllib.parse
 import urllib.request
@@ -6783,6 +6783,104 @@ DASHBOARD_BASE_TEMPLATE = r'''
       const href = a.getAttribute('href');
       if (href && (path === href || (href !== '/dashboard' && path.startsWith(href)))) a.classList.add('active');
     });
+
+    const toast = (message, type='ok') => {
+      let box = document.getElementById('live-toast');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'live-toast';
+        box.style.position = 'fixed';
+        box.style.top = '18px';
+        box.style.right = '18px';
+        box.style.zIndex = '99999';
+        box.style.display = 'grid';
+        box.style.gap = '8px';
+        document.body.appendChild(box);
+      }
+      const item = document.createElement('div');
+      item.className = 'toast ' + (type === 'bad' ? 'bad' : 'ok');
+      item.style.boxShadow = '0 18px 45px rgba(0,0,0,.32)';
+      item.textContent = message;
+      box.appendChild(item);
+      setTimeout(() => item.style.opacity = '0', 2200);
+      setTimeout(() => item.remove(), 2700);
+    };
+
+    const setSaving = (form, saving) => {
+      const state = form.querySelector('[data-live-state]');
+      if (state) {
+        state.textContent = saving ? 'Saving...' : 'Saved';
+        state.classList.toggle('ok', !saving);
+        state.classList.toggle('gold', saving);
+      }
+      form.querySelectorAll('[data-live-submit]').forEach(btn => {
+        btn.disabled = saving;
+        btn.style.opacity = saving ? '.65' : '1';
+      });
+    };
+
+    const updateSwitchBadges = (form) => {
+      form.querySelectorAll('.protect-switch').forEach(card => {
+        const input = card.querySelector('input[type="checkbox"]');
+        const badge = card.querySelector('em');
+        if (!input || !badge) return;
+        badge.textContent = input.checked ? 'ON' : 'OFF';
+        badge.style.background = input.checked ? 'rgba(34,197,94,.16)' : 'rgba(239,68,68,.14)';
+        badge.style.borderColor = input.checked ? 'rgba(34,197,94,.30)' : 'rgba(239,68,68,.25)';
+        badge.style.color = input.checked ? '#dcfce7' : '#fee2e2';
+      });
+    };
+
+    const liveSubmit = async (form, silent=false) => {
+      if (form.dataset.saving === '1') { form.dataset.pending = '1'; return; }
+      form.dataset.saving = '1';
+      form.dataset.pending = '0';
+      setSaving(form, true);
+      try {
+        const res = await fetch(form.action, {
+          method: form.method || 'POST',
+          body: new FormData(form),
+          headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' },
+          credentials: 'same-origin'
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.ok === false) throw new Error(data.error || 'Failed to save');
+        setSaving(form, false);
+        updateSwitchBadges(form);
+        if (!silent) toast(data.message || 'Saved successfully');
+      } catch (err) {
+        setSaving(form, false);
+        toast(err.message || 'Save failed', 'bad');
+      } finally {
+        form.dataset.saving = '0';
+        if (form.dataset.pending === '1') {
+          form.dataset.pending = '0';
+          liveSubmit(form, true);
+        }
+      }
+    };
+
+    document.querySelectorAll('form[data-live="true"]').forEach(form => {
+      let timer = null;
+      updateSwitchBadges(form);
+      form.addEventListener('submit', (e) => {
+        e.preventDefault();
+        liveSubmit(form);
+      });
+      if (form.dataset.autosave === 'true') {
+        form.addEventListener('change', () => {
+          updateSwitchBadges(form);
+          clearTimeout(timer);
+          timer = setTimeout(() => liveSubmit(form, true), 280);
+        });
+        form.addEventListener('input', (e) => {
+          if (['INPUT','TEXTAREA','SELECT'].includes(e.target.tagName)) {
+            clearTimeout(timer);
+            timer = setTimeout(() => liveSubmit(form, true), 700);
+          }
+        });
+      }
+    });
   })();
 </script>
 </body>
@@ -9065,7 +9163,7 @@ def dashboard_protection_page():
     </div>
 
     <div style='height:16px'></div>
-    <form method='post' action='/dashboard/protection?guild_id={int(selected_guild_id)}'>
+    <form method='post' data-live='true' data-autosave='true' action='/dashboard/protection?guild_id={int(selected_guild_id)}'>
       <input type='hidden' name='guild_id' value='{int(selected_guild_id)}'>
       <div class='grid2'>
         <div class='card'><h3>🔌 Protection Modules</h3>{module_cards}</div>
@@ -9104,7 +9202,8 @@ def dashboard_protection_page():
       <div class='card'><h3>🎭 Ignored Roles</h3><p class='muted'>أي عضو معه رتبة من هنا ما تنطبق عليه الحماية.</p><div class='scrollbox'>{role_options}</div></div>
 
       <div style='height:16px'></div>
-      <button class='btn primary' type='submit'>💾 Save Protection Settings</button>
+      <button class='btn primary' type='submit' data-live-submit>💾 Save Protection Settings</button>
+      <span class='pill ok' data-live-state>Live Save Ready</span>
       <a class='btn' href='/dashboard/guild/{int(selected_guild_id)}/command-center'>🧠 Command Center</a>
       <a class='btn' href='/dashboard/guild/{int(selected_guild_id)}/log-vault'>📦 Log Vault</a>
     </form>
@@ -9143,7 +9242,43 @@ def dashboard_protection_action():
     settings["ignored_roles"] = parse_dashboard_int_list(request.form.getlist("ignored_roles"))
     save_guild_protection_settings(guild_id, settings)
     dashboard_log_action("Protection updated", f"Protection settings changed for guild {guild_id}", session.get("discord_user"))
+
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.accept_mimetypes.best == "application/json":
+        return jsonify({
+            "ok": True,
+            "message": "Protection settings saved live.",
+            "guild_id": guild_id,
+            "protection_enabled": bool(settings.get("protection_enabled")),
+            "log_only": bool(settings.get("log_only")),
+            "punishment": settings.get("punishment", "timeout_10m"),
+        })
+
     return redirect(f"/dashboard/protection?guild_id={guild_id}&msg=" + urllib.parse.quote("Protection settings saved."))
+
+
+@app.route("/dashboard/api/live-status", methods=["GET"])
+def dashboard_api_live_status():
+    denied = dashboard_require_admin()
+    if denied:
+        return jsonify({"ok": False, "error": "Access denied"}), 403
+    try:
+        guild_id = int(request.args.get("guild_id") or dashboard_get_active_guild_id() or GUILD_ID)
+    except:
+        guild_id = GUILD_ID
+    guild = bot.get_guild(guild_id) if bot else None
+    protection = get_guild_protection_settings(guild_id)
+    return jsonify({
+        "ok": True,
+        "guild_id": guild_id,
+        "bot_online": bool(bot and bot.user),
+        "ping_ms": round(bot.latency * 1000) if bot and getattr(bot, "latency", None) is not None else None,
+        "members": len(guild.members) if guild else 0,
+        "channels": len(guild.channels) if guild else 0,
+        "protection_enabled": bool(protection.get("protection_enabled")),
+        "log_only": bool(protection.get("log_only")),
+        "punishment": protection.get("punishment", "timeout_10m"),
+        "updated_at": int(time.time()),
+    })
 
 
 @app.route("/dashboard/settings", methods=["GET"])
