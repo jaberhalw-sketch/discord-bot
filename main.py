@@ -21162,783 +21162,1051 @@ def nm_v5_admin_pro_boot():
 # =====================================================================
 
 # =====================================================================
-# NM V7 REPLACEMENT CORE - ECONOMY / CASINO / DASHBOARD SYNC
-# This block REPLACES the old stacked V5/V6 economy/casino/dashboard patches.
+# =========================
+# NM V8 UNIFIED CORE - ONE SYSTEM FOR DISCORD + DASHBOARD
+# =========================
+# This section replaces the old V5/V6/V7 patch stack with one active runtime core.
 # Rules:
-# - One source of truth: guild_economy(guild_id, user_id)
-# - One transaction ledger: nm_money_ledger_v7
-# - No legacy economy table reads, no MAX(balance), no cross-guild fallback
-# - Casino deducts the bet first. Loss keeps deduction. Win pays payout. Draw refunds bet.
-# - Dashboard only shows real Discord snowflake IDs and live cached member info.
-# - Dashboard actions and Discord commands use the same ledger functions.
-# =====================================================================
+# - Discord commands, Dashboard pages, Casino, Economy, Real Estate, and Live Activity use NMCore only.
+# - No legacy MAX(balance), no guild_id IN (?,0), no user_id-only economy.
+# - Prefix commands are re-bound to V8 handlers and old on_message is replaced to stop legacy casino bridges.
+# =========================
 
-NM_V7_VERSION = "NM V7_REPLACED_ECONOMY_CASINO_DASHBOARD_2026_05_17"
-NM_V7_LEDGER_TABLE = "nm_money_ledger_v7"
-NM_V7_ACTIVITY_TABLE = "nm_discord_activity_v7"
-NM_V7_CASINO_WINDOW_TABLE = "nm_casino_window_v7"
-NM_V7_SNOWFLAKE_MIN = 10 ** 15
-NM_V7_DEFAULT_MAX_BET = int(os.getenv("NM_CASINO_MAX_BET", "250000"))
-NM_V7_MAX_BET_PERCENT = int(os.getenv("NM_CASINO_MAX_BET_PERCENT", "10"))
-NM_V7_WINDOW_SECONDS = int(os.getenv("NM_CASINO_WINDOW_SECONDS", "600"))
-NM_V7_WINDOW_TOTAL = int(os.getenv("NM_CASINO_WINDOW_MAX_TOTAL", "1000000"))
-NM_V7_BALANCE_WARN = int(os.getenv("NM_BALANCE_WARN", "50000000"))
+NM_V8_VERSION = "NM V8_UNIFIED_CORE_2026_05_17"
+NM_V8_LEDGER_TABLE = "nm_money_ledger_v8"
+NM_V8_ACTIVITY_TABLE = "nm_activity_v8"
+NM_V8_PROPERTY_LEDGER_TABLE = "nm_property_ledger_v8"
+NM_V8_CASINO_WINDOW_TABLE = "nm_casino_window_v8"
+NM_V8_SNOWFLAKE_MIN = 10 ** 15
+NM_V8_DEFAULT_MAX_BET = int(os.getenv("NM_CASINO_MAX_BET", "250000"))
+NM_V8_MAX_BET_PERCENT = int(os.getenv("NM_CASINO_MAX_BET_PERCENT", "10"))
+NM_V8_WINDOW_SECONDS = int(os.getenv("NM_CASINO_WINDOW_SECONDS", "600"))
+NM_V8_WINDOW_TOTAL = int(os.getenv("NM_CASINO_WINDOW_MAX_TOTAL", "1000000"))
+NM_V8_BALANCE_WARN = int(os.getenv("NM_BALANCE_WARN", "50000000"))
+NM_V8_DAILY_REWARD = int(os.getenv("NM_DAILY_REWARD", str(DAILY_REWARD_BASE if 'DAILY_REWARD_BASE' in globals() else 250)))
+NM_V8_SALARY_COOLDOWN = int(os.getenv("NM_SALARY_COOLDOWN_SECONDS", str(HOURLY_REWARD_COOLDOWN_SECONDS if 'HOURLY_REWARD_COOLDOWN_SECONDS' in globals() else 3600)))
+NM_V8_DEFAULT_COIN = "NM Coin"
 
 
-def nm_v7_int(value, default=0):
+def nm_v8_int(value, default=0):
     try:
+        if value is None:
+            return int(default)
+        if isinstance(value, str):
+            value = value.strip().replace(",", "")
+            if not value:
+                return int(default)
         return int(value)
     except Exception:
-        return int(default or 0)
+        return int(default)
 
 
-def nm_v7_now():
+def nm_v8_now():
     return int(time.time())
 
 
-def nm_v7_valid_user_id(user_id):
-    return nm_v7_int(user_id, 0) >= NM_V7_SNOWFLAKE_MIN
+def nm_v8_valid_user_id(user_id):
+    return nm_v8_int(user_id, 0) >= NM_V8_SNOWFLAKE_MIN
 
 
-def nm_v7_gid(explicit=None, ctx=None, interaction=None, message=None):
-    if explicit:
-        return nm_v7_int(explicit, 0)
-    try:
-        if ctx is not None and getattr(ctx, "guild", None):
-            return int(ctx.guild.id)
-    except Exception:
-        pass
-    try:
-        if interaction is not None and getattr(interaction, "guild", None):
-            return int(interaction.guild.id)
-    except Exception:
-        pass
-    try:
-        if message is not None and getattr(message, "guild", None):
-            return int(message.guild.id)
-    except Exception:
-        pass
-    try:
-        raw = request.args.get("guild_id") or request.form.get("guild_id") or session.get("dashboard_active_guild_id") or session.get("selected_guild_id")
-        if raw:
-            return nm_v7_int(raw, 0)
-    except Exception:
-        pass
-    try:
-        guilds = list(getattr(bot, "guilds", []) or [])
-        return int(guilds[0].id) if guilds else 0
-    except Exception:
-        return 0
+class NMCore:
+    """Single runtime source of truth for NM System.
 
+    Active modules must call this class instead of legacy economy/casino/dashboard helpers.
+    """
 
-def nm_v7_db():
-    return db_connect()
+    @staticmethod
+    def db():
+        return sqlite3.connect(DB_FILE, check_same_thread=False)
 
-
-def nm_v7_init_db():
-    conn = nm_v7_db()
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS guild_economy (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            balance INTEGER DEFAULT 0,
-            last_daily INTEGER DEFAULT 0,
-            last_boost_weekly INTEGER DEFAULT 0,
-            PRIMARY KEY (guild_id, user_id)
-        )
-    """)
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {NM_V7_LEDGER_TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            tx_id TEXT UNIQUE,
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            user_name TEXT DEFAULT '',
-            actor_id INTEGER DEFAULT 0,
-            actor_name TEXT DEFAULT '',
-            amount INTEGER NOT NULL,
-            balance_before INTEGER NOT NULL,
-            balance_after INTEGER NOT NULL,
-            source_type TEXT NOT NULL,
-            source_label TEXT DEFAULT '',
-            reason TEXT DEFAULT '',
-            reference_type TEXT DEFAULT '',
-            reference_id TEXT DEFAULT '',
-            related_user_id INTEGER DEFAULT 0,
-            channel_id INTEGER DEFAULT 0,
-            message_id INTEGER DEFAULT 0,
-            metadata_json TEXT DEFAULT '{{}}',
-            created_at INTEGER NOT NULL
-        )
-    """)
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {NM_V7_ACTIVITY_TABLE} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            guild_id INTEGER DEFAULT 0,
-            event_type TEXT DEFAULT 'event',
-            user_id INTEGER DEFAULT 0,
-            user_name TEXT DEFAULT '',
-            channel_id INTEGER DEFAULT 0,
-            channel_name TEXT DEFAULT '',
-            details TEXT DEFAULT '',
-            created_at INTEGER NOT NULL
-        )
-    """)
-    cur.execute(f"""
-        CREATE TABLE IF NOT EXISTS {NM_V7_CASINO_WINDOW_TABLE} (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            amount INTEGER NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_v7_guild_economy_balance ON guild_economy(guild_id, balance DESC)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v7_ledger_guild_time ON {NM_V7_LEDGER_TABLE}(guild_id, created_at DESC)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v7_ledger_user_time ON {NM_V7_LEDGER_TABLE}(guild_id, user_id, created_at DESC)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v7_activity_guild_time ON {NM_V7_ACTIVITY_TABLE}(guild_id, created_at DESC)")
-    cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v7_casino_window ON {NM_V7_CASINO_WINDOW_TABLE}(guild_id, user_id, created_at)")
-    try:
-        cur.execute("ALTER TABLE real_estate_properties ADD COLUMN guild_id INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    try:
-        cur.execute("ALTER TABLE real_estate_auctions ADD COLUMN guild_id INTEGER DEFAULT 0")
-    except Exception:
-        pass
-    conn.commit()
-    conn.close()
-
-
-def nm_v7_coin(guild_id=None):
-    gid = nm_v7_gid(guild_id)
-    for name in ("nm_v5_get_coin_name", "nm_get_coin_name", "nm_coin_name"):
+    @staticmethod
+    def gid(explicit=None, ctx=None, interaction=None, message=None):
         try:
-            fn = globals().get(name)
-            if callable(fn):
-                value = fn(gid)
-                if value:
-                    return str(value)
+            if explicit:
+                return nm_v8_int(explicit, 0)
+            if ctx is not None and getattr(ctx, "guild", None):
+                return nm_v8_int(ctx.guild.id, 0)
+            if interaction is not None and getattr(interaction, "guild", None):
+                return nm_v8_int(interaction.guild.id, 0)
+            if message is not None and getattr(message, "guild", None):
+                return nm_v8_int(message.guild.id, 0)
+            try:
+                raw = request.values.get("guild_id") or request.args.get("guild_id") or request.form.get("guild_id")
+                if raw:
+                    return nm_v8_int(raw, 0)
+            except Exception:
+                pass
+            try:
+                raw = session.get("selected_guild_id") or session.get("guild_id")
+                if raw:
+                    return nm_v8_int(raw, 0)
+            except Exception:
+                pass
+            try:
+                guilds = list(getattr(bot, "guilds", []) or [])
+                return nm_v8_int(guilds[0].id, 0) if guilds else 0
+            except Exception:
+                return 0
+        except Exception:
+            return 0
+
+    @staticmethod
+    def init():
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_economy (
+                guild_id INTEGER,
+                user_id INTEGER,
+                balance INTEGER DEFAULT 0,
+                last_daily INTEGER DEFAULT 0,
+                last_boost_weekly INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
+        cur.execute("PRAGMA table_info(guild_economy)")
+        ge_cols = {r[1] for r in cur.fetchall()}
+        for col, ddl in {
+            "balance": "ALTER TABLE guild_economy ADD COLUMN balance INTEGER DEFAULT 0",
+            "last_daily": "ALTER TABLE guild_economy ADD COLUMN last_daily INTEGER DEFAULT 0",
+            "last_boost_weekly": "ALTER TABLE guild_economy ADD COLUMN last_boost_weekly INTEGER DEFAULT 0",
+        }.items():
+            if col not in ge_cols:
+                cur.execute(ddl)
+
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_V8_LEDGER_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tx_id TEXT UNIQUE,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_name TEXT DEFAULT '',
+                actor_id INTEGER DEFAULT 0,
+                actor_name TEXT DEFAULT '',
+                amount INTEGER NOT NULL,
+                balance_before INTEGER NOT NULL,
+                balance_after INTEGER NOT NULL,
+                source_type TEXT NOT NULL,
+                source_label TEXT DEFAULT '',
+                reason TEXT DEFAULT '',
+                reference_type TEXT DEFAULT '',
+                reference_id TEXT DEFAULT '',
+                related_user_id INTEGER DEFAULT 0,
+                channel_id INTEGER DEFAULT 0,
+                message_id INTEGER DEFAULT 0,
+                metadata_json TEXT DEFAULT '{{}}',
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_V8_ACTIVITY_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                actor_id INTEGER DEFAULT 0,
+                actor_name TEXT DEFAULT '',
+                event_type TEXT NOT NULL,
+                target_id INTEGER DEFAULT 0,
+                channel_id INTEGER DEFAULT 0,
+                message_id INTEGER DEFAULT 0,
+                title TEXT DEFAULT '',
+                details TEXT DEFAULT '',
+                amount INTEGER DEFAULT 0,
+                reference_type TEXT DEFAULT '',
+                reference_id TEXT DEFAULT '',
+                metadata_json TEXT DEFAULT '{{}}',
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_V8_CASINO_WINDOW_TABLE} (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {NM_V8_PROPERTY_LEDGER_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                property_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                old_owner_id INTEGER DEFAULT 0,
+                new_owner_id INTEGER DEFAULT 0,
+                actor_id INTEGER DEFAULT 0,
+                amount INTEGER DEFAULT 0,
+                level_before INTEGER DEFAULT 0,
+                level_after INTEGER DEFAULT 0,
+                price_before INTEGER DEFAULT 0,
+                price_after INTEGER DEFAULT 0,
+                reason TEXT DEFAULT '',
+                money_tx_id TEXT DEFAULT '',
+                created_at INTEGER NOT NULL
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS real_estate_properties (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                type_key TEXT,
+                unit_number INTEGER,
+                display_name TEXT,
+                owner_id INTEGER DEFAULT 0,
+                level INTEGER DEFAULT 1,
+                last_rent_claim INTEGER DEFAULT 0,
+                for_sale_price INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT 0
+            )
+        """)
+        cur.execute("PRAGMA table_info(real_estate_properties)")
+        rp_cols = {r[1] for r in cur.fetchall()}
+        for col, ddl in {
+            "guild_id": "ALTER TABLE real_estate_properties ADD COLUMN guild_id INTEGER DEFAULT 0",
+            "price": "ALTER TABLE real_estate_properties ADD COLUMN price INTEGER DEFAULT 0",
+            "rent": "ALTER TABLE real_estate_properties ADD COLUMN rent INTEGER DEFAULT 0",
+        }.items():
+            if col not in rp_cols:
+                cur.execute(ddl)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS guild_settings (
+                guild_id INTEGER PRIMARY KEY,
+                guild_name TEXT DEFAULT '',
+                enabled INTEGER DEFAULT 1,
+                commands_channel_id INTEGER DEFAULT 0,
+                gambling_channel_id INTEGER DEFAULT 0,
+                logs_category_id INTEGER DEFAULT 0,
+                setup_done INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT 0,
+                updated_at INTEGER DEFAULT 0
+            )
+        """)
+        cur.execute("PRAGMA table_info(guild_settings)")
+        gs_cols = {r[1] for r in cur.fetchall()}
+        if "coin_name" not in gs_cols:
+            cur.execute("ALTER TABLE guild_settings ADD COLUMN coin_name TEXT DEFAULT 'NM Coin'")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_v8_guild_economy_balance ON guild_economy(guild_id, balance DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v8_ledger_guild_time ON {NM_V8_LEDGER_TABLE}(guild_id, created_at DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v8_ledger_user_time ON {NM_V8_LEDGER_TABLE}(guild_id, user_id, created_at DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v8_activity_guild_time ON {NM_V8_ACTIVITY_TABLE}(guild_id, created_at DESC)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v8_casino_window ON {NM_V8_CASINO_WINDOW_TABLE}(guild_id, user_id, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_v8_property_guild_owner ON real_estate_properties(guild_id, owner_id)")
+        cur.execute(f"CREATE INDEX IF NOT EXISTS idx_v8_property_ledger_guild_time ON {NM_V8_PROPERTY_LEDGER_TABLE}(guild_id, created_at DESC)")
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def ensure_guild(guild_id, guild_name=""):
+        gid = NMCore.gid(guild_id)
+        if not gid:
+            return
+        NMCore.init()
+        conn = NMCore.db(); cur = conn.cursor(); now = nm_v8_now()
+        cur.execute("""
+            INSERT OR IGNORE INTO guild_settings
+            (guild_id, guild_name, enabled, setup_done, created_at, updated_at, coin_name)
+            VALUES (?, ?, 1, 0, ?, ?, ?)
+        """, (gid, str(guild_name or "")[:180], now, now, NM_V8_DEFAULT_COIN))
+        if guild_name:
+            cur.execute("UPDATE guild_settings SET guild_name=?, updated_at=? WHERE guild_id=?", (str(guild_name)[:180], now, gid))
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def coin(guild_id=None):
+        gid = NMCore.gid(guild_id)
+        if not gid:
+            return NM_V8_DEFAULT_COIN
+        try:
+            NMCore.ensure_guild(gid)
+            conn = NMCore.db(); cur = conn.cursor()
+            cur.execute("SELECT coin_name FROM guild_settings WHERE guild_id=?", (gid,))
+            row = cur.fetchone(); conn.close()
+            if row and row[0]:
+                return str(row[0])[:60]
         except Exception:
             pass
-    return str(globals().get("COIN_NAME", "NM Coin"))
+        try:
+            if 'nm_v5_get_coin_name' in globals():
+                return str(nm_v5_get_coin_name(gid) or NM_V8_DEFAULT_COIN)
+        except Exception:
+            pass
+        return NM_V8_DEFAULT_COIN
 
+    @staticmethod
+    def set_coin(guild_id, coin_name):
+        gid = NMCore.gid(guild_id); coin_name = str(coin_name or NM_V8_DEFAULT_COIN).strip()[:40] or NM_V8_DEFAULT_COIN
+        NMCore.ensure_guild(gid)
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute("UPDATE guild_settings SET coin_name=?, updated_at=? WHERE guild_id=?", (coin_name, nm_v8_now(), gid))
+        conn.commit(); conn.close()
+        return coin_name
 
-def nm_v7_money(amount, guild_id=None):
-    return f"{nm_v7_int(amount,0):,} {nm_v7_coin(guild_id)}"
+    @staticmethod
+    def money(amount, guild_id=None):
+        return f"{nm_v8_int(amount,0):,} {NMCore.coin(guild_id)}"
 
-
-def nm_v7_member(guild_id, user_id):
-    try:
-        guild = bot.get_guild(int(guild_id))
-        if not guild:
-            return None
-        return guild.get_member(int(user_id))
-    except Exception:
+    @staticmethod
+    def member(guild_id, user_id):
+        gid = NMCore.gid(guild_id); uid = nm_v8_int(user_id, 0)
+        try:
+            guild = bot.get_guild(gid)
+            if guild:
+                return guild.get_member(uid)
+        except Exception:
+            pass
         return None
 
+    @staticmethod
+    def member_name(guild_id, user_id):
+        uid = nm_v8_int(user_id, 0)
+        m = NMCore.member(guild_id, uid)
+        if m:
+            return getattr(m, "display_name", str(uid))
+        return f"User {uid}"
 
-def nm_v7_member_plain(guild_id, user_id):
-    member = nm_v7_member(guild_id, user_id)
-    if member:
-        return str(getattr(member, "display_name", None) or getattr(member, "name", None) or user_id)
-    return f"User {int(user_id)}"
+    @staticmethod
+    def member_html(guild_id, user_id):
+        uid = nm_v8_int(user_id, 0)
+        if not nm_v8_valid_user_id(uid):
+            return f"<span class='bad'>Invalid ID {uid}</span>"
+        m = NMCore.member(guild_id, uid)
+        if not m:
+            return f"<div><b>User {uid}</b><div class='muted'>ID: <code>{uid}</code> • not in live cache</div></div>"
+        try:
+            avatar = m.display_avatar.url
+        except Exception:
+            avatar = ""
+        roles = []
+        try:
+            roles = [r.name for r in m.roles if r.name != "@everyone"][-4:]
+        except Exception:
+            roles = []
+        roles_html = " ".join(f"<span class='pill'>{html.escape(str(r))}</span>" for r in roles) or "<span class='muted'>No roles</span>"
+        return f"""
+        <div class='member'>
+          <img src='{html.escape(avatar)}' onerror="this.style.display='none'">
+          <div><b>{html.escape(getattr(m, 'display_name', str(uid)))}</b>
+          <div class='muted'>@{html.escape(str(getattr(m, 'name', uid)))} • ID: <code>{uid}</code></div>
+          <div>{roles_html}</div></div>
+        </div>
+        """
+
+    @staticmethod
+    def ensure_balance(guild_id, user_id):
+        gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id, 0)
+        NMCore.init()
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (gid, uid))
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def get_balance(guild_id, user_id):
+        gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id, 0)
+        if not gid or not uid:
+            return 0
+        NMCore.ensure_balance(gid, uid)
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+        row = cur.fetchone(); conn.close()
+        return max(0, nm_v8_int(row[0] if row else 0))
+
+    @staticmethod
+    def tx(guild_id, user_id, amount, source_type, *, user_name="", actor_id=0, actor_name="", source_label="", reason="", reference_type="", reference_id="", related_user_id=0, channel_id=0, message_id=0, metadata=None):
+        gid, uid, amount = NMCore.gid(guild_id), nm_v8_int(user_id, 0), nm_v8_int(amount, 0)
+        if not gid or not uid:
+            return {"ok": False, "error": "missing_guild_or_user", "balance": 0}
+        metadata = metadata or {}
+        NMCore.ensure_balance(gid, uid)
+        conn = NMCore.db(); cur = conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
+            row = cur.fetchone(); before = max(0, nm_v8_int(row[0] if row else 0))
+            after = before + amount
+            if after < 0:
+                conn.rollback(); conn.close()
+                return {"ok": False, "error": "insufficient_funds", "balance": before, "before": before, "after": before}
+            cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (after, gid, uid))
+            tx_id = f"v8{nm_v8_now()}{random.randint(100000,999999)}{uid % 10000}"
+            cur.execute(f"""
+                INSERT INTO {NM_V8_LEDGER_TABLE}
+                (tx_id,guild_id,user_id,user_name,actor_id,actor_name,amount,balance_before,balance_after,source_type,source_label,reason,reference_type,reference_id,related_user_id,channel_id,message_id,metadata_json,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (tx_id, gid, uid, str(user_name or "")[:180], nm_v8_int(actor_id,0), str(actor_name or "")[:180], amount, before, after, str(source_type), str(source_label or "")[:120], str(reason or "")[:500], str(reference_type or "")[:80], str(reference_id or "")[:120], nm_v8_int(related_user_id,0), nm_v8_int(channel_id,0), nm_v8_int(message_id,0), json.dumps(metadata, ensure_ascii=False), nm_v8_now()))
+            conn.commit(); conn.close()
+            NMCore.activity(gid, "money", actor_id=actor_id or uid, actor_name=actor_name or user_name, target_id=uid, channel_id=channel_id, message_id=message_id, title=source_type, details=reason, amount=amount, reference_type="money_tx", reference_id=tx_id, metadata={"balance_before": before, "balance_after": after, **metadata})
+            return {"ok": True, "tx_id": tx_id, "before": before, "after": after, "amount": amount, "balance": after}
+        except Exception as e:
+            try: conn.rollback(); conn.close()
+            except Exception: pass
+            return {"ok": False, "error": str(e), "balance": NMCore.get_balance(gid, uid)}
+
+    @staticmethod
+    def credit(guild_id, user_id, amount, source_type="credit", **kwargs):
+        return NMCore.tx(guild_id, user_id, abs(nm_v8_int(amount,0)), source_type, **kwargs)
+
+    @staticmethod
+    def debit(guild_id, user_id, amount, source_type="debit", **kwargs):
+        return NMCore.tx(guild_id, user_id, -abs(nm_v8_int(amount,0)), source_type, **kwargs)
+
+    @staticmethod
+    def set_balance(guild_id, user_id, amount, source_type="set_balance", **kwargs):
+        current = NMCore.get_balance(guild_id, user_id)
+        amount = max(0, nm_v8_int(amount, 0))
+        return NMCore.tx(guild_id, user_id, amount - current, source_type, **kwargs)
+
+    @staticmethod
+    def transfer(guild_id, from_user_id, to_user_id, amount, *, actor_name="", channel_id=0, message_id=0):
+        gid = NMCore.gid(guild_id); amount = abs(nm_v8_int(amount, 0))
+        if amount <= 0:
+            return {"ok": False, "error": "invalid_amount"}
+        out_tx = NMCore.debit(gid, from_user_id, amount, "transfer_out", user_name=NMCore.member_name(gid, from_user_id), actor_id=from_user_id, actor_name=actor_name, related_user_id=to_user_id, channel_id=channel_id, message_id=message_id, reason=f"Transfer to {to_user_id}")
+        if not out_tx.get("ok"):
+            return out_tx
+        in_tx = NMCore.credit(gid, to_user_id, amount, "transfer_in", user_name=NMCore.member_name(gid, to_user_id), actor_id=from_user_id, actor_name=actor_name, related_user_id=from_user_id, reference_id=out_tx.get("tx_id"), channel_id=channel_id, message_id=message_id, reason=f"Transfer from {from_user_id}")
+        return {"ok": True, "out": out_tx, "in": in_tx}
+
+    @staticmethod
+    def top_balances(guild_id, limit=10, live_members_only=True):
+        gid = NMCore.gid(guild_id)
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute("SELECT user_id,balance FROM guild_economy WHERE guild_id=? AND balance>0 ORDER BY balance DESC LIMIT 200", (gid,))
+        rows = [(nm_v8_int(r[0]), max(0, nm_v8_int(r[1]))) for r in cur.fetchall()]
+        conn.close()
+        out = []
+        for uid, bal in rows:
+            if not nm_v8_valid_user_id(uid):
+                continue
+            if live_members_only and bot.get_guild(gid) and not NMCore.member(gid, uid):
+                continue
+            out.append((uid, bal))
+            if len(out) >= int(limit):
+                break
+        return out
+
+    @staticmethod
+    def rank(guild_id, user_id):
+        gid = NMCore.gid(guild_id); bal = NMCore.get_balance(gid, user_id)
+        conn = NMCore.db(); cur = conn.cursor(); cur.execute("SELECT COUNT(*) + 1 FROM guild_economy WHERE guild_id=? AND balance>?", (gid, bal)); row = cur.fetchone(); conn.close()
+        return nm_v8_int(row[0] if row else 1, 1)
+
+    @staticmethod
+    def activity(guild_id, event_type, *, actor_id=0, actor_name="", target_id=0, channel_id=0, message_id=0, title="", details="", amount=0, reference_type="", reference_id="", metadata=None):
+        try:
+            gid = NMCore.gid(guild_id)
+            metadata = metadata or {}
+            NMCore.init()
+            conn = NMCore.db(); cur = conn.cursor()
+            cur.execute(f"""
+                INSERT INTO {NM_V8_ACTIVITY_TABLE}
+                (guild_id,actor_id,actor_name,event_type,target_id,channel_id,message_id,title,details,amount,reference_type,reference_id,metadata_json,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (gid, nm_v8_int(actor_id,0), str(actor_name or "")[:180], str(event_type)[:80], nm_v8_int(target_id,0), nm_v8_int(channel_id,0), nm_v8_int(message_id,0), str(title or "")[:200], str(details or "")[:700], nm_v8_int(amount,0), str(reference_type or "")[:80], str(reference_id or "")[:120], json.dumps(metadata, ensure_ascii=False), nm_v8_now()))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def parse_bet(text):
+        s = str(text or "").strip().lower().replace(",", "")
+        if s in {"all", "الكل", "فل"}:
+            return "all"
+        mult = 1
+        if s.endswith("k"):
+            mult = 1000; s = s[:-1]
+        elif s.endswith("m"):
+            mult = 1000000; s = s[:-1]
+        try:
+            return int(float(s) * mult)
+        except Exception:
+            return None
+
+    @staticmethod
+    def casino_limit(guild_id, user_id):
+        bal = NMCore.get_balance(guild_id, user_id)
+        by_pct = max(1, bal * NM_V8_MAX_BET_PERCENT // 100)
+        return max(0, min(bal, NM_V8_DEFAULT_MAX_BET, by_pct))
+
+    @staticmethod
+    def casino_window_total(guild_id, user_id):
+        gid, uid, now = NMCore.gid(guild_id), nm_v8_int(user_id,0), nm_v8_now()
+        conn = NMCore.db(); cur = conn.cursor()
+        cur.execute(f"DELETE FROM {NM_V8_CASINO_WINDOW_TABLE} WHERE created_at < ?", (now - NM_V8_WINDOW_SECONDS,))
+        cur.execute(f"SELECT COALESCE(SUM(amount),0) FROM {NM_V8_CASINO_WINDOW_TABLE} WHERE guild_id=? AND user_id=?", (gid, uid))
+        total = nm_v8_int((cur.fetchone() or [0])[0])
+        conn.commit(); conn.close(); return total
+
+    @staticmethod
+    def validate_bet(guild_id, user_id, bet):
+        gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id,0)
+        bal = NMCore.get_balance(gid, uid)
+        if bet == "all":
+            bet = NMCore.casino_limit(gid, uid)
+        if bet is None:
+            return False, 0, "اكتب مبلغ صحيح."
+        bet = nm_v8_int(bet, 0)
+        if bet <= 0:
+            return False, bet, "المبلغ لازم يكون أكبر من صفر."
+        if bal < bet:
+            return False, bet, f"رصيدك ما يكفي. رصيدك الحالي: {NMCore.money(bal, gid)}"
+        max_bet = NMCore.casino_limit(gid, uid)
+        if bet > max_bet:
+            return False, bet, f"الرهان كبير على اقتصاد السيرفر. أقصى رهان لك الآن: {NMCore.money(max_bet, gid)}"
+        if NMCore.casino_window_total(gid, uid) + bet > NM_V8_WINDOW_TOTAL:
+            return False, bet, f"وصلت حد القمار المؤقت خلال {NM_V8_WINDOW_SECONDS//60} دقائق: {NMCore.money(NM_V8_WINDOW_TOTAL, gid)}"
+        return True, bet, ""
+
+    @staticmethod
+    def play_casino(guild_id, user_id, user_name, game, bet_text, *, channel_id=0, message_id=0):
+        gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id,0)
+        raw = NMCore.parse_bet(bet_text)
+        ok, bet, err = NMCore.validate_bet(gid, uid, raw)
+        if not ok:
+            return {"ok": False, "error": err}
+        debit_tx = NMCore.debit(gid, uid, bet, "casino_bet", user_name=user_name, actor_id=uid, actor_name=user_name, source_label=game, reason=f"Casino bet: {game}", channel_id=channel_id, message_id=message_id, metadata={"game": game, "phase": "bet"})
+        if not debit_tx.get("ok"):
+            return {"ok": False, "error": "الرصيد ما يكفي."}
+        conn = NMCore.db(); cur = conn.cursor(); cur.execute(f"INSERT INTO {NM_V8_CASINO_WINDOW_TABLE} (guild_id,user_id,amount,created_at) VALUES (?,?,?,?)", (gid, uid, bet, nm_v8_now())); conn.commit(); conn.close()
+        outcome = "lose"; payout = 0; detail = ""
+        game_key = str(game).lower()
+        if game_key in {"luck", "حظ"}:
+            if random.random() < 0.48:
+                outcome, payout = "win", bet * 2
+            detail = "لعبة الحظ"
+        elif game_key in {"double", "دبل"}:
+            if random.random() < 0.45:
+                outcome, payout = "win", bet * 2
+            detail = "لعبة الدبل"
+        elif game_key in {"flip", "وجه"}:
+            if random.random() < 0.50:
+                outcome, payout = "win", bet * 2
+            detail = "عملة"
+        elif game_key in {"slot", "سلوت"}:
+            icons = ["🍒", "🍋", "💎", "7️⃣", "⭐"]
+            roll = [random.choice(icons) for _ in range(3)]
+            detail = " ".join(roll)
+            if len(set(roll)) == 1:
+                outcome, payout = "win", bet * 5
+            elif len(set(roll)) == 2:
+                outcome, payout = "win", bet * 2
+        elif game_key in {"blackjack", "bj", "بلاكجاك"}:
+            player = random.randint(16,22); dealer = random.randint(16,22); detail = f"أنت {player} | الديلر {dealer}"
+            if player > 21:
+                outcome, payout = "lose", 0
+            elif dealer > 21 or player > dealer:
+                outcome, payout = "win", bet * 2
+            elif player == dealer:
+                outcome, payout = "draw", bet
+            else:
+                outcome, payout = "lose", 0
+        if payout > 0:
+            NMCore.credit(gid, uid, payout, "casino_payout", user_name=user_name, actor_id=uid, actor_name=user_name, source_label=game, reason=f"Casino {outcome}: {game}", reference_id=debit_tx.get("tx_id"), channel_id=channel_id, message_id=message_id, metadata={"game": game, "outcome": outcome, "payout": payout})
+        balance = NMCore.get_balance(gid, uid)
+        return {"ok": True, "game": game, "bet": bet, "outcome": outcome, "payout": payout, "detail": detail, "balance": balance}
+
+    @staticmethod
+    def property_types():
+        try:
+            return PROPERTY_TYPES
+        except Exception:
+            return {
+                "room": {"emoji":"🏚️","name":"Small Room","count":20,"price":25000,"rent":1000,"max_level":5},
+                "apartment": {"emoji":"🏠","name":"Apartment","count":10,"price":100000,"rent":5000,"max_level":5},
+                "office": {"emoji":"🏢","name":"Office","count":5,"price":300000,"rent":18000,"max_level":5},
+                "tower": {"emoji":"🏙️","name":"Tower","count":2,"price":1000000,"rent":75000,"max_level":5},
+                "palace": {"emoji":"👑","name":"Royal Palace","count":1,"price":3500000,"rent":250000,"max_level":5},
+            }
+
+    @staticmethod
+    def seed_properties(guild_id):
+        gid = NMCore.gid(guild_id); NMCore.init(); conn = NMCore.db(); cur = conn.cursor(); now = nm_v8_now()
+        for key, info in NMCore.property_types().items():
+            count = nm_v8_int(info.get("count", 1), 1); price = nm_v8_int(info.get("price", 0), 0); rent = nm_v8_int(info.get("rent", 0), 0); name = str(info.get("name", key))
+            for unit in range(1, count + 1):
+                display = f"{name} #{unit}"
+                cur.execute("SELECT id FROM real_estate_properties WHERE guild_id=? AND type_key=? AND unit_number=?", (gid, key, unit))
+                if not cur.fetchone():
+                    cur.execute("""
+                        INSERT INTO real_estate_properties (guild_id,type_key,unit_number,display_name,owner_id,level,last_rent_claim,for_sale_price,created_at,price,rent)
+                        VALUES (?,?,?,?,0,1,0,0,?,?,?)
+                    """, (gid, key, unit, display, now, price, rent))
+        conn.commit(); conn.close()
+
+    @staticmethod
+    def property_log(guild_id, property_id, action, **kwargs):
+        try:
+            gid = NMCore.gid(guild_id); NMCore.init(); conn = NMCore.db(); cur = conn.cursor()
+            cur.execute(f"""
+                INSERT INTO {NM_V8_PROPERTY_LEDGER_TABLE}
+                (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (gid, nm_v8_int(property_id), str(action), nm_v8_int(kwargs.get("old_owner_id",0)), nm_v8_int(kwargs.get("new_owner_id",0)), nm_v8_int(kwargs.get("actor_id",0)), nm_v8_int(kwargs.get("amount",0)), nm_v8_int(kwargs.get("level_before",0)), nm_v8_int(kwargs.get("level_after",0)), nm_v8_int(kwargs.get("price_before",0)), nm_v8_int(kwargs.get("price_after",0)), str(kwargs.get("reason","") or "")[:500], str(kwargs.get("money_tx_id","") or "")[:120], nm_v8_now()))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+
+    @staticmethod
+    def properties(guild_id, only_available=False, owner_id=None, limit=200):
+        gid = NMCore.gid(guild_id); NMCore.seed_properties(gid); conn = NMCore.db(); cur = conn.cursor()
+        sql = "SELECT id,type_key,unit_number,display_name,owner_id,level,for_sale_price,price,rent,last_rent_claim FROM real_estate_properties WHERE guild_id=?"
+        params = [gid]
+        if only_available:
+            sql += " AND COALESCE(owner_id,0)=0"
+        if owner_id is not None:
+            sql += " AND owner_id=?"; params.append(nm_v8_int(owner_id))
+        sql += " ORDER BY COALESCE(owner_id,0), COALESCE(price,0), id LIMIT ?"; params.append(nm_v8_int(limit,200))
+        cur.execute(sql, params); rows = cur.fetchall(); conn.close(); return rows
+
+    @staticmethod
+    def buy_property(guild_id, user_id, property_id, user_name=""):
+        gid, uid, pid = NMCore.gid(guild_id), nm_v8_int(user_id), nm_v8_int(property_id)
+        NMCore.seed_properties(gid); conn = NMCore.db(); cur = conn.cursor(); cur.execute("SELECT * FROM real_estate_properties WHERE guild_id=? AND id=?", (gid, pid)); prop = cur.fetchone(); conn.close()
+        if not prop:
+            return {"ok": False, "error": "العقار غير موجود."}
+        if nm_v8_int(prop[4]) != 0:  # owner_id position in select * may differ; safer below unavailable with tuple
+            try:
+                owner_val = prop["owner_id"]
+            except Exception:
+                owner_val = prop[4]
+        else:
+            owner_val = 0
+        try:
+            owner_val = prop["owner_id"]
+            price = nm_v8_int(prop["for_sale_price"] or prop["price"] or 0)
+            name = prop["display_name"]
+            level = nm_v8_int(prop["level"] or 1)
+        except Exception:
+            owner_val = 0; price = 0; name = f"Property {pid}"; level = 1
+        if nm_v8_int(owner_val) != 0:
+            return {"ok": False, "error": "العقار مملوك بالفعل."}
+        if price <= 0:
+            return {"ok": False, "error": "سعر العقار غير مضبوط."}
+        tx = NMCore.debit(gid, uid, price, "real_estate_buy", user_name=user_name, actor_id=uid, actor_name=user_name, reference_type="property", reference_id=str(pid), reason=f"Buy property {name}")
+        if not tx.get("ok"):
+            return {"ok": False, "error": "رصيدك ما يكفي."}
+        conn = NMCore.db(); cur = conn.cursor(); cur.execute("UPDATE real_estate_properties SET owner_id=?, for_sale_price=0 WHERE guild_id=? AND id=?", (uid, gid, pid)); conn.commit(); conn.close()
+        NMCore.property_log(gid, pid, "buy", old_owner_id=0, new_owner_id=uid, actor_id=uid, amount=price, level_before=level, level_after=level, price_before=price, price_after=price, reason="Bought property", money_tx_id=tx.get("tx_id"))
+        NMCore.activity(gid, "real_estate", actor_id=uid, actor_name=user_name, target_id=uid, title="Property bought", details=f"{name} for {price}", amount=-price, reference_type="property", reference_id=str(pid))
+        return {"ok": True, "property": name, "price": price, "tx_id": tx.get("tx_id")}
+
+    @staticmethod
+    def collect_rent(guild_id, user_id, user_name=""):
+        gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id)
+        rows = NMCore.properties(gid, owner_id=uid)
+        if not rows:
+            return {"ok": False, "error": "ما عندك عقارات."}
+        total = 0; parsed=[]
+        for r in rows:
+            rent = nm_v8_int(r[8] if len(r)>8 else 0); level = nm_v8_int(r[5] if len(r)>5 else 1,1); pid=nm_v8_int(r[0]); total += rent * level; parsed.append((pid, rent*level, level))
+        if total <= 0:
+            return {"ok": False, "error": "ما فيه إيجار متاح."}
+        tx = NMCore.credit(gid, uid, total, "real_estate_rent", user_name=user_name, actor_id=uid, actor_name=user_name, reason=f"Collected rent from {len(rows)} properties")
+        for pid, amt, lvl in parsed:
+            NMCore.property_log(gid, pid, "rent", old_owner_id=uid, new_owner_id=uid, actor_id=uid, amount=amt, level_before=lvl, level_after=lvl, reason="Rent collected", money_tx_id=tx.get("tx_id"))
+        return {"ok": True, "amount": total, "count": len(rows), "tx_id": tx.get("tx_id")}
 
 
-def nm_v7_member_html(guild_id, user_id):
-    uid = nm_v7_int(user_id, 0)
-    if not nm_v7_valid_user_id(uid):
-        return f"<div class='membercard'><span class='memberavatar blank'>!</span><div class='membermeta'><b>Invalid old row</b><br><span class='muted small'>ID: <code>{uid}</code></span></div></div>"
-    member = nm_v7_member(guild_id, uid)
-    if not member:
-        return f"<div class='membercard'><span class='memberavatar blank'>?</span><div class='membermeta'><b>User {uid}</b><br><span class='muted small'>ID: <code>{uid}</code> • not in cache/server</span></div></div>"
+# Legacy wrappers redirect to NMCore. Anything old that still calls these lands in the unified system.
+def nm_coin_name(guild_id=None): return NMCore.coin(guild_id)
+def nm_get_coin_name(guild_id=None): return NMCore.coin(guild_id)
+def nm_v5_get_coin_name(guild_id=None): return NMCore.coin(guild_id)
+def nm_v5_set_coin_name(guild_id, coin_name): return NMCore.set_coin(guild_id, coin_name)
+def format_money(amount): return NMCore.money(amount, NMCore.gid())
+def coin_line(amount, bold=True):
+    value = nm_v8_int(amount, 0); txt = NMCore.money(value, NMCore.gid())
+    return f"🪙 **{txt}**" if bold else f"🪙 {txt}"
+
+def get_balance(user_id): return NMCore.get_balance(NMCore.gid(), user_id)
+def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id=""):
+    tx = NMCore.credit(NMCore.gid(), user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, metadata={"batch_id": batch_id}); return tx.get("after", NMCore.get_balance(NMCore.gid(), user_id))
+def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id=""):
+    tx = NMCore.debit(NMCore.gid(), user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, metadata={"batch_id": batch_id}); return (bool(tx.get("ok")), tx.get("after", NMCore.get_balance(NMCore.gid(), user_id)))
+def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id=""):
+    tx = NMCore.set_balance(NMCore.gid(), user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, metadata={"batch_id": batch_id}); return tx.get("after", NMCore.get_balance(NMCore.gid(), user_id))
+def get_top_money(limit=10): return NMCore.top_balances(NMCore.gid(), limit, live_members_only=True)
+def get_money_rank(user_id): return NMCore.rank(NMCore.gid(), user_id)
+def economy_status_text(user_id):
+    bal = NMCore.get_balance(NMCore.gid(), user_id); return bal, f"#{NMCore.rank(NMCore.gid(), user_id)}"
+
+def nm_v5_eco_get_balance(guild_id, user_id): return NMCore.get_balance(guild_id, user_id)
+def nm_v5_eco_set_balance(guild_id, user_id, new_balance): return NMCore.set_balance(guild_id, user_id, new_balance).get("after", 0)
+def nm_v5_eco_credit(guild_id, user_id, amount, **kwargs): return NMCore.credit(guild_id, user_id, amount, kwargs.get("source_type", "credit"))
+def nm_v5_eco_debit(guild_id, user_id, amount, **kwargs): return NMCore.debit(guild_id, user_id, amount, kwargs.get("source_type", "debit"))
+def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, **kwargs): return NMCore.transfer(guild_id, from_user_id, to_user_id, amount)
+def nm_v5_eco_game_result(guild_id, user_id, game, bet, outcome=None, multiplier=None, **kwargs): return NMCore.play_casino(guild_id, user_id, NMCore.member_name(guild_id, user_id), game, str(bet))
+
+def dashboard_member_name(user_id, guild_id=None): return NMCore.member_html(NMCore.gid(guild_id), user_id)
+def dashboard_member_identity_html(user_id, guild_id=None, include_id=True, include_roles=True, compact=False): return NMCore.member_html(NMCore.gid(guild_id), user_id)
+def dashboard_member_name_html(user_id, guild_id=None): return NMCore.member_html(NMCore.gid(guild_id), user_id)
+
+# Dashboard shell and pages.
+def nm_v8_escape(x): return html.escape(str(x or ""))
+
+def nm_v8_admin_denied():
     try:
-        avatar = html.escape(str(member.display_avatar.url))
-    except Exception:
-        avatar = ""
-    name = html.escape(str(getattr(member, "display_name", "") or getattr(member, "name", "") or uid))
-    username = html.escape(str(member))
-    roles_html = ""
-    try:
-        roles = [r for r in member.roles if getattr(r, "name", "@everyone") != "@everyone"]
-        roles = sorted(roles, key=lambda r: getattr(r, "position", 0), reverse=True)[:5]
-        roles_html = "".join(f"<span class='rolechip'>@{html.escape(str(r.name))}</span>" for r in roles)
-    except Exception:
-        pass
-    avatar_html = f"<img class='memberavatar' src='{avatar}'>" if avatar else "<span class='memberavatar blank'>?</span>"
-    return f"<div class='membercard'>{avatar_html}<div class='membermeta'><b>{name}</b><br><span class='muted small'>{username} • ID: <code>{uid}</code></span><div class='memberroles'>{roles_html}</div></div></div>"
-
-
-# Replace blocking dashboard member helpers. Old versions blocked the Discord heartbeat.
-def dashboard_member_identity_html(user_id, guild_id=0, include_id=True, include_roles=True, compact=False):
-    return nm_v7_member_html(nm_v7_gid(guild_id), user_id)
-
-
-def dashboard_member_name(user_id):
-    return nm_v7_member_html(nm_v7_gid(), user_id)
-
-
-def dashboard_member_name_in_guild(user_id, guild_id=0, include_id=True):
-    return nm_v7_member_html(nm_v7_gid(guild_id), user_id)
-
-
-def dashboard_get_member_in_guild_sync(guild_id, user_id, timeout=0.2):
-    return nm_v7_member(guild_id, user_id)
-
-
-def dashboard_get_member_sync(user_id):
-    try:
-        for guild in getattr(bot, "guilds", []) or []:
-            member = guild.get_member(int(user_id))
-            if member:
-                return member
+        if 'dashboard_require_admin' in globals():
+            return dashboard_require_admin()
     except Exception:
         pass
     return None
 
 
-def nm_v7_ensure_balance(guild_id, user_id):
-    nm_v7_init_db()
-    conn = nm_v7_db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly)
-        VALUES (?, ?, 0, 0, 0)
-    """, (nm_v7_int(guild_id), nm_v7_int(user_id)))
-    conn.commit()
-    conn.close()
+def nm_v8_shell(title, body, guild_id=None):
+    gid = NMCore.gid(guild_id)
+    coin = NMCore.coin(gid)
+    links = [
+        ("🏠 Overview", f"/dashboard?guild_id={gid}"),
+        ("💰 Economy", f"/dashboard/economy?guild_id={gid}"),
+        ("🧾 Money Tracker", f"/dashboard/money-tracker?guild_id={gid}"),
+        ("📊 Financial Audit", f"/dashboard/financial-audit-pro?guild_id={gid}"),
+        ("🎰 Casino Guard", f"/dashboard/casino-guard-status?guild_id={gid}"),
+        ("🧹 Economy Cleanup", f"/dashboard/economy-cleanup?guild_id={gid}"),
+        ("🏘️ Real Estate", f"/dashboard/real-estate-monitor?guild_id={gid}"),
+        ("🏠 Real Estate Audit", f"/dashboard/real-estate-audit-pro?guild_id={gid}"),
+        ("🛰️ Live Activity", f"/dashboard/live-activity?guild_id={gid}"),
+        ("🧬 V8 Status", f"/dashboard/v8-core-status?guild_id={gid}"),
+    ]
+    nav = "".join(f"<a href='{href}'>{label}</a>" for label, href in links)
+    return f"""
+    <html><head><meta charset='utf-8'><title>{nm_v8_escape(title)}</title>
+    <style>
+    body{{margin:0;background:#070b15;color:#e5e7eb;font-family:Inter,Arial,sans-serif}} .wrap{{display:flex;min-height:100vh}}
+    .side{{width:280px;background:#0f172a;padding:18px;box-sizing:border-box;border-right:1px solid #1f2937;position:sticky;top:0;height:100vh;overflow:auto}}
+    .brand{{font-size:22px;font-weight:900;margin-bottom:6px}} .muted{{color:#94a3b8}} .side a{{display:block;color:#cbd5e1;text-decoration:none;padding:12px;border-radius:12px;margin:6px 0}}
+    .side a:hover{{background:#1e293b;color:white}} .main{{flex:1;padding:28px;box-sizing:border-box}} .card{{background:#111827;border:1px solid #253044;border-radius:18px;padding:18px;margin-bottom:16px;box-shadow:0 10px 30px rgba(0,0,0,.18)}}
+    .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}} .stat{{font-size:28px;font-weight:900}} .ok{{color:#4ade80}} .bad{{color:#fb7185}} .warn{{color:#fbbf24}}
+    table{{width:100%;border-collapse:collapse}} th,td{{padding:10px;border-bottom:1px solid #243044;text-align:left;vertical-align:middle}} input,button,select{{background:#020617;color:white;border:1px solid #334155;border-radius:10px;padding:10px}}
+    button,.btn{{background:#7c3aed;color:white;border:0;border-radius:12px;padding:10px 13px;text-decoration:none;display:inline-block;cursor:pointer}} .danger{{background:#dc2626}} .member{{display:flex;gap:12px;align-items:center}} .member img{{width:44px;height:44px;border-radius:14px;background:#1e293b}} .pill{{display:inline-block;background:#1f2937;border:1px solid #334155;border-radius:999px;padding:2px 7px;font-size:12px;margin:1px}} code{{background:#020617;border:1px solid #1f2937;border-radius:7px;padding:2px 5px}}
+    </style></head><body><div class='wrap'><aside class='side'><div class='brand'>NM System V8</div><div class='muted'>Guild: {gid}<br>Coin: {nm_v8_escape(coin)}</div><hr style='border-color:#1f2937'>{nav}</aside><main class='main'><h1>{nm_v8_escape(title)}</h1>{body}</main></div></body></html>
+    """
 
 
-def nm_v7_get_balance(guild_id, user_id):
-    gid, uid = nm_v7_int(guild_id), nm_v7_int(user_id)
-    nm_v7_ensure_balance(gid, uid)
-    conn = nm_v7_db(); cur = conn.cursor()
-    cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-    row = cur.fetchone(); conn.close()
-    return int(row[0] or 0) if row else 0
-
-
-def nm_v7_ledger(guild_id, user_id, amount, source_type="system", **kwargs):
-    import uuid
-    gid, uid, amount = nm_v7_int(guild_id), nm_v7_int(user_id), nm_v7_int(amount)
-    if not gid or not uid:
-        return {"ok": False, "error": "missing_guild_or_user", "balance": 0}
-    nm_v7_init_db()
-    conn = nm_v7_db(); cur = conn.cursor()
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (gid, uid))
-        cur.execute("SELECT balance FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        before = int((cur.fetchone() or [0])[0] or 0)
-        after = before + amount
-        if after < 0:
-            conn.rollback(); conn.close()
-            return {"ok": False, "error": "insufficient_funds", "balance": before, "before": before, "after": before}
-        cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND user_id=?", (after, gid, uid))
-        tx_id = uuid.uuid4().hex
-        metadata = kwargs.get("metadata") or {}
-        try:
-            metadata_json = json.dumps(metadata, ensure_ascii=False)
-        except Exception:
-            metadata_json = "{}"
-        cur.execute(f"""
-            INSERT INTO {NM_V7_LEDGER_TABLE}
-            (tx_id, guild_id, user_id, user_name, actor_id, actor_name, amount, balance_before, balance_after,
-             source_type, source_label, reason, reference_type, reference_id, related_user_id, channel_id, message_id, metadata_json, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            tx_id, gid, uid, str(kwargs.get("user_name", "") or "")[:120],
-            nm_v7_int(kwargs.get("actor_id", 0)), str(kwargs.get("actor_name", "") or "")[:120],
-            amount, before, after, str(source_type or "system")[:80], str(kwargs.get("source_label", "") or "")[:120],
-            str(kwargs.get("reason", "") or "")[:600], str(kwargs.get("reference_type", "") or "")[:80],
-            str(kwargs.get("reference_id", "") or "")[:120], nm_v7_int(kwargs.get("related_user_id", 0)),
-            nm_v7_int(kwargs.get("channel_id", 0)), nm_v7_int(kwargs.get("message_id", 0)), metadata_json, nm_v7_now()
-        ))
-        conn.commit(); conn.close()
-        return {"ok": True, "tx_id": tx_id, "before": before, "after": after, "balance": after, "amount": amount}
-    except Exception as e:
-        try: conn.rollback(); conn.close()
-        except Exception: pass
-        return {"ok": False, "error": str(e), "balance": nm_v7_get_balance(gid, uid)}
-
-
-def nm_v7_credit(guild_id, user_id, amount, source_type="credit", **kwargs):
-    return nm_v7_ledger(guild_id, user_id, abs(nm_v7_int(amount)), source_type, **kwargs)
-
-
-def nm_v7_debit(guild_id, user_id, amount, source_type="debit", **kwargs):
-    return nm_v7_ledger(guild_id, user_id, -abs(nm_v7_int(amount)), source_type, **kwargs)
-
-
-def nm_v7_set_balance(guild_id, user_id, amount, source_type="set_balance", **kwargs):
-    current = nm_v7_get_balance(guild_id, user_id)
-    return nm_v7_ledger(guild_id, user_id, nm_v7_int(amount) - current, source_type, **kwargs)
-
-
-def nm_v7_transfer(guild_id, from_user_id, to_user_id, amount, **kwargs):
-    amount = abs(nm_v7_int(amount))
-    out = nm_v7_debit(guild_id, from_user_id, amount, "transfer_out", related_user_id=to_user_id, **kwargs)
-    if not out.get("ok"):
-        return out
-    inc = nm_v7_credit(guild_id, to_user_id, amount, "transfer_in", related_user_id=from_user_id, reference_id=out.get("tx_id", ""), **kwargs)
-    return {"ok": True, "out": out, "in": inc}
-
-
-def nm_v7_top_balances(guild_id, limit=10, members_only=True):
-    gid = nm_v7_int(guild_id); limit = max(1, min(nm_v7_int(limit, 10), 100))
-    conn = nm_v7_db(); cur = conn.cursor()
-    cur.execute("SELECT user_id, balance, last_daily FROM guild_economy WHERE guild_id=? AND user_id>=? ORDER BY balance DESC LIMIT 1000", (gid, NM_V7_SNOWFLAKE_MIN))
-    rows = cur.fetchall(); conn.close()
+def nm_v8_dashboard_economy():
+    denied = nm_v8_admin_denied()
+    if denied: return denied
+    gid = NMCore.gid(); NMCore.ensure_guild(gid); coin = NMCore.coin(gid)
+    rows = NMCore.top_balances(gid, 50, live_members_only=False)
+    good=[]; invalid=[]; not_in=[]
     guild = bot.get_guild(gid)
-    out = []
-    for uid, bal, last_daily in rows:
-        uid = int(uid); bal = int(bal or 0)
-        if members_only and guild and not guild.get_member(uid):
-            continue
-        out.append((uid, bal, int(last_daily or 0)))
-        if len(out) >= limit:
-            break
-    return out
+    for uid, bal in rows:
+        if not nm_v8_valid_user_id(uid): invalid.append((uid,bal)); continue
+        if guild and not NMCore.member(gid, uid): not_in.append((uid,bal)); continue
+        good.append((uid,bal))
+    table = "".join(f"<tr><td>#{i}</td><td>{NMCore.member_html(gid,uid)}</td><td><b>{bal:,}</b> {nm_v8_escape(coin)}</td><td><a class='btn' href='/dashboard/user-money-trace?guild_id={gid}&user_id={uid}'>Trace</a></td></tr>" for i,(uid,bal) in enumerate(good,1))
+    body = f"""
+    <div class='grid'><div class='card'><div class='muted'>Valid live users</div><div class='stat'>{len(good)}</div></div><div class='card'><div class='muted'>Invalid IDs hidden</div><div class='stat bad'>{len(invalid)}</div></div><div class='card'><div class='muted'>Not in server hidden</div><div class='stat warn'>{len(not_in)}</div></div></div>
+    <div class='card'><h2>Admin money action</h2><form method='post'><input type='hidden' name='guild_id' value='{gid}'><input name='user_id' placeholder='Discord User ID'><input name='amount' placeholder='Amount'><select name='action'><option value='give'>Give</option><option value='take'>Take</option><option value='set'>Set</option></select><input name='reason' placeholder='Reason'><button>Apply</button></form></div>
+    <div class='card'><h2>Live Economy Leaderboard</h2><table><tr><th>Rank</th><th>User</th><th>Balance</th><th>Trace</th></tr>{table}</table></div>
+    """
+    return nm_v8_shell("Economy", body, gid)
 
 
-# === compatibility names: all old systems point to V7, not legacy tables ===
-def get_balance(user_id):
-    return nm_v7_get_balance(nm_v7_gid(), user_id)
+def nm_v8_dashboard_economy_post():
+    denied = nm_v8_admin_denied()
+    if denied: return denied
+    gid = NMCore.gid(); uid=nm_v8_int(request.form.get('user_id')); amount=nm_v8_int(request.form.get('amount')); action=request.form.get('action'); reason=request.form.get('reason') or f"Dashboard {action}"
+    admin_id = nm_v8_int(session.get('discord_user_id') or session.get('user_id') or 0)
+    admin_name = str(session.get('discord_username') or session.get('username') or 'Dashboard')
+    if uid and amount >= 0:
+        if action == 'give': NMCore.credit(gid, uid, amount, 'dashboard_give', actor_id=admin_id, actor_name=admin_name, reason=reason)
+        elif action == 'take': NMCore.debit(gid, uid, amount, 'dashboard_take', actor_id=admin_id, actor_name=admin_name, reason=reason)
+        elif action == 'set': NMCore.set_balance(gid, uid, amount, 'dashboard_set', actor_id=admin_id, actor_name=admin_name, reason=reason)
+    return redirect(f"/dashboard/economy?guild_id={gid}")
 
 
-def add_money(user_id, amount, source_type="system_earned", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    gid = nm_v7_gid(guild_id)
-    res = nm_v7_credit(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
-    return int(res.get("balance", nm_v7_get_balance(gid, user_id)))
+def nm_v8_money_tracker():
+    denied = nm_v8_admin_denied()
+    if denied: return denied
+    gid = NMCore.gid(); uid_filter = request.args.get('user_id','').strip(); source = request.args.get('source','').strip()
+    q=f"SELECT tx_id,user_id,user_name,actor_id,actor_name,amount,balance_before,balance_after,source_type,source_label,reason,created_at FROM {NM_V8_LEDGER_TABLE} WHERE guild_id=?"; params=[gid]
+    if uid_filter.isdigit(): q += " AND user_id=?"; params.append(int(uid_filter))
+    if source: q += " AND source_type LIKE ?"; params.append(f"%{source}%")
+    q += " ORDER BY id DESC LIMIT 300"
+    conn=NMCore.db(); cur=conn.cursor(); cur.execute(q,params); rows=cur.fetchall(); conn.close()
+    trs="".join(f"<tr><td><code>{nm_v8_escape(r[0])[:12]}</code></td><td>{NMCore.member_html(gid,r[1])}</td><td>{NMCore.member_html(gid,r[3]) if nm_v8_int(r[3]) else '<span class=muted>System</span>'}</td><td class='{ 'ok' if nm_v8_int(r[5])>0 else 'bad' }'>{nm_v8_int(r[5]):,}</td><td>{nm_v8_int(r[6]):,}</td><td>{nm_v8_int(r[7]):,}</td><td>{nm_v8_escape(r[8])}</td><td>{nm_v8_escape(r[10])}</td><td>{r[11]}</td></tr>" for r in rows)
+    body=f"""
+    <div class='card'><form><input type='hidden' name='guild_id' value='{gid}'><input name='user_id' placeholder='User ID' value='{nm_v8_escape(uid_filter)}'><input name='source' placeholder='Source filter' value='{nm_v8_escape(source)}'><button>Filter</button></form></div>
+    <div class='card'><table><tr><th>TX</th><th>User</th><th>Actor</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th><th>Time</th></tr>{trs}</table></div>
+    """
+    return nm_v8_shell("Money Tracker", body, gid)
 
 
-def remove_money(user_id, amount, source_type="system_spend", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    gid = nm_v7_gid(guild_id)
-    res = nm_v7_debit(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
-    return bool(res.get("ok")), int(res.get("balance", nm_v7_get_balance(gid, user_id)))
+def nm_v8_user_money_trace():
+    gid = NMCore.gid(); uid=nm_v8_int(request.args.get('user_id'))
+    if not uid: return nm_v8_shell("User Money Trace", "<div class='card bad'>Missing user_id</div>", gid)
+    request.args = request.args.copy() if hasattr(request.args, 'copy') else request.args
+    # Use its own query instead of mutating args.
+    conn=NMCore.db(); cur=conn.cursor(); cur.execute(f"SELECT tx_id,amount,balance_before,balance_after,source_type,reason,created_at FROM {NM_V8_LEDGER_TABLE} WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 300", (gid,uid)); rows=cur.fetchall(); conn.close()
+    trs="".join(f"<tr><td><code>{nm_v8_escape(r[0])[:12]}</code></td><td class='{ 'ok' if nm_v8_int(r[1])>0 else 'bad' }'>{nm_v8_int(r[1]):,}</td><td>{nm_v8_int(r[2]):,}</td><td>{nm_v8_int(r[3]):,}</td><td>{nm_v8_escape(r[4])}</td><td>{nm_v8_escape(r[5])}</td><td>{r[6]}</td></tr>" for r in rows)
+    body=f"<div class='card'>{NMCore.member_html(gid,uid)}<h2>Balance: {NMCore.money(NMCore.get_balance(gid,uid),gid)}</h2></div><div class='card'><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th><th>Time</th></tr>{trs}</table></div>"
+    return nm_v8_shell("User Money Trace", body, gid)
 
 
-def set_balance(user_id, amount, source_type="dashboard_set", admin_id=0, admin_name="", details="", batch_id="", guild_id=None):
-    gid = nm_v7_gid(guild_id)
-    res = nm_v7_set_balance(gid, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id)
-    return int(res.get("balance", nm_v7_get_balance(gid, user_id)))
+def nm_v8_financial_audit():
+    denied = nm_v8_admin_denied()
+    if denied: return denied
+    gid=NMCore.gid(); conn=NMCore.db(); cur=conn.cursor()
+    cur.execute(f"SELECT COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0), COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) FROM {NM_V8_LEDGER_TABLE} WHERE guild_id=?", (gid,)); created,removed=cur.fetchone()
+    cur.execute(f"SELECT source_type, COUNT(*), COALESCE(SUM(amount),0) FROM {NM_V8_LEDGER_TABLE} WHERE guild_id=? GROUP BY source_type ORDER BY ABS(SUM(amount)) DESC", (gid,)); sources=cur.fetchall()
+    cur.execute("SELECT user_id,balance FROM guild_economy WHERE guild_id=? AND balance>? ORDER BY balance DESC LIMIT 50", (gid,NM_V8_BALANCE_WARN)); suspicious=cur.fetchall(); conn.close()
+    src_rows="".join(f"<tr><td>{nm_v8_escape(s[0])}</td><td>{s[1]}</td><td>{nm_v8_int(s[2]):,}</td></tr>" for s in sources)
+    sus_rows="".join(f"<tr><td>{NMCore.member_html(gid,r[0])}</td><td>{nm_v8_int(r[1]):,}</td></tr>" for r in suspicious)
+    body=f"""
+    <div class='grid'><div class='card'><div class='muted'>Created</div><div class='stat ok'>{nm_v8_int(created):,}</div></div><div class='card'><div class='muted'>Removed</div><div class='stat bad'>{nm_v8_int(removed):,}</div></div><div class='card'><div class='muted'>Net</div><div class='stat'>{nm_v8_int(created)-nm_v8_int(removed):,}</div></div></div>
+    <div class='card'><h2>By Source</h2><table><tr><th>Source</th><th>Count</th><th>Net</th></tr>{src_rows}</table></div>
+    <div class='card'><h2>Suspicious Huge Balances</h2><table><tr><th>User</th><th>Balance</th></tr>{sus_rows}</table></div>
+    """
+    return nm_v8_shell("Financial Audit", body, gid)
 
 
-def get_top_money(limit=10):
-    return [(uid, bal) for uid, bal, _ in nm_v7_top_balances(nm_v7_gid(), limit, members_only=True)]
+def nm_v8_casino_guard():
+    gid=NMCore.gid(); body=f"""
+    <div class='card ok'><h2>Casino controlled by NMCore</h2><p>Debit-first is active. If player bets all and loses, balance becomes 0.</p></div>
+    <div class='grid'><div class='card'><div class='muted'>Max Bet</div><div class='stat'>{NM_V8_DEFAULT_MAX_BET:,}</div></div><div class='card'><div class='muted'>Max % Balance</div><div class='stat'>{NM_V8_MAX_BET_PERCENT}%</div></div><div class='card'><div class='muted'>Window Max</div><div class='stat'>{NM_V8_WINDOW_TOTAL:,}</div></div></div>
+    """
+    return nm_v8_shell("Casino Guard", body, gid)
 
 
-def get_money_rank(user_id):
-    gid = nm_v7_gid(); bal = nm_v7_get_balance(gid, user_id)
-    conn = nm_v7_db(); cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) + 1 FROM guild_economy WHERE guild_id=? AND user_id>=? AND balance>?", (gid, NM_V7_SNOWFLAKE_MIN, bal))
-    rank = int((cur.fetchone() or [1])[0] or 1); conn.close(); return rank
+def nm_v8_cleanup():
+    denied = nm_v8_admin_denied()
+    if denied: return denied
+    gid=NMCore.gid(); msg=""
+    if request.method == 'POST':
+        action=request.form.get('action'); cap=nm_v8_int(request.form.get('cap'),0)
+        conn=NMCore.db(); cur=conn.cursor()
+        if action == 'delete_invalid':
+            cur.execute("DELETE FROM guild_economy WHERE guild_id=? AND user_id<?", (gid,NM_V8_SNOWFLAKE_MIN)); msg=f"Deleted invalid IDs: {cur.rowcount}"
+        elif action == 'cap' and cap>0:
+            cur.execute("SELECT user_id,balance FROM guild_economy WHERE guild_id=? AND balance>?", (gid,cap)); rows=cur.fetchall()
+            conn.commit(); conn.close()
+            for uid, old in rows:
+                if nm_v8_valid_user_id(uid): NMCore.set_balance(gid, uid, cap, 'cleanup_cap', reason=f'Cap huge balance from {old} to {cap}')
+            msg=f"Capped {len(rows)} users to {cap:,}"
+            conn=NMCore.db(); cur=conn.cursor()
+        elif action == 'zero_not_in_server':
+            guild=bot.get_guild(gid); rows=[]
+            if guild:
+                cur.execute("SELECT user_id,balance FROM guild_economy WHERE guild_id=? AND balance>0", (gid,)); rows=cur.fetchall()
+                conn.commit(); conn.close(); count=0
+                for uid, bal in rows:
+                    if nm_v8_valid_user_id(uid) and not guild.get_member(uid):
+                        NMCore.set_balance(gid, uid, 0, 'cleanup_zero_not_in_server', reason='User not in server'); count+=1
+                msg=f"Zeroed not-in-server users: {count}"
+                conn=NMCore.db(); cur=conn.cursor()
+        conn.commit(); conn.close()
+    body=f"""
+    <div class='card {'ok' if msg else ''}'><b>{nm_v8_escape(msg)}</b></div>
+    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><input type='hidden' name='action' value='delete_invalid'><button class='danger'>Delete invalid fake IDs</button></form></div>
+    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><input type='hidden' name='action' value='cap'><input name='cap' placeholder='Example 50000000'><button>Cap huge balances</button></form></div>
+    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><input type='hidden' name='action' value='zero_not_in_server'><button class='danger'>Zero users not in server</button></form></div>
+    """
+    return nm_v8_shell("Economy Cleanup", body, gid)
 
 
-def economy_status_text(user_id):
-    balance = nm_v7_get_balance(nm_v7_gid(), user_id)
-    return balance, f"#{get_money_rank(user_id)}"
+def nm_v8_live_activity():
+    gid=NMCore.gid(); conn=NMCore.db(); cur=conn.cursor(); cur.execute(f"SELECT actor_id,actor_name,event_type,target_id,channel_id,title,details,amount,reference_type,reference_id,created_at FROM {NM_V8_ACTIVITY_TABLE} WHERE guild_id=? ORDER BY id DESC LIMIT 250", (gid,)); rows=cur.fetchall(); conn.close()
+    trs="".join(f"<tr><td>{NMCore.member_html(gid,r[0]) if nm_v8_int(r[0]) else '<span class=muted>System</span>'}</td><td>{nm_v8_escape(r[2])}</td><td>{NMCore.member_html(gid,r[3]) if nm_v8_int(r[3]) else '-'}</td><td>{nm_v8_escape(r[5])}</td><td>{nm_v8_escape(r[6])}</td><td>{nm_v8_int(r[7]):,}</td><td>{r[10]}</td></tr>" for r in rows)
+    return nm_v8_shell("Live Activity", f"<div class='card'><table><tr><th>Actor</th><th>Event</th><th>Target</th><th>Title</th><th>Details</th><th>Amount</th><th>Time</th></tr>{trs}</table></div>", gid)
 
 
-def v3_get_balance(guild_id, user_id): return nm_v7_get_balance(guild_id, user_id)
-def v3_add_money(guild_id, user_id, amount, source_type="v3", admin_id=0, admin_name="", details="", batch_id=""): return int(nm_v7_credit(guild_id, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id).get("balance",0))
-def v3_remove_money(guild_id, user_id, amount, source_type="v3", admin_id=0, admin_name="", details="", batch_id=""): 
-    r=nm_v7_debit(guild_id, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id); return bool(r.get("ok")), int(r.get("balance",0))
-def v3_set_balance(guild_id, user_id, amount, source_type="v3_set", admin_id=0, admin_name="", details="", batch_id=""): return int(nm_v7_set_balance(guild_id, user_id, amount, source_type, actor_id=admin_id, actor_name=admin_name, reason=details, reference_id=batch_id).get("balance",0))
-def v3_get_top_money(guild_id, limit=10): return [(uid, bal) for uid, bal, _ in nm_v7_top_balances(guild_id, limit, members_only=True)]
-
-def nm_v5_eco_get_balance(guild_id, user_id): return nm_v7_get_balance(guild_id, user_id)
-def nm_v5_eco_set_balance(guild_id, user_id, new_balance, source_type="v5_set", reason="", **kwargs): return nm_v7_set_balance(guild_id, user_id, new_balance, source_type, reason=reason, **kwargs)
-def nm_v5_eco_change_balance(guild_id, user_id, amount, source_type="v5_change", reason="", **kwargs): return nm_v7_ledger(guild_id, user_id, amount, source_type, reason=reason, **kwargs)
-def nm_v5_eco_credit(guild_id, user_id, amount, source_type="v5_credit", reason="", **kwargs): return nm_v7_credit(guild_id, user_id, amount, source_type, reason=reason, **kwargs)
-def nm_v5_eco_debit(guild_id, user_id, amount, source_type="v5_debit", reason="", **kwargs): return nm_v7_debit(guild_id, user_id, amount, source_type, reason=reason, **kwargs)
-def nm_v5_eco_transfer(guild_id, from_user_id, to_user_id, amount, **kwargs): return nm_v7_transfer(guild_id, from_user_id, to_user_id, amount, **kwargs)
+def nm_v8_real_estate():
+    gid=NMCore.gid(); rows=NMCore.properties(gid, limit=300)
+    trs="".join(f"<tr><td>{r[0]}</td><td>{nm_v8_escape(r[3])}</td><td>{NMCore.member_html(gid,r[4]) if nm_v8_int(r[4]) else '<span class=muted>Available</span>'}</td><td>{nm_v8_int(r[7]):,}</td><td>{nm_v8_int(r[8]):,}</td><td>{r[5]}</td></tr>" for r in rows)
+    return nm_v8_shell("Real Estate Monitor", f"<div class='card'><table><tr><th>ID</th><th>Property</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", gid)
 
 
-async def nm_handle_legacy_bang(message):
-    # Old manual ! command bridge is disabled. commands.Bot now handles text commands once.
-    return False
+def nm_v8_real_estate_audit():
+    gid=NMCore.gid(); conn=NMCore.db(); cur=conn.cursor(); cur.execute(f"SELECT property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,reason,money_tx_id,created_at FROM {NM_V8_PROPERTY_LEDGER_TABLE} WHERE guild_id=? ORDER BY id DESC LIMIT 250", (gid,)); rows=cur.fetchall(); conn.close()
+    trs="".join(f"<tr><td>{r[0]}</td><td>{nm_v8_escape(r[1])}</td><td>{NMCore.member_html(gid,r[2]) if nm_v8_int(r[2]) else '-'}</td><td>{NMCore.member_html(gid,r[3]) if nm_v8_int(r[3]) else '-'}</td><td>{NMCore.member_html(gid,r[4]) if nm_v8_int(r[4]) else '-'}</td><td>{nm_v8_int(r[5]):,}</td><td>{r[6]}→{r[7]}</td><td>{nm_v8_escape(r[8])}</td><td><code>{nm_v8_escape(r[9])[:12]}</code></td><td>{r[10]}</td></tr>" for r in rows)
+    return nm_v8_shell("Real Estate Audit", f"<div class='card'><table><tr><th>Property</th><th>Action</th><th>Old Owner</th><th>New Owner</th><th>Actor</th><th>Amount</th><th>Level</th><th>Reason</th><th>Money TX</th><th>Time</th></tr>{trs}</table></div>", gid)
 
 
-def nm_v7_parse_bet(raw, guild_id=0, user_id=0):
-    text = str(raw or "").lower().replace(",", "").strip()
-    if text in ("all", "الكل", "فل"):
-        bal = nm_v7_get_balance(guild_id, user_id)
-        return min(bal, max(1, min(NM_V7_DEFAULT_MAX_BET, bal * NM_V7_MAX_BET_PERCENT // 100)))
-    mult = 1
-    if text.endswith("k"):
-        mult, text = 1000, text[:-1]
-    elif text.endswith("m"):
-        mult, text = 1000000, text[:-1]
+def nm_v8_status():
+    gid=NMCore.gid(); conn=NMCore.db(); cur=conn.cursor()
+    checks=[]
+    for table in ['guild_economy', NM_V8_LEDGER_TABLE, NM_V8_ACTIVITY_TABLE, NM_V8_PROPERTY_LEDGER_TABLE, 'real_estate_properties']:
+        try:
+            cur.execute("SELECT COUNT(*) FROM " + table); checks.append((table, cur.fetchone()[0], True))
+        except Exception as e:
+            checks.append((table, str(e), False))
+    conn.close()
+    rows="".join(f"<tr><td>{nm_v8_escape(t)}</td><td class='{ 'ok' if ok else 'bad' }'>{'OK' if ok else 'BAD'}</td><td>{nm_v8_escape(c)}</td></tr>" for t,c,ok in checks)
+    body=f"<div class='card ok'><h2>{NM_V8_VERSION}</h2><p>One active core: money, casino, real estate, dashboard, live activity.</p></div><div class='card'><table><tr><th>Table</th><th>Status</th><th>Rows / Error</th></tr>{rows}</table></div>"
+    return nm_v8_shell("V8 Core Status", body, gid)
+
+
+def nm_v8_bind_route(path, view_func, methods=("GET",)):
+    replaced=False
     try:
-        return int(float(text) * mult)
-    except Exception:
-        return 0
+        for rule in list(app.url_map.iter_rules()):
+            if str(rule.rule)==path:
+                app.view_functions[rule.endpoint]=view_func; replaced=True
+    except Exception: pass
+    if not replaced:
+        try: app.add_url_rule(path, endpoint=f"v8_{view_func.__name__}_{abs(hash(path))}", view_func=view_func, methods=list(methods))
+        except Exception as e:
+            try: print(f"NM V8 route bind failed {path}: {e}")
+            except Exception: pass
 
 
-def nm_v7_casino_window_total(guild_id, user_id):
-    now = nm_v7_now(); cutoff = now - NM_V7_WINDOW_SECONDS
-    conn = nm_v7_db(); cur = conn.cursor()
-    cur.execute(f"DELETE FROM {NM_V7_CASINO_WINDOW_TABLE} WHERE created_at < ?", (cutoff,))
-    cur.execute(f"SELECT COALESCE(SUM(amount),0) FROM {NM_V7_CASINO_WINDOW_TABLE} WHERE guild_id=? AND user_id=?", (nm_v7_int(guild_id), nm_v7_int(user_id)))
-    total = int((cur.fetchone() or [0])[0] or 0)
-    conn.commit(); conn.close(); return total
+def nm_v8_install_dashboard():
+    nm_v8_bind_route('/dashboard/economy', nm_v8_dashboard_economy, ('GET',))
+    nm_v8_bind_route('/dashboard/economy', nm_v8_dashboard_economy_post, ('POST',))
+    nm_v8_bind_route('/dashboard/money-tracker', nm_v8_money_tracker, ('GET',))
+    nm_v8_bind_route('/dashboard/user-money-trace', nm_v8_user_money_trace, ('GET',))
+    nm_v8_bind_route('/dashboard/financial-audit-pro', nm_v8_financial_audit, ('GET',))
+    nm_v8_bind_route('/dashboard/money-audit', nm_v8_financial_audit, ('GET',))
+    nm_v8_bind_route('/dashboard/casino-guard-status', nm_v8_casino_guard, ('GET',))
+    nm_v8_bind_route('/dashboard/economy-cleanup', nm_v8_cleanup, ('GET','POST'))
+    nm_v8_bind_route('/dashboard/live-activity', nm_v8_live_activity, ('GET',))
+    nm_v8_bind_route('/dashboard/real-estate-monitor', nm_v8_real_estate, ('GET',))
+    nm_v8_bind_route('/dashboard/real-estate-audit-pro', nm_v8_real_estate_audit, ('GET',))
+    nm_v8_bind_route('/dashboard/v8-core-status', nm_v8_status, ('GET',))
+    nm_v8_bind_route('/dashboard/v7-sync-status', nm_v8_status, ('GET',))
 
 
-def nm_v7_casino_validate(guild_id, user_id, bet):
-    bet = nm_v7_int(bet, 0)
-    balance = nm_v7_get_balance(guild_id, user_id)
-    if bet <= 0:
-        return False, "اكتب مبلغ صحيح. مثال: `!حظ 100`"
-    if balance < bet:
-        return False, f"❌ رصيدك ما يكفي. رصيدك: **{nm_v7_money(balance, guild_id)}**"
-    allowed = min(NM_V7_DEFAULT_MAX_BET, max(1, balance * NM_V7_MAX_BET_PERCENT // 100))
-    if bet > allowed:
-        return False, f"🛑 الرهان كبير جدًا. أقصى رهان لك الآن: **{nm_v7_money(allowed, guild_id)}**"
-    used = nm_v7_casino_window_total(guild_id, user_id)
-    if used + bet > NM_V7_WINDOW_TOTAL:
-        return False, f"🛑 وصلت حد القمار خلال {NM_V7_WINDOW_SECONDS//60} دقائق. المتبقي: **{nm_v7_money(max(0, NM_V7_WINDOW_TOTAL-used), guild_id)}**"
-    return True, ""
-
-
-def nm_v7_casino_record_window(guild_id, user_id, bet):
-    conn = nm_v7_db(); cur = conn.cursor()
-    cur.execute(f"INSERT INTO {NM_V7_CASINO_WINDOW_TABLE} (guild_id, user_id, amount, created_at) VALUES (?, ?, ?, ?)", (nm_v7_int(guild_id), nm_v7_int(user_id), nm_v7_int(bet), nm_v7_now()))
-    conn.commit(); conn.close()
-
-
-def nm_v7_casino_play(guild_id, user_id, user_name, game, bet, channel_id=0, message_id=0):
-    gid, uid = nm_v7_int(guild_id), nm_v7_int(user_id)
-    bet = nm_v7_parse_bet(bet, gid, uid)
-    ok, err = nm_v7_casino_validate(gid, uid, bet)
-    if not ok:
-        return {"ok": False, "error": err}
-    debit = nm_v7_debit(gid, uid, bet, "casino_bet", user_name=user_name, source_label=game, reason=f"Casino bet: {game}", channel_id=channel_id, message_id=message_id, metadata={"game": game, "bet": bet})
-    if not debit.get("ok"):
-        return {"ok": False, "error": "❌ رصيدك ما يكفي."}
-    nm_v7_casino_record_window(gid, uid, bet)
-    import random as _r
-    outcome, payout, detail = "lose", 0, ""
-    g = str(game).lower()
-    if g in ("luck", "حظ"):
-        win = _r.random() < 0.48; outcome = "win" if win else "lose"; payout = bet * 2 if win else 0; detail = "حظك فاز" if win else "حظك خسر"
-    elif g in ("double", "دبل"):
-        win = _r.random() < 0.45; outcome = "win" if win else "lose"; payout = bet * 2 if win else 0; detail = "الدبل نجح" if win else "الدبل خسر"
-    elif g in ("flip", "وجه"):
-        win = _r.random() < 0.50; outcome = "win" if win else "lose"; payout = bet * 2 if win else 0; detail = "الوجه معك" if win else "الوجه ضدك"
-    elif g in ("slot", "سلوت"):
-        icons = ["🍒", "🍋", "💎", "7️⃣", "⭐"]
-        roll = [_r.choice(icons) for _ in range(3)]; detail = " | ".join(roll)
-        if len(set(roll)) == 1: outcome, payout = "win", bet * 5
-        elif len(set(roll)) == 2: outcome, payout = "win", bet * 2
-    elif g in ("blackjack", "bj", "بلاكجاك"):
-        player, dealer = _r.randint(16, 22), _r.randint(16, 22)
-        detail = f"يدك: {player} | الديلر: {dealer}"
-        if player > 21: outcome, payout = "lose", 0
-        elif dealer > 21 or player > dealer: outcome, payout = "win", bet * 2
-        elif player == dealer: outcome, payout = "draw", bet
-        else: outcome, payout = "lose", 0
-    if payout:
-        nm_v7_credit(gid, uid, payout, "casino_payout", user_name=user_name, source_label=game, reason=f"Casino {outcome}: {game}", reference_id=debit.get("tx_id", ""), channel_id=channel_id, message_id=message_id, metadata={"game": game, "outcome": outcome, "payout": payout})
-    return {"ok": True, "game": game, "bet": bet, "outcome": outcome, "payout": payout, "detail": detail, "balance": nm_v7_get_balance(gid, uid)}
-
-
-async def nm_v7_send_casino_result(ctx, game, amount):
-    gid = int(ctx.guild.id); uid = int(ctx.author.id)
-    res = nm_v7_casino_play(gid, uid, ctx.author.display_name, game, amount, getattr(ctx.channel, "id", 0), getattr(ctx.message, "id", 0))
-    if not res.get("ok"):
-        return await ctx.reply(res.get("error", "❌ خطأ"))
-    title = "🎉 ربحت" if res["outcome"] == "win" else "🤝 تعادل" if res["outcome"] == "draw" else "💀 خسرت"
-    await ctx.reply(f"{title} **{nm_v7_money(res['bet'], gid)}**\n{res['detail']}\nرصيدك: **{nm_v7_money(res['balance'], gid)}**")
-
-
-def nm_v7_remove_text_commands():
-    for name in ["حظ", "luck", "دبل", "double", "سلوت", "slot", "وجه", "flip", "بلاكجاك", "blackjack", "bj", "رصيدي", "رصيد", "balance", "راتب", "salary", "daily", "الغني", "اغنى", "rich", "topmoney", "تحويل", "transfer"]:
+def nm_v8_remove_prefix_command(*names):
+    for name in names:
         try: bot.remove_command(name)
         except Exception: pass
 
 
-def nm_v7_install_text_commands():
-    nm_v7_remove_text_commands()
+def nm_v8_install_commands():
+    # Remove old conflicting commands first. Other bot features remain untouched.
+    nm_v8_remove_prefix_command('رصيدي','رصيد','balance','راتب','salary','daily','تحويل','transfer','الغني','اغنى','topmoney','rich','حظ','luck','دبل','double','سلوت','slot','وجه','flip','بلاكجاك','bj','blackjack','عقارات','شراء_عقار','ايجار')
 
-    async def wallet(ctx, member: discord.Member=None):
+    @bot.command(name='رصيدي', aliases=['رصيد','balance'])
+    async def v8_balance_cmd(ctx, member: discord.Member=None):
         if not ctx.guild: return
-        member = member or ctx.author
-        bal = nm_v7_get_balance(ctx.guild.id, member.id)
-        await ctx.reply(f"💰 رصيد {member.mention}: **{nm_v7_money(bal, ctx.guild.id)}**")
+        member = member or ctx.author; gid=ctx.guild.id; NMCore.ensure_guild(gid, ctx.guild.name)
+        bal=NMCore.get_balance(gid, member.id); rank=NMCore.rank(gid, member.id)
+        NMCore.activity(gid, 'command', actor_id=ctx.author.id, actor_name=ctx.author.display_name, target_id=member.id, channel_id=ctx.channel.id, message_id=ctx.message.id, title='رصيدي', details=f'Viewed balance of {member.id}')
+        await ctx.reply(f"💰 رصيد {member.mention}: **{bal:,}** {NMCore.coin(gid)}\n🏆 ترتيبك: **#{rank}**")
 
-    async def salary(ctx):
+    @bot.command(name='راتب', aliases=['salary','daily'])
+    async def v8_salary_cmd(ctx):
         if not ctx.guild: return
-        gid, uid = ctx.guild.id, ctx.author.id
-        nm_v7_ensure_balance(gid, uid)
-        conn = nm_v7_db(); cur = conn.cursor(); now = nm_v7_now()
-        cur.execute("SELECT balance,last_daily FROM guild_economy WHERE guild_id=? AND user_id=?", (gid, uid))
-        row = cur.fetchone(); last = int((row or [0,0])[1] or 0)
-        if now - last < HOURLY_REWARD_COOLDOWN_SECONDS:
-            conn.close(); return await ctx.reply(f"⏳ باقي **{max(1, (HOURLY_REWARD_COOLDOWN_SECONDS-(now-last))//60)} دقيقة** على الراتب.")
-        reward = int(DAILY_REWARD_BASE)
-        res = nm_v7_credit(gid, uid, reward, "salary", user_name=ctx.author.display_name, reason="Hourly salary", channel_id=ctx.channel.id, message_id=ctx.message.id)
-        cur.execute("UPDATE guild_economy SET last_daily=? WHERE guild_id=? AND user_id=?", (now, gid, uid)); conn.commit(); conn.close()
-        await ctx.reply(f"✅ استلمت راتبك: **{nm_v7_money(reward, gid)}**\nرصيدك: **{nm_v7_money(res.get('balance',0), gid)}**")
+        gid=ctx.guild.id; uid=ctx.author.id; NMCore.ensure_guild(gid, ctx.guild.name)
+        NMCore.ensure_balance(gid, uid); conn=NMCore.db(); cur=conn.cursor(); cur.execute('SELECT last_daily FROM guild_economy WHERE guild_id=? AND user_id=?', (gid,uid)); row=cur.fetchone(); last=nm_v8_int(row[0] if row else 0); now=nm_v8_now()
+        if now-last < NM_V8_SALARY_COOLDOWN:
+            conn.close(); remain=NM_V8_SALARY_COOLDOWN-(now-last); await ctx.reply(f"⏳ باقي {remain//60} دقيقة على الراتب."); return
+        tx=NMCore.credit(gid, uid, NM_V8_DAILY_REWARD, 'salary', user_name=ctx.author.display_name, actor_id=uid, actor_name=ctx.author.display_name, channel_id=ctx.channel.id, message_id=ctx.message.id, reason='Salary claim')
+        cur.execute('UPDATE guild_economy SET last_daily=? WHERE guild_id=? AND user_id=?', (now,gid,uid)); conn.commit(); conn.close()
+        await ctx.reply(f"✅ استلمت راتبك: **{NM_V8_DAILY_REWARD:,}** {NMCore.coin(gid)}\nرصيدك: **{tx.get('after',0):,}** {NMCore.coin(gid)}")
 
-    async def top(ctx):
+    @bot.command(name='تحويل', aliases=['transfer'])
+    async def v8_transfer_cmd(ctx, member: discord.Member, amount: int):
         if not ctx.guild: return
-        rows = nm_v7_top_balances(ctx.guild.id, 10, members_only=True)
-        if not rows: return await ctx.reply("ما فيه بيانات اقتصاد للحين.")
-        lines = [f"**#{i}** <@{uid}> — **{nm_v7_money(bal, ctx.guild.id)}**" for i,(uid,bal,_) in enumerate(rows,1)]
-        await ctx.reply("🏆 **أغنى اللاعبين**\n" + "\n".join(lines))
+        res=NMCore.transfer(ctx.guild.id, ctx.author.id, member.id, amount, actor_name=ctx.author.display_name, channel_id=ctx.channel.id, message_id=ctx.message.id)
+        if not res.get('ok'):
+            await ctx.reply('❌ رصيدك ما يكفي أو المبلغ غير صحيح.'); return
+        await ctx.reply(f"✅ حولت **{amount:,}** {NMCore.coin(ctx.guild.id)} إلى {member.mention}")
 
-    async def transfer_cmd(ctx, member: discord.Member, amount: int):
+    @bot.command(name='الغني', aliases=['اغنى','topmoney','rich'])
+    async def v8_rich_cmd(ctx):
         if not ctx.guild: return
-        res = nm_v7_transfer(ctx.guild.id, ctx.author.id, member.id, amount, user_name=ctx.author.display_name, actor_id=ctx.author.id, actor_name=ctx.author.display_name, channel_id=ctx.channel.id, message_id=ctx.message.id, reason=f"Transfer to {member.id}")
-        if not res.get("ok"): return await ctx.reply("❌ رصيدك ما يكفي.")
-        await ctx.reply(f"✅ حولت **{nm_v7_money(amount, ctx.guild.id)}** إلى {member.mention}")
+        rows=NMCore.top_balances(ctx.guild.id, 10, live_members_only=True)
+        if not rows:
+            await ctx.reply('ما فيه بيانات اقتصاد للحين.'); return
+        lines=[f"**#{i}** <@{uid}> — **{bal:,}** {NMCore.coin(ctx.guild.id)}" for i,(uid,bal) in enumerate(rows,1)]
+        await ctx.reply('🏆 **أغنى اللاعبين**\n'+'\n'.join(lines))
 
-    async def luck(ctx, amount: str): await nm_v7_send_casino_result(ctx, "luck", amount)
-    async def double(ctx, amount: str): await nm_v7_send_casino_result(ctx, "double", amount)
-    async def slot(ctx, amount: str): await nm_v7_send_casino_result(ctx, "slot", amount)
-    async def flip(ctx, amount: str): await nm_v7_send_casino_result(ctx, "flip", amount)
-    async def blackjack(ctx, amount: str): await nm_v7_send_casino_result(ctx, "blackjack", amount)
+    async def casino_reply(ctx, game, amount):
+        if not ctx.guild: return
+        res=NMCore.play_casino(ctx.guild.id, ctx.author.id, ctx.author.display_name, game, amount, channel_id=ctx.channel.id, message_id=ctx.message.id)
+        if not res.get('ok'):
+            await ctx.reply(f"❌ {res.get('error','خطأ')}"); return
+        if res['outcome']=='win': icon='🎉 ربحت'
+        elif res['outcome']=='draw': icon='🤝 تعادل'
+        else: icon='💀 خسرت'
+        await ctx.reply(f"{icon} **{res['bet']:,}** {NMCore.coin(ctx.guild.id)}\n{res.get('detail','')}\nرصيدك: **{res['balance']:,}** {NMCore.coin(ctx.guild.id)}")
 
-    bot.add_command(commands.Command(wallet, name="رصيدي", aliases=["رصيد", "balance"]))
-    bot.add_command(commands.Command(salary, name="راتب", aliases=["salary", "daily"]))
-    bot.add_command(commands.Command(top, name="الغني", aliases=["اغنى", "rich", "topmoney"]))
-    bot.add_command(commands.Command(transfer_cmd, name="تحويل", aliases=["transfer"]))
-    bot.add_command(commands.Command(luck, name="حظ", aliases=["luck"]))
-    bot.add_command(commands.Command(double, name="دبل", aliases=["double"]))
-    bot.add_command(commands.Command(slot, name="سلوت", aliases=["slot"]))
-    bot.add_command(commands.Command(flip, name="وجه", aliases=["flip"]))
-    bot.add_command(commands.Command(blackjack, name="بلاكجاك", aliases=["bj", "blackjack"]))
+    @bot.command(name='حظ', aliases=['luck'])
+    async def v8_luck_cmd(ctx, amount: str): await casino_reply(ctx, 'luck', amount)
+    @bot.command(name='دبل', aliases=['double'])
+    async def v8_double_cmd(ctx, amount: str): await casino_reply(ctx, 'double', amount)
+    @bot.command(name='سلوت', aliases=['slot'])
+    async def v8_slot_cmd(ctx, amount: str): await casino_reply(ctx, 'slot', amount)
+    @bot.command(name='وجه', aliases=['flip'])
+    async def v8_flip_cmd(ctx, amount: str): await casino_reply(ctx, 'flip', amount)
+    @bot.command(name='بلاكجاك', aliases=['bj','blackjack'])
+    async def v8_bj_cmd(ctx, amount: str): await casino_reply(ctx, 'blackjack', amount)
 
+    @bot.command(name='عقارات')
+    async def v8_properties_cmd(ctx):
+        if not ctx.guild: return
+        rows=NMCore.properties(ctx.guild.id, only_available=True, limit=10)
+        if not rows:
+            await ctx.reply('ما فيه عقارات متاحة.'); return
+        lines=[f"`{r[0]}` — **{r[3]}** السعر: **{nm_v8_int(r[7]):,}** {NMCore.coin(ctx.guild.id)} | الإيجار: **{nm_v8_int(r[8]):,}**" for r in rows]
+        await ctx.reply('🏘️ **العقارات المتاحة**\n'+'\n'.join(lines)+'\nللشراء: `!شراء_عقار ID`')
 
-def nm_v7_activity(event_type="event", guild_id=0, user_id=0, user_name="", channel_id=0, channel_name="", details=""):
-    try:
-        nm_v7_init_db(); conn = nm_v7_db(); cur = conn.cursor()
-        cur.execute(f"INSERT INTO {NM_V7_ACTIVITY_TABLE} (guild_id,event_type,user_id,user_name,channel_id,channel_name,details,created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (nm_v7_int(guild_id), str(event_type)[:80], nm_v7_int(user_id), str(user_name)[:120], nm_v7_int(channel_id), str(channel_name)[:120], str(details)[:800], nm_v7_now()))
-        conn.commit(); conn.close()
-    except Exception:
-        pass
+    @bot.command(name='شراء_عقار')
+    async def v8_buy_property_cmd(ctx, property_id: int):
+        if not ctx.guild: return
+        res=NMCore.buy_property(ctx.guild.id, ctx.author.id, property_id, ctx.author.display_name)
+        if not res.get('ok'):
+            await ctx.reply(f"❌ {res.get('error')}"); return
+        await ctx.reply(f"✅ اشتريت **{res['property']}** بسعر **{res['price']:,}** {NMCore.coin(ctx.guild.id)}")
 
-
-def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0):
-    nm_v7_activity(event_type, guild_id or nm_v7_gid(), user_id, user_name, channel_id, channel_name, details or (f"amount={amount}" if amount else ""))
-
-
-def nm_v7_page_shell(title, body, guild_id=0):
-    # Use existing dashboard renderer when available, but inject V7 nav links into the body.
-    gid = nm_v7_gid(guild_id)
-    nav = f"""
-    <div class='card' style='margin-bottom:16px'>
-      <a class='btn' href='/dashboard/economy?guild_id={gid}'>Economy Live</a>
-      <a class='btn' href='/dashboard/money-tracker?guild_id={gid}'>Money Tracker</a>
-      <a class='btn' href='/dashboard/financial-audit-pro?guild_id={gid}'>Financial Audit</a>
-      <a class='btn' href='/dashboard/casino-guard-status?guild_id={gid}'>Casino Guard</a>
-      <a class='btn' href='/dashboard/economy-cleanup?guild_id={gid}'>Economy Cleanup</a>
-      <a class='btn' href='/dashboard/live-activity?guild_id={gid}'>Live Activity</a>
-      <a class='btn' href='/dashboard/v7-sync-status?guild_id={gid}'>V7 Status</a>
-    </div>
-    """
-    try:
-        return render_dashboard_page(title, nav + body)
-    except Exception:
-        return f"<html><body style='background:#0b1020;color:white;font-family:Arial'><h1>{html.escape(title)}</h1>{nav}{body}</body></html>"
-
-
-def nm_v7_dashboard_economy():
-    denied = dashboard_require_admin()
-    if denied: return denied
-    gid = nm_v7_gid()
-    rows = nm_v7_top_balances(gid, 50, members_only=True)
-    total = sum(b for _, b, _ in rows)
-    tr = ""
-    for i,(uid,bal,last) in enumerate(rows,1):
-        warn = " <span class='bad'>⚠ huge</span>" if bal > NM_V7_BALANCE_WARN else ""
-        tr += f"<tr><td><b>#{i}</b></td><td>{nm_v7_member_html(gid, uid)}</td><td><b>{nm_v7_money(bal,gid)}</b>{warn}</td><td>{last}</td></tr>"
-    tr = tr or "<tr><td colspan='4'>No economy rows.</td></tr>"
-    body = f"""
-    <div class='grid3'>
-      <div class='card'><h3>Real Members Shown</h3><div class='cc-stat'>{len(rows)}</div></div>
-      <div class='card'><h3>Shown Total</h3><div class='cc-stat'>{nm_v7_money(total,gid)}</div></div>
-      <div class='card'><h3>Source</h3><div class='cc-stat'>guild_economy</div><p>No legacy fallback.</p></div>
-    </div>
-    <div class='card'><h3>Give / Take / Set</h3>
-      <form method='post' action='/dashboard/economy'>
-        <input type='hidden' name='guild_id' value='{gid}'>
-        <input name='user_id' placeholder='Discord User ID'>
-        <input name='amount' placeholder='Amount'>
-        <select name='action'><option value='add'>Give</option><option value='remove'>Take</option><option value='set'>Set</option></select>
-        <button class='btn primary'>Apply</button>
-      </form>
-    </div>
-    <div class='card'><h3>Live Richest</h3><table class='table'><tr><th>Rank</th><th>User</th><th>Balance</th><th>Last Salary</th></tr>{tr}</table></div>
-    """
-    return nm_v7_page_shell("Economy Live", body, gid)
+    @bot.command(name='ايجار')
+    async def v8_rent_cmd(ctx):
+        if not ctx.guild: return
+        res=NMCore.collect_rent(ctx.guild.id, ctx.author.id, ctx.author.display_name)
+        if not res.get('ok'):
+            await ctx.reply(f"❌ {res.get('error')}"); return
+        await ctx.reply(f"🏠 جمعت إيجار **{res['count']}** عقارات: **{res['amount']:,}** {NMCore.coin(ctx.guild.id)}")
 
 
-def nm_v7_dashboard_economy_post():
-    denied = dashboard_require_admin()
-    if denied: return denied
-    gid = nm_v7_gid()
-    uid = nm_v7_int(request.form.get("user_id"), 0); amount = nm_v7_int(str(request.form.get("amount", "0")).replace(",", ""), 0); action = request.form.get("action", "add")
-    admin_id = nm_v7_int(session.get("discord_user_id", 0), 0)
-    admin_name = str(session.get("discord_username", "Dashboard") or "Dashboard")
-    if uid and nm_v7_valid_user_id(uid):
-        if action == "remove": nm_v7_debit(gid, uid, amount, "dashboard_take", actor_id=admin_id, actor_name=admin_name, reason="Dashboard take money")
-        elif action == "set": nm_v7_set_balance(gid, uid, amount, "dashboard_set", actor_id=admin_id, actor_name=admin_name, reason="Dashboard set balance")
-        else: nm_v7_credit(gid, uid, amount, "dashboard_give", actor_id=admin_id, actor_name=admin_name, reason="Dashboard give money")
-    return redirect(f"/dashboard/economy?guild_id={gid}")
+def nm_v8_install_runtime_events():
+    # Replace old on_message event to stop legacy casino/economy bridges from firing before new commands.
+    @bot.event
+    async def on_message(message):
+        if getattr(message.author, 'bot', False):
+            return
+        gid = message.guild.id if message.guild else 0
+        if gid:
+            NMCore.activity(gid, 'message', actor_id=message.author.id, actor_name=getattr(message.author,'display_name',str(message.author)), channel_id=message.channel.id if message.channel else 0, message_id=message.id, title='message', details=str(message.content or '')[:350])
+            # Lightweight protection keeps the old safe word detector without legacy economy side effects.
+            try:
+                if 'contains_bad_word' in globals() and contains_bad_word(message.content):
+                    if not (hasattr(message.author, 'guild_permissions') and message.author.guild_permissions.administrator):
+                        try: await message.delete()
+                        except Exception: pass
+                        NMCore.activity(gid, 'protection', actor_id=message.author.id, actor_name=getattr(message.author,'display_name',''), channel_id=message.channel.id, message_id=message.id, title='Bad word deleted', details=str(message.content or '')[:350])
+                        return
+            except Exception:
+                pass
+        await bot.process_commands(message)
 
+    @bot.listen('on_member_join')
+    async def v8_member_join(member):
+        NMCore.activity(member.guild.id, 'member_join', actor_id=member.id, actor_name=member.display_name, title='Member joined')
 
-def nm_v7_money_tracker_page():
-    denied = dashboard_require_admin()
-    if denied: return denied
-    gid = nm_v7_gid(); user_raw = str(request.args.get("user_id", "")).strip(); src = str(request.args.get("source", "")).strip()
-    sql = f"SELECT * FROM {NM_V7_LEDGER_TABLE} WHERE guild_id=?"; params=[gid]
-    if user_raw.isdigit(): sql += " AND user_id=?"; params.append(int(user_raw))
-    if src: sql += " AND source_type LIKE ?"; params.append(f"%{src}%")
-    sql += " ORDER BY id DESC LIMIT 250"
-    conn=nm_v7_db(); cur=conn.cursor(); cur.execute(sql, params); rows=cur.fetchall(); conn.close()
-    tr=""
-    for r in rows:
-        # sqlite Row or tuple safe
-        d = dict(r) if hasattr(r, "keys") else None
-        if d:
-            tx,uid,amount,before,after,st,sl,reason,actor,created = d.get("tx_id"),d.get("user_id"),d.get("amount"),d.get("balance_before"),d.get("balance_after"),d.get("source_type"),d.get("source_label"),d.get("reason"),d.get("actor_name") or d.get("actor_id"),d.get("created_at")
-        else:
-            continue
-        tr += f"<tr><td><code>{html.escape(str(tx)[:10])}</code><br><span class='muted small'>{created}</span></td><td>{nm_v7_member_html(gid,uid)}</td><td><b>{nm_v7_money(amount,gid)}</b></td><td>{nm_v7_money(before,gid)} → {nm_v7_money(after,gid)}</td><td>{html.escape(str(st))}<br><span class='muted small'>{html.escape(str(sl or ''))}</span></td><td>{html.escape(str(reason or ''))}<br><span class='muted small'>Actor: {html.escape(str(actor or '-'))}</span></td></tr>"
-    tr = tr or "<tr><td colspan='6'>No ledger rows.</td></tr>"
-    body=f"""
-    <div class='card'><form><input type='hidden' name='guild_id' value='{gid}'><input name='user_id' value='{html.escape(user_raw)}' placeholder='User ID'><input name='source' value='{html.escape(src)}' placeholder='casino / salary / dashboard'><button class='btn'>Filter</button></form></div>
-    <div class='card'><table class='table'><tr><th>TX</th><th>User</th><th>Amount</th><th>Before → After</th><th>Source</th><th>Reason / Actor</th></tr>{tr}</table></div>
-    """
-    return nm_v7_page_shell("Money Tracker", body, gid)
+    @bot.listen('on_member_remove')
+    async def v8_member_remove(member):
+        NMCore.activity(member.guild.id, 'member_leave', actor_id=member.id, actor_name=member.display_name, title='Member left')
 
-
-def nm_v7_financial_audit_page():
-    denied = dashboard_require_admin()
-    if denied: return denied
-    gid=nm_v7_gid(); conn=nm_v7_db(); cur=conn.cursor()
-    cur.execute(f"SELECT COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0), COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0), COUNT(*) FROM {NM_V7_LEDGER_TABLE} WHERE guild_id=?", (gid,))
-    created, removed, count = cur.fetchone()
-    cur.execute(f"SELECT source_type, COALESCE(SUM(amount),0), COUNT(*) FROM {NM_V7_LEDGER_TABLE} WHERE guild_id=? GROUP BY source_type ORDER BY ABS(SUM(amount)) DESC LIMIT 30", (gid,))
-    sources = cur.fetchall(); conn.close()
-    tr="".join(f"<tr><td>{html.escape(str(s[0]))}</td><td>{nm_v7_money(s[1],gid)}</td><td>{int(s[2])}</td></tr>" for s in sources)
-    body=f"""
-    <div class='grid3'><div class='card'><h3>Created</h3><div class='cc-stat good'>{nm_v7_money(created,gid)}</div></div><div class='card'><h3>Removed</h3><div class='cc-stat bad'>{nm_v7_money(removed,gid)}</div></div><div class='card'><h3>Net / TX</h3><div class='cc-stat'>{nm_v7_money(int(created)-int(removed),gid)}</div><p>{int(count)} transactions</p></div></div>
-    <div class='card'><h3>By Source</h3><table class='table'><tr><th>Source</th><th>Net</th><th>Count</th></tr>{tr}</table></div>
-    """
-    return nm_v7_page_shell("Financial Audit Pro", body, gid)
-
-
-def nm_v7_economy_cleanup_page():
-    denied = dashboard_require_admin()
-    if denied: return denied
-    gid=nm_v7_gid(); msg=""
-    if request.method == "POST":
-        action=request.form.get("action"); cap=nm_v7_int(request.form.get("cap"), NM_V7_BALANCE_WARN)
-        conn=nm_v7_db(); cur=conn.cursor()
-        if action == "delete_invalid":
-            cur.execute("DELETE FROM guild_economy WHERE guild_id=? AND user_id<?", (gid, NM_V7_SNOWFLAKE_MIN)); msg=f"Deleted invalid rows: {cur.rowcount}"
-        elif action == "cap_huge":
-            cur.execute("UPDATE guild_economy SET balance=? WHERE guild_id=? AND balance>?", (cap, gid, cap)); msg=f"Capped rows: {cur.rowcount}"
-        elif action == "zero_left":
-            guild=bot.get_guild(gid); ids={m.id for m in guild.members} if guild else set()
-            cur.execute("SELECT user_id FROM guild_economy WHERE guild_id=?", (gid,)); rows=cur.fetchall(); n=0
-            for (uid,) in rows:
-                if int(uid) not in ids:
-                    cur.execute("UPDATE guild_economy SET balance=0 WHERE guild_id=? AND user_id=?", (gid,int(uid))); n+=1
-            msg=f"Zeroed non-members: {n}"
-        conn.commit(); conn.close()
-    body=f"""
-    <div class='card good'><b>{html.escape(msg)}</b></div>
-    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><button class='btn bad' name='action' value='delete_invalid'>Delete invalid fake IDs</button></form></div>
-    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><input name='cap' value='{NM_V7_BALANCE_WARN}'><button class='btn' name='action' value='cap_huge'>Cap huge balances</button></form></div>
-    <div class='card'><form method='post'><input type='hidden' name='guild_id' value='{gid}'><button class='btn' name='action' value='zero_left'>Zero users not in server</button></form></div>
-    """
-    return nm_v7_page_shell("Economy Cleanup", body, gid)
-
-
-def nm_v7_live_activity_page():
-    denied=dashboard_require_admin()
-    if denied: return denied
-    gid=nm_v7_gid(); conn=nm_v7_db(); cur=conn.cursor(); cur.execute(f"SELECT * FROM {NM_V7_ACTIVITY_TABLE} WHERE guild_id=? ORDER BY id DESC LIMIT 200", (gid,)); rows=cur.fetchall(); conn.close()
-    tr="".join(f"<tr><td>{r['created_at']}</td><td>{html.escape(str(r['event_type']))}</td><td>{nm_v7_member_html(gid,r['user_id'])}</td><td>{html.escape(str(r['channel_name'] or r['channel_id']))}</td><td>{html.escape(str(r['details'] or ''))}</td></tr>" for r in rows)
-    return nm_v7_page_shell("Live Discord Activity", f"<div class='card'><table class='table'><tr><th>Time</th><th>Type</th><th>User</th><th>Channel</th><th>Details</th></tr>{tr}</table></div>", gid)
-
-
-def nm_v7_casino_guard_page():
-    denied=dashboard_require_admin()
-    if denied: return denied
-    gid=nm_v7_gid()
-    body=f"""
-    <div class='grid3'><div class='card'><h3>Debit First</h3><div class='cc-stat good'>ON</div><p>All bets are deducted before result.</p></div><div class='card'><h3>Max Bet</h3><div class='cc-stat'>{NM_V7_DEFAULT_MAX_BET:,}</div><p>{NM_V7_MAX_BET_PERCENT}% of balance max.</p></div><div class='card'><h3>Window</h3><div class='cc-stat'>{NM_V7_WINDOW_TOTAL:,}</div><p>per {NM_V7_WINDOW_SECONDS//60} minutes.</p></div></div>
-    <div class='card'><a class='btn' href='/dashboard/money-tracker?guild_id={gid}&source=casino'>Open Casino Ledger</a></div>
-    """
-    return nm_v7_page_shell("Casino Guard Status", body, gid)
-
-
-def nm_v7_status_page():
-    denied=dashboard_require_admin()
-    if denied: return denied
-    gid=nm_v7_gid(); body=f"""
-    <div class='card good'><h2>{NM_V7_VERSION}</h2><p>Active before bot.run.</p></div>
-    <div class='card'><ul><li>Economy source: <code>guild_economy(guild_id,user_id)</code></li><li>Ledger: <code>{NM_V7_LEDGER_TABLE}</code></li><li>Legacy bridge: disabled</li><li>Dashboard member lookup: cache only, no heartbeat blocking</li><li>Casino: debit-first</li></ul></div>
-    """
-    return nm_v7_page_shell("V7 Sync Status", body, gid)
-
-
-def nm_v7_bind_route(path, view_func, methods=("GET",)):
-    replaced = False
-    try:
-        for rule in list(app.url_map.iter_rules()):
-            if str(rule.rule) == path:
-                app.view_functions[rule.endpoint] = view_func
-                replaced = True
-    except Exception:
-        pass
-    if not replaced:
-        try:
-            app.add_url_rule(path, endpoint=f"v7_{view_func.__name__}_{abs(hash(path))}", view_func=view_func, methods=list(methods))
-        except Exception as e:
-            try: print(f"NM V7 route bind failed {path}: {e}")
-            except Exception: pass
-
-
-def nm_v7_install_dashboard():
-    nm_v7_bind_route("/dashboard/economy", nm_v7_dashboard_economy, ("GET",))
-    nm_v7_bind_route("/dashboard/economy", nm_v7_dashboard_economy_post, ("POST",))
-    nm_v7_bind_route("/dashboard/money-tracker", nm_v7_money_tracker_page, ("GET",))
-    nm_v7_bind_route("/dashboard/financial-audit-pro", nm_v7_financial_audit_page, ("GET",))
-    nm_v7_bind_route("/dashboard/money-audit", nm_v7_financial_audit_page, ("GET",))
-    nm_v7_bind_route("/dashboard/economy-cleanup", nm_v7_economy_cleanup_page, ("GET","POST"))
-    nm_v7_bind_route("/dashboard/casino-guard-status", nm_v7_casino_guard_page, ("GET",))
-    nm_v7_bind_route("/dashboard/live-activity", nm_v7_live_activity_page, ("GET",))
-    nm_v7_bind_route("/dashboard/v7-sync-status", nm_v7_status_page, ("GET",))
+    @bot.listen('on_message_delete')
+    async def v8_message_delete(message):
+        if getattr(message.author, 'bot', False) or not message.guild: return
+        NMCore.activity(message.guild.id, 'message_delete', actor_id=message.author.id, actor_name=getattr(message.author,'display_name',''), channel_id=message.channel.id if message.channel else 0, message_id=message.id, title='Message deleted', details=str(message.content or '')[:350])
 
 
 def get_top_levels(limit=10):
-    # Non-blocking replacement used by memory backup. No Discord fetch.
-    gid = nm_v7_gid()
+    # Non-blocking replacement: dashboard/memory must never wait on Discord futures.
+    gid = NMCore.gid()
     try:
-        conn=nm_v7_db(); cur=conn.cursor(); cur.execute("SELECT user_id,xp,level FROM guild_levels WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT ?", (gid, int(limit))); rows=cur.fetchall(); conn.close(); return rows
-    except Exception:
-        return []
+        conn=NMCore.db(); cur=conn.cursor(); cur.execute("SELECT user_id,xp,level FROM guild_levels WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT ?", (gid, int(limit))); rows=cur.fetchall(); conn.close(); return rows
+    except Exception: return []
 
-
-def dashboard_level_rows(limit=10):
-    return get_top_levels(limit)
-
+def dashboard_level_rows(limit=10): return get_top_levels(limit)
 
 try:
-    nm_v7_init_db()
-    nm_v7_install_text_commands()
-    nm_v7_install_dashboard()
-    print(f"✅ {NM_V7_VERSION} active: old economy/casino/dashboard patch stack replaced, not layered")
+    NMCore.init()
+    nm_v8_install_commands()
+    nm_v8_install_dashboard()
+    nm_v8_install_runtime_events()
+    print(f"✅ {NM_V8_VERSION} active: economy/casino/real-estate/dashboard/live activity run through one NMCore")
 except Exception as e:
-    try: print(f"❌ NM V7 replacement core failed: {e}")
+    try: print(f"❌ NM V8 unified core failed: {type(e).__name__}: {e}")
     except Exception: pass
-
 
 keep_alive()
 
@@ -21954,4 +22222,3 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
-
