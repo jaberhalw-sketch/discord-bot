@@ -488,6 +488,48 @@ def init_db():
     """)
 
     cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_economy (
+            guild_id INTEGER,
+            user_id INTEGER,
+            balance INTEGER DEFAULT 0,
+            last_daily INTEGER DEFAULT 0,
+            last_boost_weekly INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_levels (
+            guild_id INTEGER,
+            user_id INTEGER,
+            xp INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 1,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_warning_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER,
+            user_id INTEGER,
+            reason TEXT,
+            message TEXT,
+            moderator TEXT,
+            source TEXT,
+            status TEXT DEFAULT 'active',
+            created_at INTEGER,
+            cleared_at INTEGER DEFAULT 0,
+            cleared_by TEXT DEFAULT '',
+            clear_reason TEXT DEFAULT ''
+        )
+    """)
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_guild_economy_guild_balance ON guild_economy(guild_id, balance)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_guild_levels_guild_level ON guild_levels(guild_id, level, xp)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_guild_warning_history_guild_user ON guild_warning_history(guild_id, user_id)")
+
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS suggestions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
@@ -1450,6 +1492,272 @@ async def interaction_channel_check(interaction, channel_id, label="الأوام
         return False
 
     return True
+
+
+# =========================
+# GLOBAL V3 MULTI-GUILD DATA HELPERS
+# Slash commands use these tables so each server has independent economy/level data.
+# Old ! commands are kept for the main guild as a compatibility layer.
+# =========================
+
+def v3_guild_id_from_interaction(interaction):
+    return int(interaction.guild.id) if interaction and interaction.guild else 0
+
+
+def v3_ensure_guild_user(guild_id, user_id):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO guild_economy (guild_id, user_id, balance, last_daily, last_boost_weekly) VALUES (?, ?, 0, 0, 0)", (guild_id, user_id))
+    cur.execute("INSERT OR IGNORE INTO guild_levels (guild_id, user_id, xp, level) VALUES (?, ?, 0, 1)", (guild_id, user_id))
+    conn.commit()
+    conn.close()
+
+
+def v3_get_money_data(guild_id, user_id):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    v3_ensure_guild_user(guild_id, user_id)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, last_daily FROM guild_economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cur.fetchone()
+    conn.close()
+    return (int(row[0] or 0), int(row[1] or 0)) if row else (0, 0)
+
+
+def v3_get_balance(guild_id, user_id):
+    return v3_get_money_data(guild_id, user_id)[0]
+
+
+def v3_set_balance(guild_id, user_id, amount, source_type="v3_set", admin_id=0, admin_name="", details="", batch_id=""):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    amount = max(0, int(amount or 0))
+    v3_ensure_guild_user(guild_id, user_id)
+    old_balance = v3_get_balance(guild_id, user_id)
+    delta = amount - old_balance
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE guild_economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (amount, guild_id, user_id))
+    conn.commit()
+    conn.close()
+    try:
+        cc_record_event("money_set", user_id=user_id, amount=delta, details=f"Guild {guild_id} | {details or 'V3 balance set'}")
+        money_audit_record(user_id=user_id, amount=delta, new_balance=amount, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Guild {guild_id} | {details or 'V3 balance set'}", batch_id=batch_id)
+    except Exception:
+        pass
+    return amount
+
+
+def v3_add_money(guild_id, user_id, amount, source_type="v3_system_earned", admin_id=0, admin_name="", details="", batch_id=""):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    amount = int(amount or 0)
+    balance, _ = v3_get_money_data(guild_id, user_id)
+    balance = max(0, balance + amount)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE guild_economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (balance, guild_id, user_id))
+    conn.commit()
+    conn.close()
+    try:
+        cc_record_event("money", user_id=user_id, amount=amount, details=f"Guild {guild_id} | {details or 'V3 money added'}")
+        money_audit_record(user_id=user_id, amount=amount, new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Guild {guild_id} | {details or 'V3 money added'}", batch_id=batch_id)
+    except Exception:
+        pass
+    return balance
+
+
+def v3_remove_money(guild_id, user_id, amount, source_type="v3_system_spend", admin_id=0, admin_name="", details="", batch_id=""):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    amount = int(amount or 0)
+    if amount <= 0:
+        return False, v3_get_balance(guild_id, user_id)
+    balance, _ = v3_get_money_data(guild_id, user_id)
+    if balance < amount:
+        return False, balance
+    balance -= amount
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE guild_economy SET balance = ? WHERE guild_id = ? AND user_id = ?", (balance, guild_id, user_id))
+    conn.commit()
+    conn.close()
+    try:
+        cc_record_event("money", user_id=user_id, amount=-amount, details=f"Guild {guild_id} | {details or 'V3 money removed'}")
+        money_audit_record(user_id=user_id, amount=-amount, new_balance=balance, source_type=source_type, admin_id=admin_id, admin_name=admin_name, details=f"Guild {guild_id} | {details or 'V3 money removed'}", batch_id=batch_id)
+    except Exception:
+        pass
+    return True, balance
+
+
+def v3_get_level_data(guild_id, user_id):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    v3_ensure_guild_user(guild_id, user_id)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT xp, level FROM guild_levels WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cur.fetchone()
+    conn.close()
+    return (int(row[0] or 0), int(row[1] or 1)) if row else (0, 1)
+
+
+def v3_add_xp(guild_id, user_id, amount):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    xp, level = v3_get_level_data(guild_id, user_id)
+    xp += int(amount or 0)
+    needed = level * 100
+    leveled_up = False
+    while xp >= needed:
+        xp -= needed
+        level += 1
+        needed = level * 100
+        leveled_up = True
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("UPDATE guild_levels SET xp = ?, level = ? WHERE guild_id = ? AND user_id = ?", (xp, level, guild_id, user_id))
+    conn.commit()
+    conn.close()
+    return xp, level, leveled_up
+
+
+def v3_get_top_money(guild_id, limit=10):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, balance
+        FROM guild_economy
+        WHERE guild_id = ?
+        ORDER BY balance DESC
+        LIMIT ?
+    """, (int(guild_id or 0), int(limit)))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def v3_get_top_levels(guild_id, limit=10):
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, xp, level
+        FROM guild_levels
+        WHERE guild_id = ?
+        ORDER BY level DESC, xp DESC
+        LIMIT ?
+    """, (int(guild_id or 0), int(limit)))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def v3_get_money_rank(guild_id, user_id):
+    try:
+        guild_id = int(guild_id or 0)
+        user_id = int(user_id or 0)
+        v3_ensure_guild_user(guild_id, user_id)
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) + 1
+            FROM guild_economy
+            WHERE guild_id = ? AND balance > (
+                SELECT balance FROM guild_economy WHERE guild_id = ? AND user_id = ?
+            )
+        """, (guild_id, guild_id, user_id))
+        rank = int(cur.fetchone()[0] or 1)
+        conn.close()
+        return rank
+    except Exception:
+        return None
+
+
+def v3_claim_salary(guild_id, user_id, level):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    now = int(time.time())
+    reward = DAILY_REWARD_BASE + (int(level or 1) * 25)
+    cooldown = HOURLY_REWARD_COOLDOWN_SECONDS
+    v3_ensure_guild_user(guild_id, user_id)
+    conn = db_connect()
+    cur = conn.cursor()
+    cur.execute("SELECT balance, last_daily FROM guild_economy WHERE guild_id = ? AND user_id = ?", (guild_id, user_id))
+    row = cur.fetchone()
+    balance = int(row[0] or 0) if row else 0
+    last_daily = int(row[1] or 0) if row else 0
+    if now - last_daily < cooldown:
+        conn.close()
+        return False, cooldown - (now - last_daily), balance, 0
+    balance += reward
+    cur.execute("UPDATE guild_economy SET balance = ?, last_daily = ? WHERE guild_id = ? AND user_id = ?", (balance, now, guild_id, user_id))
+    conn.commit()
+    conn.close()
+    try:
+        cc_record_event("money", user_id=user_id, amount=reward, details=f"Guild {guild_id} | V3 salary claimed")
+        money_audit_record(user_id=user_id, amount=reward, new_balance=balance, source_type="v3_salary", details=f"Guild {guild_id} | Salary")
+    except Exception:
+        pass
+    return True, 0, balance, reward
+
+
+def v3_parse_bet_amount(amount):
+    try:
+        if isinstance(amount, int):
+            return int(amount)
+        return parse_bet_amount(str(amount))
+    except Exception:
+        return None
+
+
+async def v3_require_commands_interaction(interaction):
+    return await interaction_channel_check(interaction, get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0), "روم الأوامر")
+
+
+async def v3_require_gambling_interaction(interaction):
+    return await interaction_channel_check(interaction, get_effective_gambling_channel_id(interaction.guild.id if interaction.guild else 0), "روم القمار")
+
+
+def v3_wallet_embed(guild_id, target):
+    balance_amount = v3_get_balance(guild_id, target.id)
+    xp, level_num = v3_get_level_data(guild_id, target.id)
+    needed = level_num * 100
+    salary_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
+    rank = v3_get_money_rank(guild_id, target.id)
+    progress = clean_bar(xp / needed if needed else 0, 14)
+    embed = discord.Embed(
+        title=f"{ECONOMY_EMOJI} Wallet",
+        description=f"**محفظة {target.mention}**\n`{progress}` **{xp:,}/{needed:,} XP**",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_author(name=f"{target.display_name} • Wallet", icon_url=target.display_avatar.url)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="💼 الرصيد", value=coin_line(balance_amount), inline=False)
+    embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
+    embed.add_field(name="🏅 اللفل", value=f"**{level_num}**", inline=True)
+    embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
+    return embed
+
+
+def v3_shop_embed(guild_id, member=None):
+    embed = discord.Embed(
+        title="🛒 Global V3 Shop",
+        description="المتجر العالمي التجريبي. كل سيرفر له اقتصاد مستقل. بعض المشتريات المتقدمة تبقى على نظام ! مؤقتًا إلى حين نقل المتجر بالكامل.",
+        color=COLOR_PURPLE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="💎 VIP", value=f"السعر: {coin_line(SHOP_VIP_PRICE)}\nالمدة: **{SHOP_VIP_DAYS} أيام**\nاستخدم: `/buy item:vip`", inline=False)
+    embed.add_field(name="🎁 Lootbox", value=f"السعر: {coin_line(LOOTBOX_PRICE)}\nاستخدم: `/lootbox`", inline=False)
+    if member:
+        embed.set_author(name=f"{member.display_name} • Wallet", icon_url=member.display_avatar.url)
+        embed.add_field(name="💼 رصيدك", value=coin_line(v3_get_balance(guild_id, member.id)), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3 Shop")
+    return embed
 
 async def require_commands_channel(ctx):
     if ctx.channel.id == COMMANDS_CHANNEL_ID:
@@ -11597,7 +11905,7 @@ async def event_start_command(ctx, minutes: int = None, prize: str = None, *, ti
 
 # =========================
 # SLASH COMMANDS / PUBLIC BOT PHASE 1
-# Prefix commands stay available, but these are the start of the global / commands version.
+# Prefix commands stay available for the main guild, but Global V3 slash commands are now the public multi-server layer.
 # =========================
 
 @bot.tree.command(name="ping", description="Check bot latency")
@@ -11607,146 +11915,409 @@ async def slash_ping(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="balance", description="Show your wallet balance")
+@app_commands.describe(member="Optional member to check")
 async def slash_balance(interaction: discord.Interaction, member: discord.Member = None):
-    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
-    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+    if not await v3_require_commands_interaction(interaction):
         return
-
     target = member or interaction.user
-    balance_amount = get_balance(target.id)
-    xp, level_num = get_level_data(target.id)
-    needed = level_num * 100
-    salary_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
-    rank = get_money_rank(target.id)
-    progress = clean_bar(xp / needed if needed else 0, 14)
+    await interaction.response.send_message(embed=v3_wallet_embed(interaction.guild.id, target))
 
-    embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Economy Wallet",
-        description=f"**محفظة {target.mention}**\n`{progress}` **{xp:,}/{needed:,} XP**",
-        color=COLOR_GREEN,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_author(name=f"{target.display_name} • Wallet", icon_url=target.display_avatar.url)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    embed.add_field(name="💼 الرصيد", value=coin_line(balance_amount), inline=False)
-    embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
-    embed.add_field(name="🏅 اللفل", value=f"**{level_num}**", inline=True)
-    embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Slash Economy")
-    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="رصيدي", description="عرض رصيدك أو رصيد عضو")
+@app_commands.describe(member="عضو اختياري")
+async def slash_balance_ar(interaction: discord.Interaction, member: discord.Member = None):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    await interaction.response.send_message(embed=v3_wallet_embed(interaction.guild.id, member or interaction.user))
 
 
 @bot.tree.command(name="salary", description="Claim your salary")
 async def slash_salary(interaction: discord.Interaction):
-    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
-    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+    if not await v3_require_commands_interaction(interaction):
         return
-
-    xp, level = get_level_data(interaction.user.id)
-    success, remaining, balance_amount, reward = claim_daily(interaction.user.id, level)
-
+    xp, level = v3_get_level_data(interaction.guild.id, interaction.user.id)
+    success, remaining, balance_amount, reward = v3_claim_salary(interaction.guild.id, interaction.user.id, level)
     if not success:
-        embed = discord.Embed(
-            title="⏳ الراتب غير جاهز",
-            description=f"راتبك القادم بعد **{format_seconds(remaining)}**.",
-            color=COLOR_ORANGE,
-            timestamp=discord.utils.utcnow()
-        )
+        embed = discord.Embed(title="⏳ الراتب غير جاهز", description=f"راتبك القادم بعد **{format_seconds(remaining)}**.", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
         embed.set_author(name=f"{interaction.user.display_name} • Salary", icon_url=interaction.user.display_avatar.url)
         embed.add_field(name="💼 محفظتك الآن", value=coin_line(balance_amount), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
         return
-
-    embed = discord.Embed(
-        title="💸 Salary Claimed",
-        description=f"تم إيداع راتبك بنجاح: {coin_line(reward)}",
-        color=COLOR_GREEN,
-        timestamp=discord.utils.utcnow()
-    )
+    embed = discord.Embed(title="💸 Salary Claimed", description=f"تم إيداع راتبك: {coin_line(reward)}", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
     embed.set_author(name=f"{interaction.user.display_name} • Salary", icon_url=interaction.user.display_avatar.url)
     embed.add_field(name="💼 رصيدك الجديد", value=coin_line(balance_amount), inline=False)
-    embed.set_footer(text=f"{BOT_BRAND} • Slash Salary")
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="راتب", description="استلام الراتب")
+async def slash_salary_ar(interaction: discord.Interaction):
+    await slash_salary(interaction)
+
+
+@bot.tree.command(name="transfer", description="Transfer coins to another member")
+@app_commands.describe(member="Member to receive coins", amount="Amount to transfer")
+async def slash_transfer(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    if member.bot or member.id == interaction.user.id:
+        await interaction.response.send_message("❌ اختر عضو صحيح غير نفسك وغير بوت.", ephemeral=True)
+        return
+    if amount <= 0:
+        await interaction.response.send_message("❌ المبلغ لازم يكون أكبر من صفر.", ephemeral=True)
+        return
+    ok, sender_balance = v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_transfer_out", details=f"Transfer to {member.id}")
+    if not ok:
+        await interaction.response.send_message(f"❌ رصيدك ما يكفي. رصيدك: **{sender_balance:,}**", ephemeral=True)
+        return
+    receiver_balance = v3_add_money(interaction.guild.id, member.id, amount, source_type="v3_transfer_in", details=f"Transfer from {interaction.user.id}")
+    embed = discord.Embed(title="🔁 Transfer Complete", description=f"{interaction.user.mention} حول {coin_line(amount)} إلى {member.mention}", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+    embed.add_field(name="رصيدك", value=coin_line(sender_balance), inline=True)
+    embed.add_field(name="رصيد المستلم", value=coin_line(receiver_balance), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="تحويل", description="تحويل فلوس لعضو")
+@app_commands.describe(member="العضو", amount="المبلغ")
+async def slash_transfer_ar(interaction: discord.Interaction, member: discord.Member, amount: int):
+    await slash_transfer(interaction, member, amount)
 
 
 @bot.tree.command(name="top", description="Show top richest members")
 async def slash_top(interaction: discord.Interaction):
-    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
-    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+    if not await v3_require_commands_interaction(interaction):
         return
-
-    rows = get_top_money(10)
+    rows = v3_get_top_money(interaction.guild.id, 10)
     if not rows:
         await interaction.response.send_message("ما فيه بيانات اقتصاد للحين.", ephemeral=True)
         return
-
     text = ""
     for index, (user_id, balance_amount) in enumerate(rows, start=1):
-        text += f"`{index}.` <@{user_id}> — **{balance_amount:,}** {COIN_NAME}\n"
-
-    embed = discord.Embed(
-        title=f"{ECONOMY_EMOJI} Richest Members",
-        description=text[:3900],
-        color=COLOR_YELLOW,
-        timestamp=discord.utils.utcnow()
-    )
-    embed.set_footer(text=f"{BOT_BRAND} • Slash Leaderboard")
+        text += f"`{index}.` <@{user_id}> — **{int(balance_amount):,}** {COIN_NAME}\n"
+    embed = discord.Embed(title=f"{ECONOMY_EMOJI} Richest Members", description=text[:3900], color=COLOR_YELLOW, timestamp=discord.utils.utcnow())
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="luck", description="50/50 gamble using your bot coins")
-@app_commands.describe(amount="Bet amount, example: 5000")
-async def slash_luck(interaction: discord.Interaction, amount: int):
-    gambling_channel_id = get_effective_gambling_channel_id(interaction.guild.id if interaction.guild else 0)
-    if not await interaction_channel_check(interaction, gambling_channel_id, "روم القمار"):
-        return
+@bot.tree.command(name="اغنى", description="عرض أغنى أعضاء السيرفر")
+async def slash_top_ar(interaction: discord.Interaction):
+    await slash_top(interaction)
 
+
+@bot.tree.command(name="rank", description="Show your level and XP")
+@app_commands.describe(member="Optional member to check")
+async def slash_rank(interaction: discord.Interaction, member: discord.Member = None):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    target = member or interaction.user
+    xp, level = v3_get_level_data(interaction.guild.id, target.id)
+    needed = level * 100
+    progress = xp_progress_bar(xp, needed, 14)
+    embed = discord.Embed(title="📊 Level Profile", description=f"{target.mention}\n`{progress}` **{xp:,}/{needed:,} XP**", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
+    embed.set_author(name=f"{target.display_name} • Level {level}", icon_url=target.display_avatar.url)
+    embed.add_field(name="Level", value=f"**{level}**", inline=True)
+    embed.add_field(name="XP", value=f"**{xp:,}/{needed:,}**", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3 Levels")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="لفلي", description="عرض لفلك و XP")
+@app_commands.describe(member="عضو اختياري")
+async def slash_rank_ar(interaction: discord.Interaction, member: discord.Member = None):
+    await slash_rank(interaction, member)
+
+
+@bot.tree.command(name="levels", description="Show top level members")
+async def slash_levels(interaction: discord.Interaction):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    rows = v3_get_top_levels(interaction.guild.id, 10)
+    if not rows:
+        await interaction.response.send_message("ما فيه بيانات لفل للحين.", ephemeral=True)
+        return
+    text = ""
+    for i, (user_id, xp, level) in enumerate(rows, start=1):
+        text += f"`{i}.` <@{user_id}> — **Lv.{int(level)}** | XP `{int(xp):,}`\n"
+    embed = discord.Embed(title="🏆 Level Leaderboard", description=text[:3900], color=COLOR_BLUE, timestamp=discord.utils.utcnow())
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="ترتيب", description="ترتيب اللفلات")
+async def slash_levels_ar(interaction: discord.Interaction):
+    await slash_levels(interaction)
+
+
+async def v3_gamble_check(interaction, amount):
+    if not await v3_require_gambling_interaction(interaction):
+        return None
+    amount = int(amount or 0)
     if amount <= 0:
         await interaction.response.send_message("❌ مبلغ الرهان لازم يكون أكبر من صفر.", ephemeral=True)
-        return
-
+        return None
     ok, remaining = can_gamble_now(interaction.user.id)
     if not ok:
         await interaction.response.send_message(f"⏳ انتظر **{remaining:.1f} ثانية** قبل محاولة القمار التالية.", ephemeral=True)
-        return
-
-    balance_before = get_balance(interaction.user.id)
+        return None
+    balance_before = v3_get_balance(interaction.guild.id, interaction.user.id)
     if balance_before < amount:
         await interaction.response.send_message(f"❌ رصيدك ما يكفي. رصيدك الحالي: **{balance_before:,}**", ephemeral=True)
+        return None
+    return amount
+
+
+@bot.tree.command(name="luck", description="50/50 gamble using your bot coins")
+@app_commands.describe(amount="Bet amount")
+async def slash_luck(interaction: discord.Interaction, amount: int):
+    amount = await v3_gamble_check(interaction, amount)
+    if amount is None:
         return
-
-    remove_money(interaction.user.id, amount)
+    v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Lucky roll bet")
     win = random.random() < 0.50
-
     if win:
         payout = amount * 2
-        balance_after = add_money(interaction.user.id, payout)
-        embed = gambling_embed(
-            "🎲 Lucky Roll",
-            "✅ **فوز نظيف** — دبل الرهان وصل لمحفظتك.",
-            COLOR_GREEN,
-            interaction.user,
-            amount,
-            result_amount=amount,
-            balance=balance_after,
-            details="Chance: **50%** • Payout: **x2**",
-            game_name="Slash Lucky Roll"
-        )
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, payout, source_type="v3_gamble_win", details="Lucky roll payout")
+        embed = gambling_embed("🎲 Lucky Roll", "✅ **فوز نظيف** — دبل الرهان وصل لمحفظتك.", COLOR_GREEN, interaction.user, amount, result_amount=amount, balance=balance_after, details="Chance: **50%** • Payout: **x2**", game_name="Global V3 Lucky Roll")
     else:
-        balance_after = get_balance(interaction.user.id)
-        embed = gambling_embed(
-            "🎲 Lucky Roll",
-            "❌ **خسارة** — الرهان راح للكازينو.",
-            COLOR_RED,
-            interaction.user,
-            amount,
-            result_amount=-amount,
-            balance=balance_after,
-            details="Chance: **50%** • Better luck next time",
-            game_name="Slash Lucky Roll"
-        )
-
+        balance_after = v3_get_balance(interaction.guild.id, interaction.user.id)
+        embed = gambling_embed("🎲 Lucky Roll", "❌ **خسارة** — الرهان راح للكازينو.", COLOR_RED, interaction.user, amount, result_amount=-amount, balance=balance_after, details="Chance: **50%**", game_name="Global V3 Lucky Roll")
     await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="حظ", description="رهان حظ 50/50")
+@app_commands.describe(amount="المبلغ")
+async def slash_luck_ar(interaction: discord.Interaction, amount: int):
+    await slash_luck(interaction, amount)
+
+
+@bot.tree.command(name="double", description="High risk double-or-nothing gamble")
+@app_commands.describe(amount="Bet amount")
+async def slash_double(interaction: discord.Interaction, amount: int):
+    amount = await v3_gamble_check(interaction, amount)
+    if amount is None:
+        return
+    v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Double bet")
+    win = random.random() < 0.42
+    if win:
+        payout = amount * 2
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, payout, source_type="v3_gamble_win", details="Double payout")
+        embed = gambling_embed("🔥 Double", "✅ فزت بالدبل.", COLOR_GREEN, interaction.user, amount, result_amount=amount, balance=balance_after, details="Chance: **42%** • Payout: **x2**", game_name="Global V3 Double")
+    else:
+        balance_after = v3_get_balance(interaction.guild.id, interaction.user.id)
+        embed = gambling_embed("🔥 Double", "❌ خسرت الرهان.", COLOR_RED, interaction.user, amount, result_amount=-amount, balance=balance_after, details="Chance: **42%**", game_name="Global V3 Double")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="دبل", description="رهان دبل")
+@app_commands.describe(amount="المبلغ")
+async def slash_double_ar(interaction: discord.Interaction, amount: int):
+    await slash_double(interaction, amount)
+
+
+@bot.tree.command(name="slot", description="Play slot machine")
+@app_commands.describe(amount="Bet amount")
+async def slash_slot(interaction: discord.Interaction, amount: int):
+    amount = await v3_gamble_check(interaction, amount)
+    if amount is None:
+        return
+    v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Slot bet")
+    symbols = ["🍒", "🍋", "🔔", "💎", "7️⃣"]
+    roll = [random.choice(symbols) for _ in range(3)]
+    multiplier = 0
+    if roll[0] == roll[1] == roll[2]:
+        multiplier = 5 if roll[0] in ["💎", "7️⃣"] else 3
+    elif len(set(roll)) == 2:
+        multiplier = 1
+    payout = amount * multiplier
+    result_delta = -amount
+    if payout > 0:
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, payout, source_type="v3_gamble_win", details="Slot payout")
+        result_delta = payout - amount
+        color = COLOR_GREEN if result_delta >= 0 else COLOR_YELLOW
+        status = "✅ ربح" if result_delta > 0 else "↩️ رجع لك الرهان"
+    else:
+        balance_after = v3_get_balance(interaction.guild.id, interaction.user.id)
+        color = COLOR_RED
+        status = "❌ خسارة"
+    embed = gambling_embed("🎰 Slot Machine", status + "\n" + slot_box(roll), color, interaction.user, amount, result_amount=result_delta, balance=balance_after, details=f"Multiplier: **x{multiplier}**", game_name="Global V3 Slots")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="سلوت", description="لعبة السلوت")
+@app_commands.describe(amount="المبلغ")
+async def slash_slot_ar(interaction: discord.Interaction, amount: int):
+    await slash_slot(interaction, amount)
+
+
+@bot.tree.command(name="flip", description="Coin flip gamble")
+@app_commands.describe(amount="Bet amount", choice="heads or tails")
+async def slash_flip(interaction: discord.Interaction, amount: int, choice: str):
+    amount = await v3_gamble_check(interaction, amount)
+    if amount is None:
+        return
+    normalized = str(choice).lower().strip()
+    heads_values = {"heads", "head", "ملك", "وجه"}
+    tails_values = {"tails", "tail", "كتابة", "كتابه"}
+    if normalized not in heads_values and normalized not in tails_values:
+        await interaction.response.send_message("اكتب choice: `heads` أو `tails` أو `ملك` أو `كتابة`.", ephemeral=True)
+        return
+    picked_heads = normalized in heads_values
+    result_heads = random.choice([True, False])
+    v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Coin flip bet")
+    won = picked_heads == result_heads
+    result_text = "ملك" if result_heads else "كتابة"
+    if won:
+        payout = amount * 2
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, payout, source_type="v3_gamble_win", details="Coin flip payout")
+        embed = gambling_embed("🪙 Coin Flip", f"✅ طلعت **{result_text}** وفزت.", COLOR_GREEN, interaction.user, amount, result_amount=amount, balance=balance_after, details="Chance: **50%**", game_name="Global V3 Coin Flip")
+    else:
+        balance_after = v3_get_balance(interaction.guild.id, interaction.user.id)
+        embed = gambling_embed("🪙 Coin Flip", f"❌ طلعت **{result_text}** وخسرت.", COLOR_RED, interaction.user, amount, result_amount=-amount, balance=balance_after, details="Chance: **50%**", game_name="Global V3 Coin Flip")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="وجه", description="ملك أو كتابة")
+@app_commands.describe(amount="المبلغ", choice="ملك أو كتابة")
+async def slash_flip_ar(interaction: discord.Interaction, amount: int, choice: str):
+    await slash_flip(interaction, amount, choice)
+
+
+@bot.tree.command(name="blackjack", description="Simple blackjack against the dealer")
+@app_commands.describe(amount="Bet amount")
+async def slash_blackjack(interaction: discord.Interaction, amount: int):
+    amount = await v3_gamble_check(interaction, amount)
+    if amount is None:
+        return
+    # Lightweight slash blackjack resolver. Button blackjack remains on !بلاكجاك for the main guild.
+    v3_remove_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_bet", details="Blackjack bet")
+    player = random.randint(16, 21)
+    dealer = random.randint(16, 21)
+    if player > dealer:
+        payout = amount * 2
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, payout, source_type="v3_gamble_win", details="Blackjack payout")
+        color = COLOR_GREEN
+        status = "✅ فزت على الديلر"
+        delta = amount
+    elif player == dealer:
+        balance_after = v3_add_money(interaction.guild.id, interaction.user.id, amount, source_type="v3_gamble_push", details="Blackjack push refund")
+        color = COLOR_ORANGE
+        status = "↩️ تعادل ورجع رهانك"
+        delta = 0
+    else:
+        balance_after = v3_get_balance(interaction.guild.id, interaction.user.id)
+        color = COLOR_RED
+        status = "❌ الديلر فاز"
+        delta = -amount
+    embed = gambling_embed("🃏 Blackjack", status, color, interaction.user, amount, result_amount=delta, balance=balance_after, details=f"يدك: **{player}** | الديلر: **{dealer}**", game_name="Global V3 Blackjack")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="بلاكجاك", description="بلاكجاك ضد الديلر")
+@app_commands.describe(amount="المبلغ")
+async def slash_blackjack_ar(interaction: discord.Interaction, amount: int):
+    await slash_blackjack(interaction, amount)
+
+
+@bot.tree.command(name="shop", description="Show the server shop")
+async def slash_shop(interaction: discord.Interaction):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    await interaction.response.send_message(embed=v3_shop_embed(interaction.guild.id, interaction.user))
+
+
+@bot.tree.command(name="متجر", description="عرض المتجر")
+async def slash_shop_ar(interaction: discord.Interaction):
+    await slash_shop(interaction)
+
+
+@bot.tree.command(name="buy", description="Buy a shop item")
+@app_commands.describe(item="vip or lootbox")
+async def slash_buy(interaction: discord.Interaction, item: str):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    item_key = str(item or "").lower().strip()
+    if item_key in ["lootbox", "box", "صندوق"]:
+        await slash_lootbox(interaction)
+        return
+    if item_key not in ["vip", "فيب", "viprole"]:
+        await interaction.response.send_message("❌ منتج غير معروف. استخدم `/shop`.", ephemeral=True)
+        return
+    ok, new_balance = v3_remove_money(interaction.guild.id, interaction.user.id, SHOP_VIP_PRICE, source_type="v3_shop_vip", details="VIP purchase")
+    if not ok:
+        await interaction.response.send_message(f"❌ رصيدك ما يكفي. السعر: {coin_line(SHOP_VIP_PRICE)}", ephemeral=True)
+        return
+    try:
+        vip_role, _ = await ensure_custom_roles(interaction.guild)
+        if vip_role:
+            await interaction.user.add_roles(vip_role, reason=f"{BOT_BRAND} Global V3 VIP purchase")
+        expires_at = int(time.time()) + int(SHOP_VIP_DAYS) * 86400
+        if vip_role:
+            add_timed_role_record(interaction.user.id, vip_role.id, expires_at, "Global V3 VIP purchase")
+        embed = discord.Embed(title="✅ VIP Purchased", description=f"اشتريت VIP لمدة **{SHOP_VIP_DAYS} أيام**.", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
+        embed.add_field(name="السعر", value=coin_line(SHOP_VIP_PRICE), inline=True)
+        embed.add_field(name="رصيدك", value=coin_line(new_balance), inline=True)
+        await interaction.response.send_message(embed=embed)
+    except Exception as e:
+        v3_add_money(interaction.guild.id, interaction.user.id, SHOP_VIP_PRICE, source_type="v3_shop_refund", details="VIP purchase refund")
+        await interaction.response.send_message(f"❌ فشل إعطاء الرتبة وتم إرجاع المبلغ. السبب: `{clean_text(str(e), 250)}`", ephemeral=True)
+
+
+@bot.tree.command(name="شراء", description="شراء منتج من المتجر")
+@app_commands.describe(item="vip أو صندوق")
+async def slash_buy_ar(interaction: discord.Interaction, item: str):
+    await slash_buy(interaction, item)
+
+
+@bot.tree.command(name="lootbox", description="Open a lootbox")
+async def slash_lootbox(interaction: discord.Interaction):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    now = time.time()
+    last = lootbox_cooldowns.get(interaction.user.id, 0)
+    if now - last < LOOTBOX_COOLDOWN_SECONDS:
+        await interaction.response.send_message(f"⏳ باقي **{LOOTBOX_COOLDOWN_SECONDS - (now-last):.1f} ثانية** قبل صندوق ثاني.", ephemeral=True)
+        return
+    lootbox_cooldowns[interaction.user.id] = now
+    ok, new_balance = v3_remove_money(interaction.guild.id, interaction.user.id, LOOTBOX_PRICE, source_type="v3_lootbox_cost", details="Lootbox cost")
+    if not ok:
+        await interaction.response.send_message(f"❌ رصيدك ما يكفي. سعر الصندوق: {coin_line(LOOTBOX_PRICE)}", ephemeral=True)
+        return
+    rewards = [("coins", int(LOOTBOX_PRICE * 0.25), 30, "Common"), ("coins", int(LOOTBOX_PRICE * 1.0), 30, "Uncommon"), ("coins", int(LOOTBOX_PRICE * 2.0), 20, "Rare"), ("coins", int(LOOTBOX_PRICE * 5.0), 8, "Epic"), ("nothing", 0, 12, "Empty")]
+    pool = []
+    for reward_type, value, weight, rarity in rewards:
+        pool.extend([(reward_type, value, rarity)] * int(weight))
+    reward_type, value, rarity = random.choice(pool)
+    if reward_type == "coins" and value > 0:
+        final_balance = v3_add_money(interaction.guild.id, interaction.user.id, value, source_type="v3_lootbox_reward", details="Lootbox coin reward")
+        profit = value - LOOTBOX_PRICE
+        desc = f"ربحت {coin_line(value)}.\nصافي النتيجة: {money_delta(profit)}"
+        color = COLOR_GREEN if profit >= 0 else COLOR_YELLOW
+    else:
+        final_balance = v3_get_balance(interaction.guild.id, interaction.user.id)
+        desc = "الصندوق طلع فاضي. حظ أوفر."
+        color = COLOR_RED
+    embed = discord.Embed(title=f"🎁 Lootbox • {rarity}", description=desc, color=color, timestamp=discord.utils.utcnow())
+    embed.set_author(name=f"{interaction.user.display_name} فتح صندوق", icon_url=interaction.user.display_avatar.url)
+    embed.add_field(name="سعر الصندوق", value=coin_line(LOOTBOX_PRICE), inline=True)
+    embed.add_field(name="رصيدك الآن", value=coin_line(final_balance), inline=True)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="صندوق", description="فتح صندوق حظ")
+async def slash_lootbox_ar(interaction: discord.Interaction):
+    await slash_lootbox(interaction)
+
+
+@bot.tree.command(name="economy", description="Show the economy guide")
+async def slash_economy_guide(interaction: discord.Interaction):
+    if not await v3_require_commands_interaction(interaction):
+        return
+    await interaction.response.send_message(embed=build_economy_guide_embed(auto=False), ephemeral=False)
+
+
+@bot.tree.command(name="شرح", description="شرح الاقتصاد والأوامر")
+async def slash_economy_guide_ar(interaction: discord.Interaction):
+    await slash_economy_guide(interaction)
 
 
 @bot.tree.command(name="setup_status", description="Show this server setup status")
@@ -11754,20 +12325,14 @@ async def slash_setup_status(interaction: discord.Interaction):
     if not interaction.guild:
         await interaction.response.send_message("❌ هذا الأمر يشتغل داخل السيرفر فقط.", ephemeral=True)
         return
-
     create_default_guild_settings(interaction.guild)
     settings = get_guild_settings(interaction.guild.id)
-    embed = discord.Embed(
-        title="🌍 Retards System Setup Status",
-        description="هذه أول نسخة من دعم السيرفرات المتعددة. باقي الداشبورد العالمي بنضيفه بالمرحلة الجاية.",
-        color=COLOR_BLUE,
-        timestamp=discord.utils.utcnow()
-    )
+    embed = discord.Embed(title="🌍 Retards System Setup Status", description="إعدادات هذا السيرفر للنسخة العالمية.", color=COLOR_BLUE, timestamp=discord.utils.utcnow())
     embed.add_field(name="Server", value=f"{interaction.guild.name}\n`{interaction.guild.id}`", inline=False)
     embed.add_field(name="Commands Channel", value=f"<#{settings['commands_channel_id']}>" if settings['commands_channel_id'] else "Not set", inline=True)
     embed.add_field(name="Gambling Channel", value=f"<#{settings['gambling_channel_id']}>" if settings['gambling_channel_id'] else "Not set", inline=True)
     embed.add_field(name="Setup Done", value="Yes" if settings['setup_done'] else "No", inline=True)
-    embed.set_footer(text=f"{BOT_BRAND} • Global Phase 1")
+    embed.set_footer(text=f"{BOT_BRAND} • Global V3")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.event
