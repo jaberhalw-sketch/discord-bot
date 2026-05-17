@@ -1150,9 +1150,9 @@ def safe_len_json(file_name):
 
 def format_money(amount):
     try:
-        return f"{int(amount):,} {COIN_NAME}"
+        return f"{int(amount):,} {nm_coin_name()}"
     except:
-        return f"0 {COIN_NAME}"
+        return f"0 {nm_coin_name()}"
 
 
 def short_money(amount):
@@ -1184,9 +1184,9 @@ def coin_line(amount, bold=True):
 
     short = f" (`{short_money(value)}`)" if abs(value) >= 100_000 else ""
     if bold:
-        return f"{ECONOMY_EMOJI} **{value:,}** {COIN_NAME}{short}"
+        return f"{ECONOMY_EMOJI} **{value:,}** {nm_coin_name()}{short}"
 
-    return f"{ECONOMY_EMOJI} {value:,} {COIN_NAME}{short}"
+    return f"{ECONOMY_EMOJI} {value:,} {nm_coin_name()}{short}"
 
 
 def money_delta(amount):
@@ -1197,7 +1197,7 @@ def money_delta(amount):
 
     sign = "+" if amount >= 0 else ""
     icon = "📈" if amount > 0 else "📉" if amount < 0 else "➖"
-    return f"{icon} **{sign}{amount:,}** {ECONOMY_EMOJI} {COIN_NAME}"
+    return f"{icon} **{sign}{amount:,}** {ECONOMY_EMOJI} {nm_coin_name()}"
 
 
 def casino_status_line(label, value):
@@ -2120,9 +2120,9 @@ def get_existing_memory_files():
 
 def build_memory_report_text():
     status = local_memory_status()
-    level_users = db_table_count("levels")
-    economy_users = db_table_count("economy")
-    total_coins = db_sum_column("economy", "balance")
+    level_users = nm_db_table_count("levels")
+    economy_users = nm_db_table_count("economy")
+    total_coins = nm_db_sum_column("economy", "balance")
     warning_users = safe_len_json(WARNINGS_FILE)
     log_channels_saved = safe_len_json(LOG_CHANNELS_FILE)
 
@@ -2132,7 +2132,7 @@ def build_memory_report_text():
     lines.append("----------------------------")
     lines.append(f"Level users      : {level_users}")
     lines.append(f"Economy users    : {economy_users}")
-    lines.append(f"Total coins      : {total_coins:,} {COIN_NAME}")
+    lines.append(f"Total coins      : {total_coins:,} {nm_coin_name()}")
     lines.append(f"Warning users    : {warning_users}")
     lines.append(f"Saved log rooms  : {log_channels_saved}")
     lines.append("")
@@ -2148,9 +2148,9 @@ def build_memory_report_text():
 
 
 def add_memory_stats_fields(embed):
-    level_users = db_table_count("levels")
-    economy_users = db_table_count("economy")
-    total_coins = db_sum_column("economy", "balance")
+    level_users = nm_db_table_count("levels")
+    economy_users = nm_db_table_count("economy")
+    total_coins = nm_db_sum_column("economy", "balance")
     warning_users = safe_len_json(WARNINGS_FILE)
     log_channels_saved = safe_len_json(LOG_CHANNELS_FILE)
 
@@ -2159,7 +2159,7 @@ def add_memory_stats_fields(embed):
         value=(
             f"**Level users:** `{level_users}`\n"
             f"**Economy users:** `{economy_users}`\n"
-            f"**Total coins:** `{total_coins:,}` {COIN_NAME}"
+            f"**Total coins:** `{total_coins:,}` {nm_coin_name()}"
         ),
         inline=False
     )
@@ -2353,7 +2353,7 @@ def build_economy_guide_embed(auto=False):
             "`/رصيدي` أو `/balance` — عرض رصيدك\n"
             "`/اغنى` أو `/top` — توب أغنى الأعضاء\n"
             "`/تحويل user amount` أو `/transfer` — تحويل فلوس لعضو\n"
-            f"**العملة:** {COIN_NAME}"
+            f"**العملة:** {nm_coin_name()}"
         ),
         inline=False
     )
@@ -4728,6 +4728,210 @@ class GameRolesView(discord.ui.View):
 app = Flask(__name__)
 
 # =========================
+# NM SYSTEM STRICT MULTI-GUILD ISOLATION
+# كل شيء في الداشبورد لازم يشتغل على السيرفر المختار فقط
+# =========================
+
+def nm_int(value, default=0):
+    try:
+        return int(value)
+    except:
+        return default
+
+
+def nm_active_guild_id():
+    """One source of truth for the guild currently being managed."""
+    gid = (
+        request.args.get("guild_id")
+        or request.form.get("guild_id")
+        or session.get("selected_guild_id")
+        or GUILD_ID
+    )
+    return nm_int(gid, GUILD_ID)
+
+
+def nm_set_active_guild(guild_id):
+    guild_id = nm_int(guild_id, GUILD_ID)
+    try:
+        session["selected_guild_id"] = guild_id
+    except:
+        pass
+    return guild_id
+
+
+def nm_guild_only_clause(column="guild_id", include_legacy=False):
+    gid = nm_active_guild_id()
+    if include_legacy:
+        return f"({column} = ? OR {column} IS NULL OR {column} = 0)", [gid]
+    return f"{column} = ?", [gid]
+
+
+def nm_ensure_guild_column(cur, table_name):
+    """Make old tables multi-guild safe by adding guild_id if missing."""
+    try:
+        cur.execute(f"PRAGMA table_info({table_name})")
+        cols = [row[1] for row in cur.fetchall()]
+        if "guild_id" not in cols:
+            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN guild_id INTEGER DEFAULT 0")
+        try:
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table_name}_guild ON {table_name}(guild_id)")
+        except:
+            pass
+    except Exception as e:
+        print(f"Guild column migration skipped for {table_name}: {e}")
+
+
+def nm_migrate_core_tables_for_guilds():
+    """Migration guard: every core table gets guild_id so old/global rows stop leaking between servers."""
+    tables = [
+        "economy",
+        "levels",
+        "warning_history",
+        "dashboard_log_vault",
+        "command_center_events",
+        "money_audit",
+        "real_estate_properties",
+        "real_estate_auctions",
+        "shop_purchases",
+        "lootbox_history",
+        "dashboard_audit",
+        "guild_settings",
+    ]
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        for table in tables:
+            nm_ensure_guild_column(cur, table)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"NM guild migration failed: {e}")
+
+
+def nm_safe_selected_guild_settings():
+    gid = nm_active_guild_id()
+    try:
+        if "get_guild_settings" in globals():
+            return get_guild_settings(gid)
+    except Exception:
+        pass
+    return {}
+
+
+def nm_coin_name():
+    gid = nm_active_guild_id()
+    try:
+        settings = nm_safe_selected_guild_settings()
+        for key in ("coin_name", "currency_name", "economy_coin_name"):
+            value = settings.get(key)
+            if value:
+                return str(value)
+    except Exception:
+        pass
+    try:
+        return str(dashboard_settings.get("coin_name") or dashboard_settings.get("currency_name") or "NM Coin")
+    except:
+        return "NM Coin"
+
+
+def nm_save_coin_name(name):
+    gid = nm_active_guild_id()
+    name = clean_text(str(name or "NM Coin"), 40) if "clean_text" in globals() else str(name or "NM Coin")[:40]
+    if not name.strip():
+        name = "NM Coin"
+
+    try:
+        if "get_guild_settings" in globals() and "save_guild_settings" in globals():
+            settings = get_guild_settings(gid)
+            settings["coin_name"] = name
+            settings["currency_name"] = name
+            settings["economy_coin_name"] = name
+            save_guild_settings(gid, settings)
+    except Exception as e:
+        print(f"Guild coin save failed: {e}")
+
+    try:
+        if "dashboard_settings" in globals():
+            dashboard_settings["coin_name"] = name
+            dashboard_settings["currency_name"] = name
+            dashboard_settings["economy_coin_name"] = name
+            if "save_dashboard_settings" in globals():
+                save_dashboard_settings()
+    except Exception as e:
+        print(f"Dashboard coin save failed: {e}")
+
+    try:
+        globals()["COIN_NAME"] = name
+    except:
+        pass
+
+    nm_persist_dashboard_change("coin name changed")
+    return name
+
+
+def nm_persist_dashboard_change(reason="dashboard change"):
+    """Save files + send memory backup after dashboard changes so Railway redeploy doesn't revert."""
+    try:
+        if "save_dashboard_settings" in globals():
+            save_dashboard_settings()
+    except Exception as e:
+        print(f"save_dashboard_settings failed: {e}")
+
+    try:
+        if "sync_warnings_json_from_history" in globals():
+            sync_warnings_json_from_history()
+    except Exception:
+        pass
+
+    try:
+        if bot and getattr(bot, "loop", None) and bot.loop.is_running():
+            async def _run_backup():
+                try:
+                    if "memory_backup_now" in globals():
+                        try:
+                            await memory_backup_now(reason=reason)
+                        except TypeError:
+                            await memory_backup_now()
+                    elif "send_memory_backup" in globals():
+                        await send_memory_backup()
+                except Exception as e:
+                    print(f"NM backup failed: {e}")
+            asyncio.run_coroutine_threadsafe(_run_backup(), bot.loop)
+    except Exception as e:
+        print(f"NM backup schedule failed: {e}")
+
+
+@app.before_request
+def nm_before_request_isolation():
+    try:
+        gid = request.args.get("guild_id") or request.form.get("guild_id")
+        if gid:
+            nm_set_active_guild(gid)
+    except Exception:
+        pass
+
+
+@app.after_request
+def nm_after_request_persist(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("coin")
+            )
+            if coin is not None:
+                nm_save_coin_name(coin)
+            else:
+                nm_persist_dashboard_change(f"dashboard post {request.path}")
+    except Exception as e:
+        print(f"NM after request persist failed: {e}")
+    return response
+
+
+
+# =========================
 # NM DURABLE DASHBOARD SAVE + GUILD ISOLATION PATCH
 # =========================
 
@@ -5628,7 +5832,7 @@ def fmt_num(value):
 
 
 def fmt_coin(value):
-    return f"🪙 {fmt_num(value)} {COIN_NAME}"
+    return f"🪙 {fmt_num(value)} {nm_coin_name()}"
 
 
 def money_audit_user_name(user_id):
@@ -7351,6 +7555,40 @@ def dashboard_selected_server_count():
 def dashboard_selected_member_count():
     return int(dashboard_active_guild_stats().get("member_count", 0) or 0)
 
+
+def nm_db_table_count(table_name):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_guild_column(cur, table_name)
+        cur.execute(f"SELECT COUNT(*) FROM {table_name} WHERE guild_id = ?", (nm_active_guild_id(),))
+        count = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+        return count
+    except Exception:
+        try:
+            return db_table_count(table_name)
+        except:
+            return 0
+
+
+def nm_db_sum_column(table_name, column_name):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_ensure_guild_column(cur, table_name)
+        cur.execute(f"SELECT COALESCE(SUM({column_name}), 0) FROM {table_name} WHERE guild_id = ?", (nm_active_guild_id(),))
+        total = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+        return total
+    except Exception:
+        try:
+            return db_sum_column(table_name, column_name)
+        except:
+            return 0
+
 DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
 <html lang="en">
@@ -7604,7 +7842,7 @@ def public_top_page():
     events = get_active_events(5)
     event_html = "".join([f"<tr><td>{clean_text(title,100)}</td><td>{fmt_coin(prize)}</td><td>{ends}</td></tr>" for eid,key,title,prize,start,ends,created,status in events]) or "<tr><td colspan='3'>No active events</td></tr>"
     body = f"""
-    <div class="hero"><div class="card"><div class="big">🏆 {BOT_BRAND} Leaderboard</div><p class="muted">Public server rankings and active events.</p><div style="height:12px"></div><a class="btn primary" href="/login">Admin Login</a></div><div class="card"><h3>🪙 Currency</h3><p class="muted">{COIN_NAME}</p><span class="pill ok">Public View</span></div></div>
+    <div class="hero"><div class="card"><div class="big">🏆 {BOT_BRAND} Leaderboard</div><p class="muted">Public server rankings and active events.</p><div style="height:12px"></div><a class="btn primary" href="/login">Admin Login</a></div><div class="card"><h3>🪙 Currency</h3><p class="muted">{nm_coin_name()}</p><span class="pill ok">Public View</span></div></div>
     <div style="height:16px"></div>
     <div class="grid2"><div class="card"><h3>🪙 Top Richest</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Balance</th></tr>{money_html}</table></div><div class="card"><h3>📊 Top Levels</h3><table class="table"><tr><th>Rank</th><th>User</th><th>Level</th></tr>{level_html}</table></div></div>
     <div style="height:16px"></div><div class="card"><h3>🎉 Active Events</h3><table class="table"><tr><th>Event</th><th>Prize</th><th>Ends Unix</th></tr>{event_html}</table></div>
@@ -7733,7 +7971,7 @@ def dashboard_home():
     <div class="hero"><div class="card"><div class="big">NM System</div><p class="muted">Control servers, economy, levels, memory backups, casino and protection from one powerful dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
     <div class="grid">
       <div class="card stat"><div class="icon">🪙</div><div class="num">{fmt_num(economy_users)}</div><div class="label">Economy users</div></div>
-      <div class="card stat"><div class="icon">💰</div><div class="num">{fmt_num(total_coins)}</div><div class="label">Total {COIN_NAME}</div></div>
+      <div class="card stat"><div class="icon">💰</div><div class="num">{fmt_num(total_coins)}</div><div class="label">Total {nm_coin_name()}</div></div>
       <div class="card stat"><div class="icon">📊</div><div class="num">{fmt_num(level_users)}</div><div class="label">Level users</div></div>
       <div class="card stat"><div class="icon">⚠️</div><div class="num">{fmt_num(total_warnings)}</div><div class="label">Warning users • Logs {fmt_num(log_rooms)}</div></div>
     </div>
@@ -9807,6 +10045,149 @@ def log_vault_channels(guild_id=0):
         return []
 
 
+
+# =========================
+# NM STRICT LOG VAULT OVERRIDE - no mixed guild logs
+# =========================
+
+def nm_log_where(guild_id=0, log_type="all", query="", deleted_filter="all", channel_id="all", include_legacy=False):
+    gid = nm_int(guild_id or nm_active_guild_id(), GUILD_ID)
+    where = []
+    params = []
+
+    if include_legacy:
+        where.append("(guild_id = ? OR guild_id IS NULL OR guild_id = 0)")
+        params.append(gid)
+    else:
+        where.append("guild_id = ?")
+        params.append(gid)
+
+    if log_type and str(log_type) != "all":
+        where.append("log_type = ?")
+        params.append(str(log_type))
+
+    if channel_id and str(channel_id) != "all":
+        try:
+            where.append("discord_channel_id = ?")
+            params.append(int(channel_id))
+        except:
+            pass
+
+    if deleted_filter == "deleted":
+        where.append("deleted_from_discord = 1")
+    elif deleted_filter == "saved":
+        where.append("(deleted_from_discord IS NULL OR deleted_from_discord = 0)")
+
+    if query:
+        like = f"%{str(query)[:150]}%"
+        where.append("(title LIKE ? OR description LIKE ? OR discord_channel_name LIKE ? OR deleted_by_name LIKE ?)")
+        params.extend([like, like, like, like])
+
+    return "WHERE " + " AND ".join(where), params
+
+
+def log_vault_recent(guild_id=0, limit=80, offset=0, log_type="all", query="", deleted_filter="all", channel_id="all"):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        nm_ensure_guild_column(cur, "dashboard_log_vault")
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_where(guild_id, log_type, query, deleted_filter, channel_id, include_legacy)
+        cur.execute(f"""
+            SELECT id, guild_id, log_type, title, description, discord_channel_id, discord_channel_name,
+                   discord_message_id, deleted_from_discord, deleted_by_id, deleted_by_name, created_at, deleted_at
+            FROM dashboard_log_vault
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+        """, tuple(params + [int(limit), int(offset)]))
+        rows = cur.fetchall()
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+        conn.commit()
+        conn.close()
+        return rows, total
+    except Exception as e:
+        print(f"Strict Log Vault recent error: {e}")
+        return [], 0
+
+
+def log_vault_counts(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        nm_ensure_guild_column(cur, "dashboard_log_vault")
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_where(guild_id, "all", "", "all", "all", include_legacy)
+        since = int(time.time()) - 86400
+
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql}", tuple(params))
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql} AND deleted_from_discord = 1", tuple(params))
+        deleted = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(DISTINCT log_type) FROM dashboard_log_vault {where_sql}", tuple(params))
+        types = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(*) FROM dashboard_log_vault {where_sql} AND created_at >= ?", tuple(params + [since]))
+        today = int(cur.fetchone()[0] or 0)
+
+        conn.commit()
+        conn.close()
+        return total, deleted, types, today
+    except Exception as e:
+        print(f"Strict Log Vault counts error: {e}")
+        return 0, 0, 0, 0
+
+
+def log_vault_types(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        nm_ensure_guild_column(cur, "dashboard_log_vault")
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_where(guild_id, "all", "", "all", "all", include_legacy)
+        cur.execute(f"""
+            SELECT log_type, COUNT(*)
+            FROM dashboard_log_vault
+            {where_sql}
+            GROUP BY log_type
+            ORDER BY COUNT(*) DESC
+        """, tuple(params))
+        rows = cur.fetchall()
+        conn.commit()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Strict Log Vault types error: {e}")
+        return []
+
+
+def log_vault_channels(guild_id=0):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        log_vault_ensure_table(cur)
+        nm_ensure_guild_column(cur, "dashboard_log_vault")
+        include_legacy = bool(request.args.get("legacy") == "1") if request else False
+        where_sql, params = nm_log_where(guild_id, "all", "", "all", "all", include_legacy)
+        cur.execute(f"""
+            SELECT discord_channel_id, discord_channel_name, COUNT(*)
+            FROM dashboard_log_vault
+            {where_sql}
+            GROUP BY discord_channel_id, discord_channel_name
+            ORDER BY COUNT(*) DESC
+        """, tuple(params))
+        rows = cur.fetchall()
+        conn.commit()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Strict Log Vault channels error: {e}")
+        return []
+
+
 @app.route("/dashboard/log-vault", methods=["GET"])
 def dashboard_log_vault_page():
     denied = dashboard_require_owner()
@@ -10046,7 +10427,7 @@ def dashboard_log_vault_page():
       <div style="height:10px"></div>
       <span class="pill ok">Owner Only</span>
       <span class="pill">Room-based view</span>
-      <span class="pill">Per-server vault</span><span class="pill ok">Legacy hidden</span>
+      <span class="pill">Per-server vault</span><span class="pill ok">Strict guild mode</span><span class="pill ok">Legacy hidden</span>
       <span class="pill">Saved: {total:,}</span>
       <span class="pill danger">Deleted: {deleted_total:,}</span>
     </div>
@@ -10065,7 +10446,7 @@ def dashboard_log_vault_page():
               <h2 style="margin:0">{dash_escape(selected_channel_name, 90)}</h2>
               <p class="muted" style="margin:4px 0 0">{total_matches:,} logs match your filters</p>
             </div>
-            <a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">All rooms</a><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}&legacy=1">Show legacy</a>
+            <a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}">All rooms</a><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}&legacy=1">Show legacy</a><a class="btn" href="/dashboard/log-vault?guild_id={int(selected_guild_id or 0)}&legacy=1">Show legacy</a>
           </div>
           <form method="get" class="formgrid">
             <input type="hidden" name="guild_id" value="{int(selected_guild_id or 0)}">
@@ -10113,9 +10494,9 @@ def dashboard_command_center_page():
     memory_bad = [name for name, info in memory_status.items() if not info.get("valid")]
     memory_text = "All memory files OK" if not memory_bad else "Check: " + ", ".join(memory_bad)
 
-    total_money = db_sum_column("economy", "balance")
-    economy_users = db_table_count("economy")
-    level_users = db_table_count("levels")
+    total_money = nm_db_sum_column("economy", "balance")
+    economy_users = nm_db_table_count("economy")
+    level_users = nm_db_table_count("levels")
     active_warnings, cleared_warnings, active_warning_users, total_warning_users = get_warning_summary_counts()
 
     messages_24h = cc_count_clean_messages(since_24h)
@@ -10236,8 +10617,8 @@ def dashboard_command_center_page():
 
     <div id="economy" style="height:16px"></div>
     <div class="grid">
-      <div class="card"><h3>📈 Money Created 24h</h3><div class="cc-stat" style="color:#22c55e">+{money_created_24h:,}</div><div class="cc-sub">{COIN_NAME}</div></div>
-      <div class="card"><h3>📉 Money Removed 24h</h3><div class="cc-stat" style="color:#ef4444">-{money_removed_24h:,}</div><div class="cc-sub">{COIN_NAME}</div></div>
+      <div class="card"><h3>📈 Money Created 24h</h3><div class="cc-stat" style="color:#22c55e">+{money_created_24h:,}</div><div class="cc-sub">{nm_coin_name()}</div></div>
+      <div class="card"><h3>📉 Money Removed 24h</h3><div class="cc-stat" style="color:#ef4444">-{money_removed_24h:,}</div><div class="cc-sub">{nm_coin_name()}</div></div>
       <div class="card"><h3>🏦 Database Economy</h3><div class="cc-stat">{total_money:,}</div><div class="cc-sub">Total server money</div></div>
     </div>
 
@@ -10710,31 +11091,31 @@ def dashboard_economy_action():
                     admin_user = session.get("discord_user") or {}
                     fut = asyncio.run_coroutine_threadsafe(bulk_add_money_to_all(guild, amount, source_type="dashboard_bulk_add", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner")), bot.loop)
                     result = fut.result(timeout=90)
-                    msg = f"Added {fmt_num(amount)} {COIN_NAME} to {fmt_num(result['count'])} members. Total added: {fmt_num(result['total_added'])}."
+                    msg = f"Added {fmt_num(amount)} {nm_coin_name()} to {fmt_num(result['count'])} members. Total added: {fmt_num(result['total_added'])}."
                     dashboard_log_action("Economy: bulk add all", msg, session.get("discord_user"))
                 else:
                     admin_user = session.get("discord_user") or {}
                     fut = asyncio.run_coroutine_threadsafe(bulk_remove_money_from_all(guild, amount, source_type="dashboard_bulk_remove", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner")), bot.loop)
                     result = fut.result(timeout=90)
-                    msg = f"Took up to {fmt_num(amount)} {COIN_NAME} from {fmt_num(result['count'])} members. Total removed: {fmt_num(result['total_removed'])}."
+                    msg = f"Took up to {fmt_num(amount)} {nm_coin_name()} from {fmt_num(result['count'])} members. Total removed: {fmt_num(result['total_removed'])}."
                     dashboard_log_action("Economy: bulk remove all", msg, session.get("discord_user"))
         else:
             user_id = parse_int_field(request.form.get("user_id", "0"), 0, 1)
             if action == "add":
                 admin_user = session.get("discord_user") or {}
                 balance = add_money(user_id, amount, source_type="dashboard_admin_add", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual add money")
-                msg = f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance: {fmt_num(balance)}"
-                dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {COIN_NAME} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
+                msg = f"Added {fmt_num(amount)} {nm_coin_name()} to {user_id}. New balance: {fmt_num(balance)}"
+                dashboard_log_action("Economy: add money", f"Added {fmt_num(amount)} {nm_coin_name()} to {user_id}. New balance {fmt_num(balance)}", session.get("discord_user"))
             elif action == "remove":
                 admin_user = session.get("discord_user") or {}
                 ok, balance = remove_money(user_id, amount, source_type="dashboard_admin_remove", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual remove money")
-                msg = f"Removed {fmt_num(amount)} {COIN_NAME} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
-                dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {COIN_NAME} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
+                msg = f"Removed {fmt_num(amount)} {nm_coin_name()} from {user_id}. New balance: {fmt_num(balance)}" if ok else f"User {user_id} does not have enough balance. Current: {fmt_num(balance)}"
+                dashboard_log_action("Economy: remove money", f"Attempted remove {fmt_num(amount)} {nm_coin_name()} from {user_id}. OK={ok}. Balance {fmt_num(balance)}", session.get("discord_user"))
             elif action == "set":
                 admin_user = session.get("discord_user") or {}
                 balance = set_balance(user_id, amount, source_type="dashboard_set", admin_id=admin_user.get("id", 0), admin_name=admin_user.get("username", "Dashboard Owner"), details="Dashboard manual set balance")
-                msg = f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}"
-                dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {COIN_NAME}", session.get("discord_user"))
+                msg = f"Set {user_id} balance to {fmt_num(balance)} {nm_coin_name()}"
+                dashboard_log_action("Economy: set balance", f"Set {user_id} balance to {fmt_num(balance)} {nm_coin_name()}", session.get("discord_user"))
             else:
                 msg = "Unknown action."
     except Exception as e:
@@ -11016,7 +11397,7 @@ async def on_message(message):
             new_balance = add_money(message.author.id, bonus)
             await message.channel.send(
                 f"📊 {message.author.mention} وصل لفل **{level}**! 🎉\n"
-                f"💰 مكافأة اللفل: **{bonus:,} {COIN_NAME}** | رصيدك: **{new_balance:,}**",
+                f"💰 مكافأة اللفل: **{bonus:,} {nm_coin_name()}** | رصيدك: **{new_balance:,}**",
                 delete_after=10
             )
 
@@ -12399,7 +12780,7 @@ async def my_level(ctx):
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
     embed.add_field(name="🏅 Level", value=f"**{level}**", inline=True)
     embed.add_field(name="⚡ XP", value=f"**{xp:,}/{needed:,}**", inline=True)
-    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{nm_coin_name()}", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Level System")
     await ctx.send(embed=embed)
 
@@ -12424,7 +12805,7 @@ async def level(ctx, member: discord.Member = None):
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="🏅 Level", value=f"**{level_num}**", inline=True)
     embed.add_field(name="⚡ XP", value=f"**{xp:,}/{needed:,}**", inline=True)
-    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{COIN_NAME}", inline=True)
+    embed.add_field(name=f"{ECONOMY_EMOJI} Balance", value=f"**{balance:,}**\n{nm_coin_name()}", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Level System")
     await ctx.send(embed=embed)
 
@@ -12599,7 +12980,7 @@ async def transfer_money(ctx, member: discord.Member = None, amount: int = None)
     )
     embed.add_field(name="من", value=ctx.author.mention, inline=True)
     embed.add_field(name="إلى", value=member.mention, inline=True)
-    embed.add_field(name="المبلغ", value=f"**{amount:,}** {COIN_NAME}", inline=False)
+    embed.add_field(name="المبلغ", value=f"**{amount:,}** {nm_coin_name()}", inline=False)
     embed.add_field(name="رصيد المرسل", value=f"**{new_sender_balance:,}**", inline=True)
     embed.add_field(name="رصيد المستلم", value=f"**{new_receiver_balance:,}**", inline=True)
     embed.set_footer(text=f"{BOT_BRAND} | Economy Transfer")
@@ -12619,7 +13000,7 @@ async def richest(ctx):
 
     medals = ["🥇", "🥈", "🥉"]
     text = ""
-    total = db_sum_column("economy", "balance")
+    total = nm_db_sum_column("economy", "balance")
 
     for i, (user_id, balance_amount) in enumerate(rows, start=1):
         icon = medals[i - 1] if i <= 3 else f"`#{i}`"
@@ -12652,8 +13033,8 @@ async def admin_add_money(ctx, member: discord.Member = None, amount: int = None
 
     balance_amount = add_money(member.id, amount, source_type="discord_admin_add", admin_id=ctx.author.id, admin_name=str(ctx.author), details=f"Discord admin add money by {ctx.author}")
     embed = discord.Embed(title="✅ Admin Economy", color=COLOR_GREEN, timestamp=discord.utils.utcnow())
-    embed.description = f"تم إعطاء {member.mention} **{amount:,} {COIN_NAME}**."
-    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {COIN_NAME}", inline=False)
+    embed.description = f"تم إعطاء {member.mention} **{amount:,} {nm_coin_name()}**."
+    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {nm_coin_name()}", inline=False)
     embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
     await ctx.send(embed=embed)
 
@@ -12679,8 +13060,8 @@ async def admin_remove_money(ctx, member: discord.Member = None, amount: int = N
         return
 
     embed = discord.Embed(title="✅ Admin Economy", color=COLOR_ORANGE, timestamp=discord.utils.utcnow())
-    embed.description = f"تم سحب **{amount:,} {COIN_NAME}** من {member.mention}."
-    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {COIN_NAME}", inline=False)
+    embed.description = f"تم سحب **{amount:,} {nm_coin_name()}** من {member.mention}."
+    embed.add_field(name="رصيده الآن", value=f"**{balance_amount:,}** {nm_coin_name()}", inline=False)
     embed.set_footer(text=f"{BOT_BRAND} | Economy Admin")
     await ctx.send(embed=embed)
 
@@ -12730,7 +13111,7 @@ async def admin_add_money_all(ctx, amount: int = None, confirm: str = None):
     result = await bulk_add_money_to_all(ctx.guild, amount, source_type="discord_bulk_add", admin_id=ctx.author.id, admin_name=str(ctx.author))
     embed = discord.Embed(
         title="🌍 تم إعطاء الكل فلوس",
-        description=f"تم إعطاء **{amount:,} {COIN_NAME}** لكل عضو غير بوت.",
+        description=f"تم إعطاء **{amount:,} {nm_coin_name()}** لكل عضو غير بوت.",
         color=COLOR_GREEN,
         timestamp=discord.utils.utcnow()
     )
@@ -12738,7 +13119,7 @@ async def admin_add_money_all(ctx, amount: int = None, confirm: str = None):
     embed.add_field(name="💰 إجمالي المبلغ المضاف", value=coin_line(result['total_added']), inline=False)
     embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
     await ctx.send(embed=embed)
-    await send_log(ctx.guild, "🌍 Bulk Economy Add", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {COIN_NAME}\n**Members:** `{result['count']:,}`\n**Total added:** `{result['total_added']:,}`", COLOR_GREEN, log_type="server")
+    await send_log(ctx.guild, "🌍 Bulk Economy Add", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {nm_coin_name()}\n**Members:** `{result['count']:,}`\n**Total added:** `{result['total_added']:,}`", COLOR_GREEN, log_type="server")
 
 
 @bot.command(name="سحب_من_الكل", aliases=["takeall", "removeallmoney"])
@@ -12765,7 +13146,7 @@ async def admin_remove_money_all(ctx, amount: int = None, confirm: str = None):
     result = await bulk_remove_money_from_all(ctx.guild, amount, source_type="discord_bulk_remove", admin_id=ctx.author.id, admin_name=str(ctx.author))
     embed = discord.Embed(
         title="🌍 تم السحب من الكل",
-        description=f"تم سحب حتى **{amount:,} {COIN_NAME}** من كل عضو غير بوت.",
+        description=f"تم سحب حتى **{amount:,} {nm_coin_name()}** من كل عضو غير بوت.",
         color=COLOR_RED,
         timestamp=discord.utils.utcnow()
     )
@@ -12773,7 +13154,7 @@ async def admin_remove_money_all(ctx, amount: int = None, confirm: str = None):
     embed.add_field(name="💸 إجمالي المبلغ المسحوب", value=coin_line(result['total_removed']), inline=False)
     embed.set_footer(text=f"{BOT_BRAND} | Bulk Economy")
     await ctx.send(embed=embed)
-    await send_log(ctx.guild, "🌍 Bulk Economy Remove", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {COIN_NAME}\n**Members:** `{result['count']:,}`\n**Total removed:** `{result['total_removed']:,}`", COLOR_RED, log_type="server")
+    await send_log(ctx.guild, "🌍 Bulk Economy Remove", f"**By:** {ctx.author.mention}\n**Amount each:** `{amount:,}` {nm_coin_name()}\n**Members:** `{result['count']:,}`\n**Total removed:** `{result['total_removed']:,}`", COLOR_RED, log_type="server")
 
 
 
@@ -13013,7 +13394,7 @@ async def gambling_help(ctx):
     embed = discord.Embed(
         title="🎰 Casino Guide",
         description=(
-            f"القمار هنا بعملة البوت فقط: {ECONOMY_EMOJI} **{COIN_NAME}**\n"
+            f"القمار هنا بعملة البوت فقط: {ECONOMY_EMOJI} **{nm_coin_name()}**\n"
             "ما فيه حد أعلى للرهان، تدخل بأي مبلغ موجود في محفظتك.\n"
             f"الانتظار بين كل محاولة ومحاولة: **{GAMBLE_COOLDOWN_SECONDS} ثواني**."
         ),
@@ -14307,7 +14688,7 @@ async def slash_top(interaction: discord.Interaction):
         return
     text = ""
     for index, (user_id, balance_amount) in enumerate(rows, start=1):
-        text += f"`{index}.` <@{user_id}> — **{int(balance_amount):,}** {COIN_NAME}\n"
+        text += f"`{index}.` <@{user_id}> — **{int(balance_amount):,}** {nm_coin_name()}\n"
     embed = discord.Embed(title=f"{ECONOMY_EMOJI} Richest Members", description=text[:3900], color=COLOR_YELLOW, timestamp=discord.utils.utcnow())
     embed.set_footer(text=f"{BOT_BRAND} • Global V3")
     await interaction.response.send_message(embed=embed)
