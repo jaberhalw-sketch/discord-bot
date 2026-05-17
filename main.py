@@ -11743,6 +11743,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_admin_people_boot()
     nm_v5_admin_access_boot()
     nm_v5_discord_sync_boot()
     nm_v5_protection_level_boot()
@@ -22070,6 +22071,351 @@ def nm_v5_admin_access_boot():
     except Exception as e:
         try: print(f"NM V5 admin access boot skipped: {e}")
         except Exception: pass
+
+
+
+# =====================================================================
+# NM V5 ADMIN ACCESS PEOPLE UI
+# Replaces the ugly role multi-select look with member cards:
+# - Avatar
+# - Display name
+# - Username
+# - ID
+# - Roles
+# - Online/offline
+# - Buttons: Owner / Admin / Remove
+# Role select stays under Advanced only.
+# =====================================================================
+
+def nm_v5_admin_people_member_roles(member, max_roles=5):
+    chips = []
+    try:
+        roles = [r for r in getattr(member, "roles", []) if getattr(r, "name", "@everyone") != "@everyone"]
+        roles = sorted(roles, key=lambda r: getattr(r, "position", 0), reverse=True)[:max_roles]
+        for r in roles:
+            name = dash_escape(getattr(r, "name", "role"), 45)
+            chips.append(f"<span class='role-chip'>@{name}</span>")
+        extra = len([r for r in getattr(member, "roles", []) if getattr(r, "name", "@everyone") != "@everyone"]) - len(roles)
+        if extra > 0:
+            chips.append(f"<span class='role-chip'>+{extra} roles</span>")
+    except Exception:
+        pass
+    return "".join(chips) or "<span class='role-chip muted-chip'>No roles</span>"
+
+def nm_v5_admin_people_status(member):
+    try:
+        status = str(getattr(member, "status", "offline"))
+    except Exception:
+        status = "offline"
+    if status == "online":
+        return "online", "🟢"
+    if status == "idle":
+        return "idle", "🟡"
+    if status in ("dnd", "do_not_disturb"):
+        return "dnd", "🔴"
+    return "offline", "⚫"
+
+def nm_v5_admin_people_card(member, access_state, gid):
+    try:
+        avatar = member.display_avatar.url
+    except Exception:
+        avatar = ""
+    try:
+        display = getattr(member, "display_name", "Unknown")
+        username = getattr(member, "name", "unknown")
+        uid = int(member.id)
+    except Exception:
+        display, username, uid = "Unknown", "unknown", 0
+
+    status, dot = nm_v5_admin_people_status(member)
+    access_class = "owner" if access_state == "Owner" else ("admin" if access_state == "Admin" else "none")
+    access_label = access_state if access_state in ("Owner", "Admin") else "No Access"
+
+    return f"""
+    <div class="member-card" data-user-name="{dash_escape((display + ' ' + username).lower(), 160)}" data-access="{access_class}">
+      <div class="member-main">
+        <img class="member-avatar" src="{avatar}">
+        <div class="member-info">
+          <div class="member-title">
+            <span class="member-name">{dash_escape(display, 80)}</span>
+            <span class="access-badge {access_class}">{access_label}</span>
+            <span class="status-badge">{dot} {dash_escape(status, 20)}</span>
+          </div>
+          <div class="member-sub">Username: @{dash_escape(username, 80)} • ID: <code>{uid}</code></div>
+          <div class="member-roles">{nm_v5_admin_people_member_roles(member)}</div>
+        </div>
+      </div>
+      <div class="member-actions">
+        <button type="button" class="small-btn owner-btn" onclick="setUserAccess('{uid}','owner')">👑 Owner</button>
+        <button type="button" class="small-btn admin-btn" onclick="setUserAccess('{uid}','admin')">🛡️ Admin</button>
+        <button type="button" class="small-btn remove-btn" onclick="setUserAccess('{uid}','remove')">Remove</button>
+      </div>
+    </div>
+    """
+
+def nm_v5_admin_people_access_for_member(member, settings):
+    try:
+        uid = int(member.id)
+        role_ids = {int(r.id) for r in getattr(member, "roles", [])}
+        owner_users = set(int(x) for x in settings.get("owner_user_ids", []))
+        admin_users = set(int(x) for x in settings.get("admin_user_ids", []))
+        owner_roles = set(int(x) for x in settings.get("owner_role_ids", []))
+        admin_roles = set(int(x) for x in settings.get("admin_role_ids", []))
+        if uid in owner_users or role_ids.intersection(owner_roles):
+            return "Owner"
+        if uid in admin_users or role_ids.intersection(admin_roles):
+            return "Admin"
+    except Exception:
+        pass
+    return "None"
+
+def nm_v5_admin_people_page():
+    if not dashboard_session_is_private_owner(session.get("discord_user") or {}):
+        denied = dashboard_require_owner()
+        if denied:
+            return denied
+    elif not session.get("discord_user"):
+        return redirect("/login")
+
+    gid = nm_v5_admin_gid()
+    settings = nm_v5_admin_get(gid)
+
+    try:
+        members = dashboard_get_guild_members_sync(force_chunk=str(request.args.get("refresh", "")) == "1")
+    except Exception:
+        members = []
+
+    # Sort: Owners, Admins, online, name.
+    def sort_key(m):
+        access = nm_v5_admin_people_access_for_member(m, settings)
+        status, _ = nm_v5_admin_people_status(m)
+        return (
+            0 if access == "Owner" else (1 if access == "Admin" else 2),
+            0 if status == "online" else (1 if status in ("idle", "dnd") else 2),
+            str(getattr(m, "display_name", "")).lower()
+        )
+
+    clean_members = []
+    for m in members:
+        try:
+            if getattr(m, "bot", False):
+                continue
+            clean_members.append(m)
+        except Exception:
+            pass
+    clean_members = sorted(clean_members, key=sort_key)
+
+    cards = []
+    for m in clean_members:
+        access = nm_v5_admin_people_access_for_member(m, settings)
+        cards.append(nm_v5_admin_people_card(m, access, gid))
+    if not cards:
+        cards.append("<div class='empty'>No members loaded. اضغط Refresh Members أو تأكد إن البوت عنده Server Members Intent.</div>")
+
+    owner_users_value = ", ".join(str(x) for x in settings.get("owner_user_ids", []))
+    admin_users_value = ", ".join(str(x) for x in settings.get("admin_user_ids", []))
+
+    roles = dashboard_get_guild_roles()
+    def role_options(selected_ids):
+        selected = {int(x) for x in selected_ids}
+        opts = []
+        for role in roles:
+            try:
+                rid = int(role.id)
+                name = dash_escape(getattr(role, "name", str(rid)), 80)
+                sel = "selected" if rid in selected else ""
+                opts.append(f"<option value='{rid}' {sel}>{name} ({rid})</option>")
+            except Exception:
+                pass
+        return "".join(opts)
+
+    body = f"""
+    <style>
+      .admin-topbar {{
+        display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap;
+        background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:18px; margin-bottom:18px;
+      }}
+      .search-box {{
+        flex:1; min-width:260px; background:#020617; color:white; border:1px solid #334155;
+        border-radius:14px; padding:13px 14px; font-weight:700;
+      }}
+      .filter-tabs {{ display:flex; gap:8px; flex-wrap:wrap; }}
+      .filter-tab {{
+        border:1px solid #334155; background:#111827; color:#e5e7eb; border-radius:999px;
+        padding:10px 14px; font-weight:900; cursor:pointer;
+      }}
+      .filter-tab.active {{ background:#6d5dfc; border-color:#8b5cf6; color:white; }}
+      .member-list {{ display:grid; grid-template-columns:1fr; gap:12px; }}
+      .member-card {{
+        background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:14px;
+        display:flex; align-items:center; justify-content:space-between; gap:14px;
+        box-shadow:0 16px 38px rgba(0,0,0,.18);
+      }}
+      .member-main {{ display:flex; align-items:center; gap:14px; min-width:0; }}
+      .member-avatar {{ width:62px; height:62px; border-radius:50%; object-fit:cover; background:#111827; border:1px solid #334155; }}
+      .member-info {{ min-width:0; }}
+      .member-title {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+      .member-name {{ font-size:19px; font-weight:1000; color:white; }}
+      .member-sub {{ color:#94a3b8; margin-top:5px; font-size:13px; }}
+      .member-roles {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:9px; }}
+      .role-chip {{
+        border:1px solid #334155; background:#111827; color:#e5e7eb; border-radius:999px;
+        padding:5px 9px; font-size:12px; font-weight:800;
+      }}
+      .muted-chip {{ color:#94a3b8; }}
+      .access-badge, .status-badge {{
+        border-radius:999px; padding:5px 9px; font-size:12px; font-weight:1000;
+        border:1px solid #334155; background:#111827; color:#cbd5e1;
+      }}
+      .access-badge.owner {{ background:#78350f; color:#fde68a; border-color:#f59e0b; }}
+      .access-badge.admin {{ background:#172554; color:#bfdbfe; border-color:#3b82f6; }}
+      .access-badge.none {{ background:#111827; color:#94a3b8; }}
+      .member-actions {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
+      .small-btn {{
+        border:0; border-radius:12px; padding:10px 12px; font-weight:1000; cursor:pointer; color:white;
+      }}
+      .owner-btn {{ background:#b45309; }}
+      .admin-btn {{ background:#2563eb; }}
+      .remove-btn {{ background:#374151; }}
+      .advanced-box {{ display:none; margin-top:16px; }}
+      .advanced-box.show {{ display:block; }}
+      .advanced-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }}
+      select[multiple] {{ min-height:160px; }}
+      .empty {{ background:#0b1224; border:1px solid #334155; border-radius:18px; padding:22px; color:#94a3b8; }}
+      @media (max-width:900px) {{
+        .member-card {{ flex-direction:column; align-items:stretch; }}
+        .member-actions {{ justify-content:flex-start; }}
+        .advanced-grid {{ grid-template-columns:1fr; }}
+      }}
+    </style>
+
+    <div class="card">
+      <h2>🔐 Admin Access</h2>
+      <p class="muted">اختار الأشخاص مباشرة من الكروت. كل تغيير ينحفظ لايف في <code>/data/admin_access_v5.json</code>.</p>
+      <p><span class="pill ok">Guild {int(gid)}</span> <span id="saveState" class="pill">Ready</span></p>
+    </div>
+
+    <div class="admin-topbar">
+      <input id="memberSearch" class="search-box" placeholder="Search member name / username..." oninput="filterMembers()">
+      <div class="filter-tabs">
+        <button class="filter-tab active" type="button" onclick="setFilter('all', this)">All</button>
+        <button class="filter-tab" type="button" onclick="setFilter('owner', this)">Owners</button>
+        <button class="filter-tab" type="button" onclick="setFilter('admin', this)">Admins</button>
+        <button class="filter-tab" type="button" onclick="setFilter('none', this)">No Access</button>
+      </div>
+      <a class="btn" href="/dashboard/admin-access?refresh=1&guild_id={int(gid)}">🔄 Refresh Members</a>
+      <button class="btn" type="button" onclick="toggleAdvanced()">⚙️ Advanced Roles</button>
+    </div>
+
+    <form id="accessForm" method="POST" action="/dashboard/admin-access-live">
+      <input type="hidden" name="guild_id" value="{int(gid)}">
+      <textarea id="ownerUsers" name="owner_users" style="display:none">{dash_escape(owner_users_value, 5000)}</textarea>
+      <textarea id="adminUsers" name="admin_users" style="display:none">{dash_escape(admin_users_value, 5000)}</textarea>
+
+      <div id="advancedBox" class="advanced-box">
+        <div class="advanced-grid">
+          <div class="card">
+            <h3>👑 Owner Roles</h3>
+            <select name="owner_roles" multiple>{role_options(settings.get("owner_role_ids", []))}</select>
+          </div>
+          <div class="card">
+            <h3>🛡️ Admin Roles</h3>
+            <select name="admin_roles" multiple>{role_options(settings.get("admin_role_ids", []))}</select>
+          </div>
+        </div>
+        <div class="card">
+          <button class="btn primary" type="submit">💾 Save Advanced Roles</button>
+        </div>
+      </div>
+    </form>
+
+    <div class="card">
+      <h3>👥 Members</h3>
+      <div id="memberList" class="member-list">
+        {''.join(cards)}
+      </div>
+    </div>
+
+    <script>
+      let currentFilter = 'all';
+
+      function parseIds(value) {{
+        return value.split(',').map(x => x.trim()).filter(Boolean);
+      }}
+      function unique(arr) {{
+        return [...new Set(arr)];
+      }}
+      function setSaveState(text) {{
+        const el = document.getElementById('saveState');
+        el.textContent = text;
+      }}
+      async function saveAccess() {{
+        const form = document.getElementById('accessForm');
+        const fd = new FormData(form);
+        setSaveState('Saving...');
+        const res = await fetch('/dashboard/admin-access-live', {{
+          method: 'POST',
+          body: fd,
+          headers: {{ 'X-Requested-With': 'fetch' }}
+        }});
+        setSaveState(res.ok ? 'Saved ✓' : 'Save failed');
+        setTimeout(() => setSaveState('Ready'), 1600);
+      }}
+      async function setUserAccess(userId, access) {{
+        let owners = parseIds(document.getElementById('ownerUsers').value);
+        let admins = parseIds(document.getElementById('adminUsers').value);
+
+        owners = owners.filter(x => x !== userId);
+        admins = admins.filter(x => x !== userId);
+
+        if (access === 'owner') owners.push(userId);
+        if (access === 'admin') admins.push(userId);
+
+        document.getElementById('ownerUsers').value = unique(owners).join(', ');
+        document.getElementById('adminUsers').value = unique(admins).join(', ');
+
+        await saveAccess();
+        location.reload();
+      }}
+      function setFilter(filter, btn) {{
+        currentFilter = filter;
+        document.querySelectorAll('.filter-tab').forEach(x => x.classList.remove('active'));
+        btn.classList.add('active');
+        filterMembers();
+      }}
+      function filterMembers() {{
+        const q = document.getElementById('memberSearch').value.toLowerCase().trim();
+        document.querySelectorAll('.member-card').forEach(card => {{
+          const name = card.dataset.userName || '';
+          const access = card.dataset.access || 'none';
+          const matchSearch = !q || name.includes(q);
+          const matchFilter = currentFilter === 'all' || access === currentFilter;
+          card.style.display = (matchSearch && matchFilter) ? '' : 'none';
+        }});
+      }}
+      function toggleAdvanced() {{
+        document.getElementById('advancedBox').classList.toggle('show');
+      }}
+      document.getElementById('accessForm').addEventListener('submit', async (e) => {{
+        e.preventDefault();
+        await saveAccess();
+        location.reload();
+      }});
+    </script>
+    """
+    return render_dashboard_page("Admin Access", body)
+
+try:
+    app.view_functions["dashboard_admin_access_page"] = nm_v5_admin_people_page
+except Exception as e:
+    try: print(f"NM V5 admin people page override skipped: {e}")
+    except Exception: pass
+
+def nm_v5_admin_people_boot():
+    try:
+        print("✅ NM V5 admin access people-card UI active")
+    except Exception:
+        pass
 
 
 keep_alive()
