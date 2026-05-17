@@ -159,7 +159,7 @@ MEMORY_BACKUP_OLD_TAGS = ["NM_MEMORY_BACKUP_V1", "NM_MEMORY_BACKUP_V2"]
 MEMORY_BACKUP_HISTORY_LIMIT = 100
 MEMORY_FILES = [DB_FILE, WARNINGS_FILE, LOG_CHANNELS_FILE, DASHBOARD_SETTINGS_FILE]
 
-COIN_NAME = "NM Coin"
+COIN_NAME = nm_coin_name(guild_id if "guild_id" in locals() else None)
 MESSAGE_COIN_COOLDOWN = 60
 DAILY_REWARD_BASE = 250
 LEVEL_UP_COIN_BONUS = 75
@@ -5114,16 +5114,16 @@ def nm_coin_name():
     except Exception:
         pass
     try:
-        return str(dashboard_settings.get("coin_name") or dashboard_settings.get("currency_name") or "NM Coin")
+        return str(dashboard_settings.get("coin_name") or dashboard_settings.get("currency_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
     except:
-        return "NM Coin"
+        return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 
 def nm_save_coin_name(name):
     gid = nm_active_guild_id()
-    name = clean_text(str(name or "NM Coin"), 40) if "clean_text" in globals() else str(name or "NM Coin")[:40]
+    name = clean_text(str(name or nm_coin_name(guild_id if "guild_id" in locals() else None)), 40) if "clean_text" in globals() else str(name or nm_coin_name(guild_id if "guild_id" in locals() else None))[:40]
     if not name.strip():
-        name = "NM Coin"
+        name = nm_coin_name(guild_id if "guild_id" in locals() else None)
 
     try:
         if "get_guild_settings" in globals() and "save_guild_settings" in globals():
@@ -5278,9 +5278,9 @@ def nm_persist_everything(reason="dashboard change"):
 
 
 def nm_set_coin_name_everywhere(guild_id, name):
-    name = clean_text(str(name or "NM Coin"), 40) if "clean_text" in globals() else str(name or "NM Coin")[:40]
+    name = clean_text(str(name or nm_coin_name(guild_id if "guild_id" in locals() else None)), 40) if "clean_text" in globals() else str(name or nm_coin_name(guild_id if "guild_id" in locals() else None))[:40]
     if not name.strip():
-        name = "NM Coin"
+        name = nm_coin_name(guild_id if "guild_id" in locals() else None)
     guild_id = nm_safe_int(guild_id, GUILD_ID)
 
     # Per-guild settings if available
@@ -11835,10 +11835,10 @@ def nm_legacy_coin(guild_id):
     try:
         if "get_guild_settings" in globals():
             s = get_guild_settings(int(guild_id))
-            return s.get("coin_name") or s.get("currency_name") or s.get("economy_coin_name") or "NM Coin"
+            return s.get("coin_name") or s.get("currency_name") or s.get("economy_coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None)
     except Exception:
         pass
-    return "NM Coin"
+    return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 def nm_legacy_ensure_economy(cur):
     cur.execute("CREATE TABLE IF NOT EXISTS economy (guild_id INTEGER DEFAULT 0, user_id INTEGER, balance INTEGER DEFAULT 0)")
@@ -17321,7 +17321,7 @@ def nm_v4_normalize_settings_keys(settings):
         or settings.get("coin")
     )
     if coin is None or str(coin).strip() == "":
-        coin = "NM Coin"
+        coin = nm_coin_name(guild_id if "guild_id" in locals() else None)
 
     # Important: do not convert custom/old names automatically.
     settings["coin_name"] = str(coin)
@@ -17399,7 +17399,7 @@ def save_guild_settings(guild_id, settings):
     return nm_v4_save_settings(guild_id, settings)
 
 def nm_get_coin_name(guild_id=None):
-    return nm_v4_get_settings(guild_id).get("coin_name", "NM Coin")
+    return nm_v4_get_settings(guild_id).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
 def nm_get_brand_name(guild_id=None):
     return nm_v4_get_settings(guild_id).get("bot_brand", "NM System")
@@ -17418,7 +17418,7 @@ def nm_fix_brand_coin_route():
       <h1>Brand/Coin synced</h1>
       <p>Guild: <b>{int(gid)}</b></p>
       <p>Brand: <b>{dash_escape(settings.get('bot_brand','NM System'),100)}</b></p>
-      <p>Coin: <b>{dash_escape(settings.get('coin_name','NM Coin'),100)}</b></p>
+      <p>Coin: <b>{dash_escape(settings.get('coin_name',nm_coin_name(guild_id if "guild_id" in locals() else None)),100)}</b></p>
       <p>No forced reset was applied. Custom names are preserved.</p>
       <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard</a></p>
     </div>
@@ -17691,7 +17691,7 @@ def nm_set_custom_coin_route():
     if request.method == "POST":
         coin = str(request.form.get("coin_name") or "").strip()
         if not coin:
-            coin = "NM Coin"
+            coin = nm_coin_name(guild_id if "guild_id" in locals() else None)
         settings = nm_v4_get_settings(gid)
         settings["coin_name"] = coin
         settings["currency_name"] = coin
@@ -17707,7 +17707,7 @@ def nm_set_custom_coin_route():
         </div>
         """
 
-    current = nm_v4_get_settings(gid).get("coin_name", "NM Coin")
+    current = nm_v4_get_settings(gid).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
       <h1>Set Custom Coin</h1>
@@ -18179,7 +18179,7 @@ def nm_final_normalize_settings(settings):
         or settings.get("coin")
     )
     if coin is None or str(coin).strip() == "":
-        coin = "NM Coin"
+        coin = nm_coin_name(guild_id if "guild_id" in locals() else None)
     coin = str(coin).strip()
 
     brand = settings.get("bot_brand") or settings.get("brand_name") or settings.get("bot_name")
@@ -18235,7 +18235,7 @@ def save_guild_settings(guild_id, settings):
     return nm_final_save_settings(guild_id, settings)
 
 def nm_coin_name(guild_id=None):
-    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", "NM Coin")
+    return nm_final_get_settings(guild_id or nm_final_selected_guild_id()).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
 def nm_legacy_coin(guild_id):
     return nm_coin_name(guild_id)
@@ -18309,7 +18309,7 @@ def nm_final_sync_route():
 def nm_final_set_custom_coin_route():
     gid = nm_final_selected_guild_id()
     if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
         settings = nm_final_get_settings(gid)
         settings["coin_name"] = coin
         settings["currency_name"] = coin
@@ -18425,7 +18425,7 @@ def nm_normalize_coin_settings(settings):
         or settings.get("coin")
     )
     if coin is None or str(coin).strip() == "":
-        coin = "NM Coin"
+        coin = nm_coin_name(guild_id if "guild_id" in locals() else None)
     coin = str(coin).strip()
 
     brand = settings.get("bot_brand") or settings.get("brand_name") or settings.get("bot_name")
@@ -18493,7 +18493,7 @@ def save_guild_settings(guild_id, settings):
     return nm_save_settings_unified(guild_id, settings)
 
 def nm_coin_name(guild_id=None):
-    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", "NM Coin")
+    return nm_get_settings_unified(guild_id or nm_coin_gid()).get("coin_name", nm_coin_name(guild_id if "guild_id" in locals() else None))
 
 def nm_get_coin_name(guild_id=None):
     return nm_coin_name(guild_id)
@@ -18548,7 +18548,7 @@ def nm_coin_save_any_dashboard_post(response):
 def nm_coin_set_custom_coin_page():
     gid = nm_coin_gid()
     if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
         settings = nm_get_settings_unified(gid)
         settings["coin_name"] = coin
         settings["currency_name"] = coin
@@ -18873,9 +18873,9 @@ def nm_hotfix_settings(guild_id=None):
         or settings.get("economy_coin_name")
         or settings.get("money_name")
         or settings.get("coin")
-        or "NM Coin"
+        or nm_coin_name(guild_id if "guild_id" in locals() else None)
     )
-    coin = str(coin).strip() or "NM Coin"
+    coin = str(coin).strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
 
     brand = (
         settings.get("bot_brand")
@@ -18907,9 +18907,9 @@ def nm_hotfix_save_settings(guild_id=None, settings=None):
         or merged.get("economy_coin_name")
         or merged.get("money_name")
         or merged.get("coin")
-        or "NM Coin"
+        or nm_coin_name(guild_id if "guild_id" in locals() else None)
     )
-    coin = str(coin).strip() or "NM Coin"
+    coin = str(coin).strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
     brand = merged.get("bot_brand") or merged.get("brand_name") or merged.get("bot_name") or "NM System"
     brand = str(brand).strip() or "NM System"
 
@@ -18944,9 +18944,9 @@ def nm_hotfix_save_settings(guild_id=None, settings=None):
 def nm_hotfix_coin_name(guild_id=None):
     # IMPORTANT: no recursive calls here.
     try:
-        return str(nm_hotfix_settings(guild_id or nm_hotfix_get_gid()).get("coin_name") or "NM Coin")
+        return str(nm_hotfix_settings(guild_id or nm_hotfix_get_gid()).get("coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
     except Exception:
-        return "NM Coin"
+        return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 # FINAL coin/settings overrides
 def nm_coin_name(guild_id=None):
@@ -19040,7 +19040,7 @@ def nm_hotfix_coin_page():
 def nm_hotfix_set_coin_page():
     gid = nm_hotfix_get_gid()
     if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
         s = nm_hotfix_settings(gid)
         s["coin_name"] = coin
         nm_hotfix_save_settings(gid, s)
@@ -19201,9 +19201,9 @@ def nm_stable_normalize_settings(settings):
         or s.get("economy_coin_name")
         or s.get("money_name")
         or s.get("coin")
-        or "NM Coin"
+        or nm_coin_name(guild_id if "guild_id" in locals() else None)
     )
-    coin = str(coin).strip() or "NM Coin"
+    coin = str(coin).strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
     brand = (
         s.get("bot_brand")
         or s.get("brand_name")
@@ -19299,9 +19299,9 @@ def save_guild_settings(guild_id, settings):
 
 def nm_coin_name(guild_id=None):
     try:
-        return str(nm_stable_get_settings(guild_id or nm_stable_gid()).get("coin_name") or "NM Coin")
+        return str(nm_stable_get_settings(guild_id or nm_stable_gid()).get("coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
     except Exception:
-        return "NM Coin"
+        return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 def nm_get_coin_name(guild_id=None):
     return nm_coin_name(guild_id)
@@ -19648,7 +19648,7 @@ def nm_stable_sync_route():
 def nm_stable_set_coin_route():
     gid = nm_stable_gid()
     if request.method == "POST":
-        coin = str(request.form.get("coin_name") or "").strip() or "NM Coin"
+        coin = str(request.form.get("coin_name") or "").strip() or nm_coin_name(guild_id if "guild_id" in locals() else None)
         s = nm_stable_get_settings(gid)
         s.update({"coin_name": coin, "currency_name": coin, "economy_coin_name": coin, "money_name": coin, "coin": coin})
         nm_stable_save_settings(gid, s)
@@ -19743,15 +19743,15 @@ def nm_inline_current_coin(guild_id=None):
     gid = int(guild_id or nm_inline_settings_gid())
     try:
         if "nm_coin_name" in globals():
-            return str(nm_coin_name(gid) or "NM Coin")
+            return str(nm_coin_name(gid) or nm_coin_name(guild_id if "guild_id" in locals() else None))
     except Exception:
         pass
     try:
         if "nm_stable_get_settings" in globals():
-            return str(nm_stable_get_settings(gid).get("coin_name") or "NM Coin")
+            return str(nm_stable_get_settings(gid).get("coin_name") or nm_coin_name(guild_id if "guild_id" in locals() else None))
     except Exception:
         pass
-    return "NM Coin"
+    return nm_coin_name(guild_id if "guild_id" in locals() else None)
 
 def nm_inline_save_coin_from_form():
     try:
@@ -19837,6 +19837,230 @@ def nm_settings_coin_inline_page():
     </div>
     """
 
+
+
+
+# =====================================================================
+# NM FINAL COIN DISPLAY PATCH
+# Fixes hardcoded NM Coin in Overview/User Lookup/Discord commands.
+# One rule:
+# - New server default: NM Coin
+# - If dashboard settings says Retard Coin or anything else, display that everywhere.
+# =====================================================================
+
+def nm_final_coin_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_final_read_coin_from_all_sources(guild_id=None):
+    gid = int(guild_id or nm_final_coin_gid())
+
+    # 1) Stable per-guild settings file created by previous patch.
+    try:
+        p = Path("/data/guild_settings_v4.json")
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+            row = data.get(str(gid), {}) if isinstance(data, dict) else {}
+            if isinstance(row, dict):
+                for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                    v = row.get(k)
+                    if v is not None and str(v).strip():
+                        return str(v).strip()
+    except Exception:
+        pass
+
+    # 2) PostgreSQL if enabled.
+    try:
+        if globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals():
+            with nm_pg_conn() as conn:
+                row = conn.execute("SELECT settings FROM guild_settings WHERE guild_id=%s", (gid,)).fetchone()
+                if row:
+                    raw = row["settings"]
+                    settings = raw if isinstance(raw, dict) else json.loads(raw or "{}")
+                    for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                        v = settings.get(k)
+                        if v is not None and str(v).strip():
+                            return str(v).strip()
+    except Exception:
+        pass
+
+    # 3) Old dashboard_settings fallback.
+    try:
+        for p in [Path("/data/dashboard_settings.json"), Path("dashboard_settings.json")]:
+            if p.exists() and p.stat().st_size > 0:
+                data = json.loads(p.read_text(encoding="utf-8") or "{}")
+                if isinstance(data, dict):
+                    for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                        v = data.get(k)
+                        if v is not None and str(v).strip():
+                            return str(v).strip()
+    except Exception:
+        pass
+
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            for k in ("coin_name", "currency_name", "economy_coin_name", "money_name", "coin"):
+                v = dashboard_settings.get(k)
+                if v is not None and str(v).strip():
+                    return str(v).strip()
+    except Exception:
+        pass
+
+    return "NM Coin"
+
+def nm_final_save_coin(guild_id=None, coin_name=None):
+    gid = int(guild_id or nm_final_coin_gid())
+    coin = str(coin_name or "NM Coin").strip() or "NM Coin"
+
+    patch = {
+        "coin_name": coin,
+        "currency_name": coin,
+        "economy_coin_name": coin,
+        "money_name": coin,
+        "coin": coin,
+    }
+
+    # Stable per-guild JSON save.
+    try:
+        p = Path("/data/guild_settings_v4.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if not isinstance(data, dict):
+            data = {}
+        row = data.get(str(gid), {})
+        if not isinstance(row, dict):
+            row = {}
+        row.update(patch)
+        data[str(gid)] = row
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        try: print(f"NM final coin json save failed: {e}")
+        except Exception: pass
+
+    # Old dashboard_settings mirror so current settings UI immediately sees it.
+    try:
+        p = Path("/data/dashboard_settings.json")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {}
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "{}")
+        if not isinstance(data, dict):
+            data = {}
+        data.update(patch)
+        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+    try:
+        if "dashboard_settings" in globals() and isinstance(dashboard_settings, dict):
+            dashboard_settings.update(patch)
+    except Exception:
+        pass
+
+    # PostgreSQL mirror if enabled.
+    try:
+        if globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals():
+            with nm_pg_conn() as conn:
+                conn.execute("""
+                    INSERT INTO guild_settings (guild_id, settings, updated_at)
+                    VALUES (%s,%s::jsonb,NOW())
+                    ON CONFLICT (guild_id)
+                    DO UPDATE SET settings = guild_settings.settings || EXCLUDED.settings, updated_at=NOW()
+                """, (gid, json.dumps(patch, ensure_ascii=False)))
+                conn.commit()
+    except Exception as e:
+        try: print(f"NM final coin pg save skipped: {e}")
+        except Exception: pass
+
+    return coin
+
+def nm_coin_name(guild_id=None):
+    return nm_final_read_coin_from_all_sources(guild_id)
+
+def nm_get_coin_name(guild_id=None):
+    return nm_final_read_coin_from_all_sources(guild_id)
+
+def nm_legacy_coin(guild_id):
+    return nm_final_read_coin_from_all_sources(guild_id)
+
+def nm_currency_name(guild_id=None):
+    return nm_final_read_coin_from_all_sources(guild_id)
+
+def nm_money_name(guild_id=None):
+    return nm_final_read_coin_from_all_sources(guild_id)
+
+def nm_format_currency(amount, guild_id=None):
+    return f"{int(amount or 0):,} {nm_final_read_coin_from_all_sources(guild_id)}"
+
+@app.after_request
+def nm_final_coin_form_after_request(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard"):
+            coin = (
+                request.form.get("coin_name")
+                or request.form.get("currency_name")
+                or request.form.get("economy_coin_name")
+                or request.form.get("money_name")
+                or request.form.get("coin")
+            )
+            if coin is not None and str(coin).strip():
+                nm_final_save_coin(nm_final_coin_gid(), str(coin).strip())
+    except Exception as e:
+        try: print(f"NM final coin after_request failed: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/apply-coin-everywhere")
+def nm_apply_coin_everywhere_route():
+    gid = nm_final_coin_gid()
+    coin = request.args.get("coin") or nm_final_read_coin_from_all_sources(gid)
+    coin = nm_final_save_coin(gid, coin)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Coin Applied Everywhere</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin: <b>{dash_escape(coin, 100)}</b></p>
+      <p>Overview, User Lookup, Leaderboard, and Discord commands should now use this value.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+
+
+
+@app.after_request
+def nm_final_replace_rendered_coin(response):
+    try:
+        if request.path.startswith("/dashboard") and response.content_type and "text/html" in response.content_type:
+            coin = nm_final_read_coin_from_all_sources(nm_final_coin_gid())
+            if coin and coin != "NM Coin":
+                body = response.get_data(as_text=True)
+                body = body.replace("NM Coin", coin)
+                response.set_data(body)
+    except Exception:
+        pass
+    return response
 
 
 keep_alive()
