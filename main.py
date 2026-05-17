@@ -7783,6 +7783,164 @@ def dashboard_server_rail_html():
     return "<aside class='serverrail'>" + "".join(items) + "</aside>"
 
 
+
+# =========================
+# NM DISCORD BACKUP RECOVERY
+# يسترجع آخر ملفات الباك أب من روم memory backup إلى /data + local
+# بدون ما يكتب فوق ملف فيه بيانات بملف فاضي
+# =========================
+
+def nm_recovery_score(path):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return 0
+        if p.suffix.lower() == ".db":
+            try:
+                conn = sqlite3.connect(str(p))
+                cur = conn.cursor()
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [r[0] for r in cur.fetchall()]
+                score = len(tables)
+                for table in tables:
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        score += int(cur.fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                conn.close()
+                return score
+            except Exception:
+                return p.stat().st_size
+        if p.suffix.lower() == ".json":
+            try:
+                import json
+                raw = p.read_text(encoding="utf-8")
+                if not raw.strip():
+                    return 0
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return len(data)
+                if isinstance(data, list):
+                    return len(data)
+                return 1
+            except Exception:
+                return p.stat().st_size
+        return p.stat().st_size
+    except Exception:
+        return 0
+
+
+async def nm_restore_latest_discord_memory_backup(reason="startup"):
+    """Pull latest backup attachments from Discord memory channel into persistent storage."""
+    try:
+        files = globals().get("NM_MEMORY_FILES", [
+            "nm_system.db",
+            "warnings.json",
+            "log_channels.json",
+            "dashboard_settings.json",
+            "protection_settings.json",
+            "guild_settings.json",
+            "money_audit.json",
+        ])
+
+        channel_id = int(globals().get("MEMORY_BACKUP_CHANNEL_ID", 0) or 0)
+        if not channel_id:
+            print("⚠️ NM recovery: MEMORY_BACKUP_CHANNEL_ID is missing.")
+            return
+
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except Exception as e:
+                print(f"⚠️ NM recovery: cannot fetch memory backup channel {channel_id}: {e}")
+                return
+
+        found = {}
+        async for msg in channel.history(limit=120):
+            for att in getattr(msg, "attachments", []) or []:
+                name = str(getattr(att, "filename", "") or "")
+                if name in files and name not in found:
+                    found[name] = att
+            if len(found) >= len(files):
+                break
+
+        if not found:
+            print("⚠️ NM recovery: no backup attachments found in memory channel.")
+            return
+
+        restored = []
+        skipped = []
+
+        data_dir = Path(globals().get("NM_DATA_DIR", "/data"))
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            data_dir = Path(".")
+
+        for filename, att in found.items():
+            data_target = data_dir / filename
+            local_target = Path(filename)
+            temp_target = data_dir / f".incoming_{filename}"
+
+            try:
+                await att.save(str(temp_target))
+            except Exception as e:
+                print(f"⚠️ NM recovery: failed downloading {filename}: {e}")
+                continue
+
+            incoming_score = nm_recovery_score(temp_target)
+            data_score = nm_recovery_score(data_target)
+            local_score = nm_recovery_score(local_target)
+            best_existing = max(data_score, local_score)
+
+            # Only restore if incoming is useful and existing is empty/weaker.
+            if incoming_score > 0 and incoming_score >= best_existing:
+                try:
+                    shutil.copy2(temp_target, data_target)
+                    shutil.copy2(temp_target, local_target)
+                    restored.append(f"{filename} incoming={incoming_score} old={best_existing}")
+                except Exception as e:
+                    print(f"⚠️ NM recovery: failed applying {filename}: {e}")
+            else:
+                skipped.append(f"{filename} incoming={incoming_score} existing={best_existing}")
+
+            try:
+                temp_target.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if restored:
+            print("✅ NM recovery restored backups:", "; ".join(restored))
+            # Reload dashboard settings if the project has a loader.
+            try:
+                if "load_dashboard_settings" in globals():
+                    globals()["dashboard_settings"] = load_dashboard_settings()
+            except Exception:
+                pass
+            try:
+                if "load_log_channels" in globals():
+                    globals()["log_channels"] = load_log_channels()
+            except Exception:
+                pass
+        if skipped:
+            print("ℹ️ NM recovery skipped:", "; ".join(skipped))
+    except Exception as e:
+        print(f"❌ NM recovery fatal error: {e}")
+
+
+@app.route("/dashboard/recover-memory-backup")
+def nm_manual_recover_memory_backup_page():
+    try:
+        if bot and getattr(bot, "loop", None) and bot.loop.is_running():
+            asyncio.run_coroutine_threadsafe(nm_restore_latest_discord_memory_backup("manual dashboard recovery"), bot.loop)
+            return "<h2>Recovery started</h2><p>Wait 10 seconds, then refresh dashboard.</p><a href='/dashboard'>Back</a>"
+    except Exception as e:
+        return f"<h2>Recovery failed</h2><pre>{dash_escape(str(e), 1000)}</pre>"
+    return "<h2>Recovery unavailable</h2><p>Bot loop is not ready.</p>"
+
+
 @app.route('/dashboard/select-guild/<int:guild_id>')
 def dashboard_select_guild(guild_id):
     denied = dashboard_require_admin()
@@ -11571,6 +11729,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    await nm_restore_latest_discord_memory_backup("on_ready")
     nm_bridge_local_restore_to_data("on_ready")
     print("✅ NM stable polished build active")
     print(f"✅ NM persistent storage active: {NM_DATA_DIR}")
