@@ -11904,34 +11904,12 @@ def nm_legacy_level(guild_id, user_id):
 async def nm_legacy_salary(message):
     gid = nm_legacy_gid(message)
     uid = int(message.author.id)
-    now = int(time.time())
-    level, xp = nm_legacy_level(gid, uid)
-    amount = 250 + level * 25
-
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        cur.execute("""CREATE TABLE IF NOT EXISTS nm_salary_cooldowns
-                       (guild_id INTEGER, user_id INTEGER, last_claim INTEGER DEFAULT 0,
-                        PRIMARY KEY (guild_id,user_id))""")
-        cur.execute("SELECT last_claim FROM nm_salary_cooldowns WHERE guild_id=? AND user_id=?", (gid, uid))
-        row = cur.fetchone()
-        last = int(row[0] or 0) if row else 0
-        remaining = 3600 - (now - last)
-        if remaining > 0:
-            conn.close()
-            return await message.channel.send(f"⏳ {message.author.mention} تقدر تستلم راتب جديد بعد **{max(1, remaining//60)} دقيقة**.")
-        nm_legacy_add_money(gid, uid, amount)
-        cur.execute("""INSERT INTO nm_salary_cooldowns (guild_id,user_id,last_claim) VALUES (?,?,?)
-                       ON CONFLICT(guild_id,user_id) DO UPDATE SET last_claim=excluded.last_claim""", (gid, uid, now))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"legacy salary error: {e}")
-        nm_legacy_add_money(gid, uid, amount)
+    level = nm_get_level_safe(gid, uid)
+    ok, remaining, bal, amount = nm_salary_safe(gid, uid, level)
+    if not ok:
+        return await message.channel.send(f"⏳ {message.author.mention} تقدر تستلم راتب جديد بعد **{max(1, int(remaining)//60)} دقيقة**.")
 
     coin = nm_legacy_coin(gid)
-    bal = nm_legacy_balance(gid, uid)
     embed = discord.Embed(
         title=f"{message.author.display_name} • Salary",
         description=f"**تم استلام الراتب 💸**\n\nتم إيداع الراتب في محفظتك يا {message.author.mention}\n\n📈 **+{amount:,} 🪙 {coin}**  Level **{level}**\n\n**الرصيد الجديد 💼**\n🪙 **{bal:,} {coin}**",
@@ -12110,14 +12088,18 @@ async def on_message(message):
         gained = random.randint(8, 16)
         xp, level, leveled_up = add_xp(message.author.id, gained)
 
-        last_coin = coin_cooldowns.get(message.author.id, 0)
-        if is_system_enabled("economy") and now - last_coin >= MESSAGE_COIN_COOLDOWN:
-            coin_cooldowns[message.author.id] = now
-            add_money(message.author.id, random.randint(3, 8))
+        if is_system_enabled("economy") and nm_message_coin_allowed(message.guild.id if message.guild else 0, message.author.id):
+            try:
+                v3_add_money(message.guild.id if message.guild else 0, message.author.id, random.randint(3, 8), source_type="message_coin", details="Persistent message coin reward")
+            except Exception:
+                add_money(message.author.id, random.randint(3, 8))
 
-        if leveled_up:
+        if leveled_up and nm_level_bonus_allowed(message.guild.id if message.guild else 0, message.author.id, level):
             bonus = level * LEVEL_UP_COIN_BONUS
-            new_balance = add_money(message.author.id, bonus)
+            try:
+                new_balance = v3_add_money(message.guild.id if message.guild else 0, message.author.id, bonus, source_type="level_bonus", details=f"Level {level} bonus")
+            except Exception:
+                new_balance = add_money(message.author.id, bonus)
             await message.channel.send(
                 f"📊 {message.author.mention} وصل لفل **{level}**! 🎉\n"
                 f"💰 مكافأة اللفل: **{bonus:,} {nm_coin_name()}** | رصيدك: **{new_balance:,}**",
@@ -13635,7 +13617,7 @@ async def salary(ctx):
         return
 
     xp, level = get_level_data(ctx.author.id)
-    success, remaining, balance_amount, reward = claim_daily(ctx.author.id, level)
+    success, remaining, balance_amount, reward = nm_salary_safe(ctx.guild.id if ctx.guild else 0, ctx.author.id, level)
 
     if not success:
         embed = discord.Embed(
@@ -15349,6 +15331,132 @@ async def slash_balance_ar(interaction: discord.Interaction, member: discord.Mem
     await interaction.response.send_message(embed=v3_wallet_embed(interaction.guild.id, member or interaction.user))
 
 
+
+
+# =========================
+# NM MONEY DUPLICATION KILL SWITCH + PERSISTENT REWARD LOCKS
+# يمنع تكرار الراتب/فلوس الرسائل بعد كل Redeploy
+# =========================
+
+def nm_reward_lock_table():
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nm_reward_locks (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                reward_key TEXT NOT NULL,
+                last_ts INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, user_id, reward_key)
+            )
+        """)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"NM reward lock table error: {e}")
+
+def nm_reward_check_and_mark(guild_id, user_id, reward_key, cooldown_seconds):
+    """Atomic persistent cooldown. Survives Railway redeploy."""
+    nm_reward_lock_table()
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    reward_key = str(reward_key or "reward")
+    now = int(time.time())
+    cooldown_seconds = int(cooldown_seconds or 0)
+
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO nm_reward_locks (guild_id, user_id, reward_key, last_ts)
+            VALUES (?, ?, ?, 0)
+        """, (guild_id, user_id, reward_key))
+        cur.execute("""
+            SELECT last_ts FROM nm_reward_locks
+            WHERE guild_id = ? AND user_id = ? AND reward_key = ?
+        """, (guild_id, user_id, reward_key))
+        row = cur.fetchone()
+        last_ts = int(row[0] or 0) if row else 0
+
+        if now - last_ts < cooldown_seconds:
+            conn.commit()
+            conn.close()
+            return False, cooldown_seconds - (now - last_ts)
+
+        cur.execute("""
+            UPDATE nm_reward_locks
+            SET last_ts = ?
+            WHERE guild_id = ? AND user_id = ? AND reward_key = ?
+        """, (now, guild_id, user_id, reward_key))
+        conn.commit()
+        conn.close()
+        return True, 0
+    except Exception as e:
+        print(f"NM reward lock check error: {e}")
+        return False, cooldown_seconds
+
+def nm_get_level_safe(guild_id, user_id):
+    try:
+        if "v3_get_level_data" in globals():
+            xp, level = v3_get_level_data(guild_id, user_id)
+            return int(level or 1)
+    except Exception:
+        pass
+    try:
+        level, xp = nm_legacy_level(guild_id, user_id)
+        return int(level or 1)
+    except Exception:
+        return 1
+
+def nm_salary_safe(guild_id, user_id, level=None):
+    guild_id = int(guild_id or 0)
+    user_id = int(user_id or 0)
+    level = int(level or nm_get_level_safe(guild_id, user_id) or 1)
+    cooldown = int(globals().get("HOURLY_REWARD_COOLDOWN_SECONDS", 3600))
+    reward = int(globals().get("DAILY_REWARD_BASE", 250)) + (level * 25)
+
+    allowed, remaining = nm_reward_check_and_mark(guild_id, user_id, "salary", cooldown)
+    if not allowed:
+        try:
+            bal = v3_get_balance(guild_id, user_id)
+        except Exception:
+            bal = nm_legacy_balance(guild_id, user_id) if "nm_legacy_balance" in globals() else 0
+        return False, remaining, bal, 0
+
+    try:
+        balance = v3_add_money(guild_id, user_id, reward, source_type="safe_salary", details="Persistent locked salary")
+    except Exception:
+        try:
+            nm_legacy_add_money(guild_id, user_id, reward)
+            balance = nm_legacy_balance(guild_id, user_id)
+        except Exception:
+            balance = 0
+
+    try:
+        money_audit_record(user_id=user_id, amount=reward, new_balance=balance, source_type="safe_salary", details=f"Guild {guild_id} | Persistent locked salary")
+    except Exception:
+        pass
+
+    try:
+        nm_dashboard_persist_now("salary paid with persistent lock")
+    except Exception:
+        pass
+
+    return True, 0, balance, reward
+
+# Override V3 salary completely so slash salary cannot pay again after redeploy.
+def v3_claim_salary(guild_id, user_id, level):
+    return nm_salary_safe(guild_id, user_id, level)
+
+def nm_message_coin_allowed(guild_id, user_id):
+    cooldown = int(globals().get("MESSAGE_COIN_COOLDOWN", 300))
+    return nm_reward_check_and_mark(guild_id, user_id, "message_coin", cooldown)[0]
+
+def nm_level_bonus_allowed(guild_id, user_id, level):
+    return nm_reward_check_and_mark(guild_id, user_id, f"level_bonus_{int(level or 0)}", 999999999)[0]
+
+
 @bot.tree.command(name="salary", description="Claim your salary")
 async def slash_salary(interaction: discord.Interaction):
     if not await v3_require_commands_interaction(interaction):
@@ -16178,6 +16286,248 @@ def nm_stable_open_guild_page(guild_id, page):
     }
     target = route_map.get(page, "/dashboard")
     return redirect(f"{target}?guild_id={int(guild_id)}")
+
+
+
+# =========================
+# NM LEGACY DATA RESCUE PATCH
+# Old data may exist with guild_id = 0/NULL after switching to per-server mode.
+# This patch shows legacy data when selected-guild data is empty and provides a migration route.
+# =========================
+
+def nm_rescue_selected_gid():
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or GUILD_ID
+        )
+    except Exception:
+        return int(GUILD_ID)
+
+def nm_rescue_ensure_guild_col(cur, table):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = [r[1] for r in cur.fetchall()]
+        if "guild_id" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN guild_id INTEGER DEFAULT 0")
+        try:
+            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_guild_id ON {table}(guild_id)")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"NM rescue ensure guild col failed for {table}: {e}")
+
+def nm_rescue_count(cur, table, guild_id):
+    try:
+        nm_rescue_ensure_guild_col(cur, table)
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id = ?", (int(guild_id),))
+        selected = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id IS NULL OR guild_id = 0")
+        legacy = int(cur.fetchone()[0] or 0)
+        return selected, legacy
+    except Exception:
+        return 0, 0
+
+def nm_rescue_sum(cur, table, column, guild_id):
+    try:
+        nm_rescue_ensure_guild_col(cur, table)
+        cur.execute(f"SELECT COALESCE(SUM({column}), 0) FROM {table} WHERE guild_id = ?", (int(guild_id),))
+        selected = int(cur.fetchone()[0] or 0)
+        cur.execute(f"SELECT COALESCE(SUM({column}), 0) FROM {table} WHERE guild_id IS NULL OR guild_id = 0")
+        legacy = int(cur.fetchone()[0] or 0)
+        return selected, legacy
+    except Exception:
+        return 0, 0
+
+def nm_rescue_effective_where(table, guild_id):
+    """If selected guild has no rows but legacy has rows, read legacy rows instead of showing empty."""
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        selected, legacy = nm_rescue_count(cur, table, guild_id)
+        conn.commit()
+        conn.close()
+        if selected == 0 and legacy > 0:
+            return "(guild_id IS NULL OR guild_id = 0)", []
+        return "guild_id = ?", [int(guild_id)]
+    except Exception:
+        return "guild_id = ?", [int(guild_id)]
+
+def dashboard_count_table(table):
+    gid = nm_rescue_selected_gid()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        selected, legacy = nm_rescue_count(cur, table, gid)
+        conn.commit()
+        conn.close()
+        return selected if selected > 0 else legacy
+    except Exception:
+        return 0
+
+def dashboard_total_coins():
+    gid = nm_rescue_selected_gid()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        selected, legacy = nm_rescue_sum(cur, "economy", "balance", gid)
+        conn.commit()
+        conn.close()
+        return selected if selected > 0 else legacy
+    except Exception:
+        return 0
+
+def dashboard_money_rows(limit=10):
+    gid = nm_rescue_selected_gid()
+    rows = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_rescue_ensure_guild_col(cur, "economy")
+        where, params = nm_rescue_effective_where("economy", gid)
+        cur.execute(f"SELECT user_id, balance FROM economy WHERE {where} ORDER BY balance DESC LIMIT ?", tuple(params + [int(limit)]))
+        data = cur.fetchall()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"NM rescue dashboard_money_rows error: {e}")
+        data = []
+
+    for i, (user_id, balance) in enumerate(data, start=1):
+        try:
+            name = dashboard_member_name(user_id)
+        except Exception:
+            name = f"User {user_id}"
+        rows.append({"rank": i, "user_id": int(user_id), "name": name, "balance": int(balance or 0)})
+    return rows
+
+def dashboard_level_rows(limit=10):
+    gid = nm_rescue_selected_gid()
+    rows = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        nm_rescue_ensure_guild_col(cur, "levels")
+        where, params = nm_rescue_effective_where("levels", gid)
+        cur.execute(f"SELECT user_id, xp, level FROM levels WHERE {where} ORDER BY level DESC, xp DESC LIMIT ?", tuple(params + [int(limit)]))
+        data = cur.fetchall()
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"NM rescue dashboard_level_rows error: {e}")
+        data = []
+
+    for i, (user_id, xp, level) in enumerate(data, start=1):
+        try:
+            name = dashboard_member_name(user_id)
+        except Exception:
+            name = f"User {user_id}"
+        rows.append({"rank": i, "user_id": int(user_id), "name": name, "level": int(level or 1), "xp": int(xp or 0)})
+    return rows
+
+@app.route("/dashboard/rescue-legacy-data")
+def nm_rescue_legacy_data_page():
+    """Move old guild_id=0/NULL data to selected guild. Use only after selecting the correct server."""
+    gid = nm_rescue_selected_gid()
+    tables = [
+        "economy",
+        "levels",
+        "warning_history",
+        "dashboard_log_vault",
+        "command_center_events",
+        "money_audit",
+        "real_estate_properties",
+        "real_estate_auctions",
+        "shop_purchases",
+        "lootbox_history",
+        "dashboard_audit",
+    ]
+    results = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        for table in tables:
+            try:
+                nm_rescue_ensure_guild_col(cur, table)
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id IS NULL OR guild_id = 0")
+                before = int(cur.fetchone()[0] or 0)
+                if before > 0:
+                    cur.execute(f"UPDATE {table} SET guild_id = ? WHERE guild_id IS NULL OR guild_id = 0", (int(gid),))
+                cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id = ?", (int(gid),))
+                after = int(cur.fetchone()[0] or 0)
+                results.append(f"{table}: moved legacy {before}, selected now {after}")
+            except Exception as e:
+                results.append(f"{table}: skipped ({type(e).__name__}: {str(e)[:120]})")
+        conn.commit()
+        conn.close()
+        try:
+            nm_dashboard_persist_now("legacy data rescued")
+        except Exception:
+            pass
+    except Exception as e:
+        results.append(f"FATAL: {type(e).__name__}: {e}")
+
+    body = "<br>".join(dash_escape(x, 300) for x in results)
+    return f"""
+    <div style='font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px'>
+      <h1>NM Legacy Data Rescue</h1>
+      <p>Target guild: <b>{int(gid)}</b></p>
+      <div style='line-height:1.8;background:#111a33;padding:20px;border-radius:12px'>{body}</div>
+      <p style='margin-top:20px'>Now go back to dashboard and refresh.</p>
+      <a style='color:#8b5cf6' href='/dashboard?guild_id={int(gid)}'>Back to Dashboard</a>
+    </div>
+    """
+
+@app.route("/dashboard/rescue-status")
+def nm_rescue_status_page():
+    gid = nm_rescue_selected_gid()
+    tables = ["economy", "levels", "warning_history", "dashboard_log_vault", "command_center_events", "money_audit"]
+    lines = []
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        for table in tables:
+            selected, legacy = nm_rescue_count(cur, table, gid)
+            lines.append(f"{table}: selected={selected}, legacy={legacy}")
+        conn.close()
+    except Exception as e:
+        lines.append(f"error: {type(e).__name__}: {e}")
+    body = "<br>".join(dash_escape(x, 300) for x in lines)
+    return f"""
+    <div style='font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px'>
+      <h1>NM Rescue Status</h1>
+      <p>Selected guild: <b>{int(gid)}</b></p>
+      <div style='line-height:1.8;background:#111a33;padding:20px;border-radius:12px'>{body}</div>
+      <p><a style='color:#8b5cf6' href='/dashboard/rescue-legacy-data?guild_id={int(gid)}'>Move legacy data to this guild</a></p>
+      <p><a style='color:#8b5cf6' href='/dashboard?guild_id={int(gid)}'>Back</a></p>
+    </div>
+    """
+
+
+
+
+@app.route("/dashboard/disable-auto-money")
+def nm_disable_auto_money_route():
+    try:
+        globals()["MESSAGE_COIN_COOLDOWN"] = 999999999
+        if "dashboard_settings" in globals():
+            dashboard_settings["message_coin_rewards_enabled"] = False
+            dashboard_settings["message_coin_cooldown"] = 999999999
+            try:
+                save_dashboard_settings()
+            except Exception:
+                pass
+        try:
+            nm_dashboard_persist_now("auto money disabled")
+        except Exception:
+            pass
+    except Exception as e:
+        return f"<h2>Error</h2><pre>{dash_escape(str(e), 1000)}</pre>"
+    return "<h2>Auto message money disabled</h2><p>Salary still works with persistent cooldown.</p><a href='/dashboard'>Back</a>"
+
 
 
 keep_alive()
