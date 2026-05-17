@@ -20077,3 +20077,4 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
+# NM V5 polish update
