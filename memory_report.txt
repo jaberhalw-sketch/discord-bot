@@ -1,0 +1,13 @@
+NM SYSTEM MEMORY REPORT
+----------------------------
+Level users      : 22
+Economy users    : 81
+Total coins      : 36,447 NM Coin
+Warning users    : 2
+Saved log rooms  : 9
+
+FILES
+- nm_system.db       OK    600.0 KB
+- warnings.json      OK    0.56 KB
+- log_channels.json  OK    0.31 KB
+- dashboard_settings.json OK    0.13 KB
