@@ -11741,6 +11741,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_protection_level_boot()
     nm_v5_coin_persist_boot()
     nm_v5_polish_self_check()
     nm_stable_polish_boot()
@@ -20609,6 +20610,590 @@ def nm_v5_coin_persist_boot():
             print(f"✅ NM V5 per-guild coin persistence active: guild={gid}, coin={coin}")
     except Exception as e:
         try: print(f"NM V5 coin persist boot skipped: {e}")
+        except Exception: pass
+
+
+
+# =====================================================================
+# NM V5 PROTECTION + LEVEL SYNC FINAL
+# Protection:
+# - New guild gets default protection settings.
+# - Dashboard changes are saved per-guild forever in /data/protection_settings_v5.json.
+# - If PostgreSQL is connected, mirrors there too.
+# - Redeploy/code update never resets protection settings.
+#
+# Levels:
+# - Discord and dashboard read the same level/xp.
+# - Syncs old SQLite tables guild_id=0/wrong guild into current guild.
+# =====================================================================
+
+def nm_v5_sync_gid(source=None):
+    try:
+        if source is not None:
+            if hasattr(source, "guild") and getattr(source, "guild", None):
+                return int(source.guild.id)
+            if hasattr(source, "message") and getattr(source.message, "guild", None):
+                return int(source.message.guild.id)
+            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
+                return int(source.guild_id)
+    except Exception:
+        pass
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_v5_sync_data_file(filename):
+    try:
+        p = Path("/data")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / filename
+    except Exception:
+        return Path(filename)
+
+def nm_v5_json_load(path, default):
+    try:
+        p = Path(path)
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "")
+            return data if data is not None else default
+    except Exception:
+        pass
+    return default
+
+def nm_v5_json_save(path, data):
+    try:
+        p = Path(path)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        p.write_text(json.dumps(data if data is not None else {}, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as e:
+        try: print(f"NM V5 json save failed {path}: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_pg_ready():
+    try:
+        return bool(globals().get("NM_V4_POSTGRES_ENABLED") and globals().get("NM_DATABASE_URL") and "nm_pg_conn" in globals())
+    except Exception:
+        return False
+
+# ---------------- PROTECTION PERSISTENCE ----------------
+
+def nm_v5_default_protection_settings():
+    try:
+        if "protection_default_settings" in globals() and callable(protection_default_settings):
+            d = protection_default_settings()
+            if isinstance(d, dict):
+                return dict(d)
+    except Exception:
+        pass
+
+    # Safe default baseline if old function is missing.
+    return {
+        "enabled": False,
+        "anti_spam": False,
+        "anti_links": False,
+        "anti_mentions": False,
+        "anti_bad_words": False,
+        "anti_caps": False,
+        "anti_invites": False,
+        "spam_limit": 5,
+        "mention_limit": 8,
+        "punishment": "delete",
+        "log_channel_id": 0,
+        "whitelist_roles": [],
+        "whitelist_channels": [],
+        "bad_words": [],
+    }
+
+def nm_v5_protection_store_path():
+    return nm_v5_sync_data_file("protection_settings_v5.json")
+
+def nm_v5_load_all_protection():
+    data = nm_v5_json_load(nm_v5_protection_store_path(), {})
+    return data if isinstance(data, dict) else {}
+
+def nm_v5_save_all_protection(data):
+    return nm_v5_json_save(nm_v5_protection_store_path(), data if isinstance(data, dict) else {})
+
+def nm_v5_pg_get_protection(guild_id):
+    if not nm_v5_pg_ready():
+        return {}
+    try:
+        with nm_pg_conn() as conn:
+            row = conn.execute("SELECT settings FROM guild_protection_settings WHERE guild_id=%s", (int(guild_id),)).fetchone()
+            if row:
+                raw = row["settings"]
+                if isinstance(raw, dict):
+                    return dict(raw)
+                return json.loads(raw or "{}")
+    except Exception as e:
+        try: print(f"NM V5 PG protection read skipped: {e}")
+        except Exception: pass
+    return {}
+
+def nm_v5_pg_save_protection(guild_id, settings):
+    if not nm_v5_pg_ready():
+        return False
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO guild_protection_settings (guild_id, settings, updated_at)
+                VALUES (%s,%s::jsonb,NOW())
+                ON CONFLICT (guild_id)
+                DO UPDATE SET settings=EXCLUDED.settings, updated_at=NOW()
+            """, (int(guild_id), json.dumps(settings or {}, ensure_ascii=False)))
+            conn.commit()
+        return True
+    except Exception as e:
+        try: print(f"NM V5 PG protection save skipped: {e}")
+        except Exception: pass
+        return False
+
+def nm_v5_normalize_protection(settings):
+    base = nm_v5_default_protection_settings()
+    if isinstance(settings, dict):
+        base.update(settings)
+
+    # Normalize booleans that may arrive as strings from forms.
+    for key in list(base.keys()):
+        val = base.get(key)
+        if isinstance(val, str):
+            low = val.lower().strip()
+            if low in ("true", "on", "1", "yes", "enabled"):
+                base[key] = True
+            elif low in ("false", "off", "0", "no", "disabled"):
+                base[key] = False
+
+    # Safe ints
+    for key in ("spam_limit", "mention_limit", "log_channel_id", "mute_minutes", "timeout_minutes"):
+        if key in base:
+            try:
+                base[key] = int(base.get(key) or 0)
+            except Exception:
+                base[key] = 0
+
+    return base
+
+def nm_v5_get_protection_settings(guild_id=None):
+    gid = int(guild_id or nm_v5_sync_gid())
+
+    # 1) /data per-guild store is priority. This is what makes it survive redeploy.
+    all_data = nm_v5_load_all_protection()
+    file_settings = all_data.get(str(gid), {})
+    if isinstance(file_settings, dict) and file_settings:
+        settings = nm_v5_normalize_protection(file_settings)
+        # mirror to PG if possible
+        nm_v5_pg_save_protection(gid, settings)
+        return settings
+
+    # 2) PostgreSQL fallback
+    pg = nm_v5_pg_get_protection(gid)
+    if isinstance(pg, dict) and pg:
+        settings = nm_v5_normalize_protection(pg)
+        nm_v5_set_protection_settings(gid, settings, mirror_pg=False)
+        return settings
+
+    # 3) Old protection JSON fallback, only if per-guild not yet stored.
+    for filename in ("protection_settings.json", "guild_protection_settings.json"):
+        old = nm_v5_json_load(nm_v5_sync_data_file(filename), {})
+        if isinstance(old, dict):
+            row = old.get(str(gid)) or old.get(gid)
+            if isinstance(row, dict) and row:
+                settings = nm_v5_normalize_protection(row)
+                nm_v5_set_protection_settings(gid, settings)
+                return settings
+
+    # 4) Default new guild.
+    settings = nm_v5_normalize_protection({})
+    nm_v5_set_protection_settings(gid, settings)
+    return settings
+
+def nm_v5_set_protection_settings(guild_id=None, settings=None, mirror_pg=True):
+    gid = int(guild_id or nm_v5_sync_gid())
+    settings = nm_v5_normalize_protection(settings or {})
+
+    all_data = nm_v5_load_all_protection()
+    if not isinstance(all_data, dict):
+        all_data = {}
+    all_data[str(gid)] = settings
+    nm_v5_save_all_protection(all_data)
+
+    if mirror_pg:
+        nm_v5_pg_save_protection(gid, settings)
+
+    return True
+
+# Public protection API overrides.
+def get_guild_protection_settings(guild_id):
+    return nm_v5_get_protection_settings(guild_id)
+
+def save_guild_protection_settings(guild_id, settings):
+    return nm_v5_set_protection_settings(guild_id, settings)
+
+def protection_get_settings(guild_id):
+    return nm_v5_get_protection_settings(guild_id)
+
+def protection_save_settings(guild_id, settings):
+    return nm_v5_set_protection_settings(guild_id, settings)
+
+@app.after_request
+def nm_v5_protection_after_request(response):
+    try:
+        if request.method == "POST" and request.path.startswith("/dashboard/protection"):
+            gid = nm_v5_sync_gid()
+            current = nm_v5_get_protection_settings(gid)
+
+            # Save every posted protection field. This catches old dashboard form names.
+            for key, val in request.form.items():
+                if key in ("guild_id", "csrf_token"):
+                    continue
+                if key.endswith("_enabled") or key.startswith("anti_") or key in current or key in (
+                    "enabled", "punishment", "spam_limit", "mention_limit", "log_channel_id",
+                    "mute_minutes", "timeout_minutes", "bad_words", "whitelist_roles", "whitelist_channels"
+                ):
+                    if val in ("on", "true", "True", "1"):
+                        current[key] = True
+                    elif val in ("off", "false", "False", "0"):
+                        current[key] = False
+                    else:
+                        current[key] = val
+
+            # Unchecked checkboxes do not appear in form; preserve old values instead of resetting them.
+            nm_v5_set_protection_settings(gid, current)
+    except Exception as e:
+        try: print(f"NM V5 protection after_request skipped: {e}")
+        except Exception: pass
+    return response
+
+@app.route("/dashboard/protection-persist-status")
+def nm_v5_protection_status_page():
+    gid = nm_v5_sync_gid()
+    s = nm_v5_get_protection_settings(gid)
+    enabled = s.get("enabled", False)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Protection Persistence Active</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Protection Enabled: <b>{dash_escape(str(enabled), 20)}</b></p>
+      <p>Settings saved in <code>/data/protection_settings_v5.json</code> per server.</p>
+      <p>Redeploy/code updates will not reset protection.</p>
+      <p><a style="color:#8b5cf6" href="/dashboard/protection?guild_id={int(gid)}">Back to Protection</a></p>
+    </div>
+    """
+
+# ---------------- LEVEL SYNC ----------------
+
+def nm_v5_sqlite_paths():
+    for p in [nm_v5_sync_data_file("nm_system.db"), Path("nm_system.db")]:
+        try:
+            if p.exists() and p.stat().st_size > 0:
+                yield p
+        except Exception:
+            pass
+
+def nm_v5_table_exists(cur, table):
+    try:
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,))
+        return cur.fetchone() is not None
+    except Exception:
+        return False
+
+def nm_v5_cols(cur, table):
+    try:
+        cur.execute(f"PRAGMA table_info({table})")
+        return [r[1] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+def nm_v5_pg_level_sources(gid, uid):
+    out = []
+    if not nm_v5_pg_ready():
+        return out
+    try:
+        with nm_pg_conn() as conn:
+            for query, params, label in [
+                ("SELECT xp, level FROM levels WHERE guild_id=%s AND user_id=%s", (int(gid), int(uid)), "pg_selected"),
+                ("SELECT xp, level FROM levels WHERE guild_id=0 AND user_id=%s", (int(uid),), "pg_legacy0"),
+                ("SELECT xp, level FROM levels WHERE user_id=%s ORDER BY level DESC, xp DESC LIMIT 1", (int(uid),), "pg_any"),
+            ]:
+                row = conn.execute(query, params).fetchone()
+                if row:
+                    out.append((label, int(row["xp"] or 0), int(row["level"] or 1)))
+    except Exception as e:
+        try: print(f"NM V5 PG level source skipped: {e}")
+        except Exception: pass
+    return out
+
+def nm_v5_sqlite_level_sources(gid, uid):
+    out = []
+    for path in nm_v5_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+            for table in ["guild_levels", "levels"]:
+                if not nm_v5_table_exists(cur, table):
+                    continue
+                cols = nm_v5_cols(cur, table)
+                if "user_id" not in cols:
+                    continue
+                xp_col = "xp" if "xp" in cols else ("points" if "points" in cols else None)
+                lvl_col = "level" if "level" in cols else ("lvl" if "lvl" in cols else None)
+                if not xp_col:
+                    continue
+
+                if "guild_id" in cols:
+                    for g in [int(gid), 0, int(globals().get("GUILD_ID", 0) or 0)]:
+                        cur.execute(f"SELECT {xp_col}, {lvl_col if lvl_col else '1'} FROM {table} WHERE guild_id=? AND user_id=?", (g, int(uid)))
+                        row = cur.fetchone()
+                        if row:
+                            xp = int(row[0] or 0)
+                            level = int(row[1] or max(1, xp // 100 + 1)) if lvl_col else max(1, xp // 100 + 1)
+                            out.append((f"{path.name}:{table}:{g}", xp, level))
+                    cur.execute(f"SELECT {xp_col}, {lvl_col if lvl_col else '1'} FROM {table} WHERE user_id=? ORDER BY {lvl_col if lvl_col else xp_col} DESC, {xp_col} DESC LIMIT 1", (int(uid),))
+                    row = cur.fetchone()
+                    if row:
+                        xp = int(row[0] or 0)
+                        level = int(row[1] or max(1, xp // 100 + 1)) if lvl_col else max(1, xp // 100 + 1)
+                        out.append((f"{path.name}:{table}:any", xp, level))
+                else:
+                    cur.execute(f"SELECT {xp_col}, {lvl_col if lvl_col else '1'} FROM {table} WHERE user_id=?", (int(uid),))
+                    row = cur.fetchone()
+                    if row:
+                        xp = int(row[0] or 0)
+                        level = int(row[1] or max(1, xp // 100 + 1)) if lvl_col else max(1, xp // 100 + 1)
+                        out.append((f"{path.name}:{table}:legacy", xp, level))
+            conn.close()
+        except Exception as e:
+            try: print(f"NM V5 sqlite level source skipped {path}: {e}")
+            except Exception: pass
+    return out
+
+def nm_v5_write_level_sqlite(gid, uid, xp, level):
+    for path in nm_v5_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS guild_levels (
+                    guild_id INTEGER,
+                    user_id INTEGER,
+                    xp INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 1,
+                    PRIMARY KEY (guild_id, user_id)
+                )
+            """)
+            cur.execute("INSERT OR IGNORE INTO guild_levels (guild_id,user_id,xp,level) VALUES (?,?,0,1)", (int(gid), int(uid)))
+            cur.execute("""
+                UPDATE guild_levels
+                SET xp=MAX(COALESCE(xp,0), ?), level=MAX(COALESCE(level,1), ?)
+                WHERE guild_id=? AND user_id=?
+            """, (int(xp or 0), int(level or 1), int(gid), int(uid)))
+
+            # Also mirror to levels table if it exists in expected shape.
+            if nm_v5_table_exists(cur, "levels"):
+                cols = nm_v5_cols(cur, "levels")
+                if "guild_id" in cols and "user_id" in cols and "xp" in cols and "level" in cols:
+                    cur.execute("INSERT OR IGNORE INTO levels (guild_id,user_id,xp,level) VALUES (?,?,0,1)", (int(gid), int(uid)))
+                    cur.execute("UPDATE levels SET xp=MAX(COALESCE(xp,0), ?), level=MAX(COALESCE(level,1), ?) WHERE guild_id=? AND user_id=?", (int(xp or 0), int(level or 1), int(gid), int(uid)))
+                elif "user_id" in cols and "xp" in cols and "level" in cols:
+                    cur.execute("INSERT OR IGNORE INTO levels (user_id,xp,level) VALUES (?,0,1)", (int(uid),))
+                    cur.execute("UPDATE levels SET xp=MAX(COALESCE(xp,0), ?), level=MAX(COALESCE(level,1), ?) WHERE user_id=?", (int(xp or 0), int(level or 1), int(uid)))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            try: print(f"NM V5 write level sqlite skipped {path}: {e}")
+            except Exception: pass
+
+def nm_v5_write_level_pg(gid, uid, xp, level):
+    if not nm_v5_pg_ready():
+        return
+    try:
+        with nm_pg_conn() as conn:
+            conn.execute("""
+                INSERT INTO levels (guild_id,user_id,xp,level,updated_at)
+                VALUES (%s,%s,%s,%s,NOW())
+                ON CONFLICT (guild_id,user_id)
+                DO UPDATE SET xp=GREATEST(levels.xp, EXCLUDED.xp), level=GREATEST(levels.level, EXCLUDED.level), updated_at=NOW()
+            """, (int(gid), int(uid), int(xp or 0), int(level or 1)))
+            conn.commit()
+    except Exception as e:
+        try: print(f"NM V5 write level PG skipped: {e}")
+        except Exception: pass
+
+def nm_v5_get_level_data(gid, uid):
+    gid, uid = int(gid or 0), int(uid or 0)
+    sources = []
+    sources.extend(nm_v5_pg_level_sources(gid, uid))
+    sources.extend(nm_v5_sqlite_level_sources(gid, uid))
+
+    if not sources:
+        nm_v5_write_level_sqlite(gid, uid, 0, 1)
+        nm_v5_write_level_pg(gid, uid, 0, 1)
+        return 0, 1
+
+    # choose strongest level, then strongest xp.
+    best = sorted(sources, key=lambda x: (int(x[2] or 1), int(x[1] or 0)), reverse=True)[0]
+    xp, level = int(best[1] or 0), int(best[2] or 1)
+    nm_v5_write_level_sqlite(gid, uid, xp, level)
+    nm_v5_write_level_pg(gid, uid, xp, level)
+    return xp, level
+
+def nm_v5_add_xp(gid, uid, amount):
+    xp, level = nm_v5_get_level_data(gid, uid)
+    xp = int(xp or 0) + int(amount or 0)
+    # Use old formula if available, otherwise simple formula.
+    try:
+        if "xp_to_level" in globals() and callable(xp_to_level):
+            new_level = int(xp_to_level(xp) or level)
+        else:
+            new_level = max(1, xp // 100 + 1)
+    except Exception:
+        new_level = max(1, xp // 100 + 1)
+
+    new_level = max(int(level or 1), int(new_level or 1))
+    nm_v5_write_level_sqlite(gid, uid, xp, new_level)
+    nm_v5_write_level_pg(gid, uid, xp, new_level)
+    return xp, new_level, new_level > int(level or 1)
+
+# Public level API overrides.
+def v3_get_level_data(guild_id, user_id):
+    return nm_v5_get_level_data(guild_id, user_id)
+
+def v3_add_xp(guild_id, user_id, amount):
+    return nm_v5_add_xp(guild_id, user_id, amount)
+
+def get_level_data(user_id, guild_id=None):
+    return nm_v5_get_level_data(guild_id or nm_v5_sync_gid(), user_id)
+
+def add_xp(user_id, amount, guild_id=None):
+    return nm_v5_add_xp(guild_id or nm_v5_sync_gid(), user_id, amount)
+
+def nm_legacy_level(guild_id, user_id):
+    xp, level = nm_v5_get_level_data(guild_id, user_id)
+    # Some old code expects (level, xp)
+    return level, xp
+
+def dashboard_level_rows(limit=10):
+    gid = nm_v5_sync_gid()
+    merged = {}
+
+    # SQLite all rows
+    for path in nm_v5_sqlite_paths():
+        try:
+            conn = sqlite3.connect(str(path))
+            cur = conn.cursor()
+            for table in ["guild_levels", "levels"]:
+                if not nm_v5_table_exists(cur, table):
+                    continue
+                cols = nm_v5_cols(cur, table)
+                if "user_id" not in cols:
+                    continue
+                xp_col = "xp" if "xp" in cols else ("points" if "points" in cols else None)
+                lvl_col = "level" if "level" in cols else ("lvl" if "lvl" in cols else None)
+                if not xp_col:
+                    continue
+                if "guild_id" in cols:
+                    cur.execute(f"SELECT user_id, {xp_col}, {lvl_col if lvl_col else '1'} FROM {table} WHERE guild_id IN (?,0)", (int(gid),))
+                else:
+                    cur.execute(f"SELECT user_id, {xp_col}, {lvl_col if lvl_col else '1'} FROM {table}")
+                for row in cur.fetchall():
+                    uid = int(row[0])
+                    xp = int(row[1] or 0)
+                    level = int(row[2] or max(1, xp // 100 + 1)) if lvl_col else max(1, xp // 100 + 1)
+                    old = merged.get(uid, (0, 1))
+                    if (level, xp) > (old[1], old[0]):
+                        merged[uid] = (xp, level)
+            conn.close()
+        except Exception:
+            pass
+
+    if nm_v5_pg_ready():
+        try:
+            with nm_pg_conn() as conn:
+                rows = conn.execute("SELECT user_id, xp, level FROM levels WHERE guild_id IN (%s,0)", (int(gid),)).fetchall()
+                for r in rows:
+                    uid = int(r["user_id"])
+                    xp = int(r["xp"] or 0)
+                    level = int(r["level"] or 1)
+                    old = merged.get(uid, (0, 1))
+                    if (level, xp) > (old[1], old[0]):
+                        merged[uid] = (xp, level)
+        except Exception:
+            pass
+
+    items = sorted(merged.items(), key=lambda kv: (kv[1][1], kv[1][0]), reverse=True)[:int(limit)]
+    out = []
+    for i, (uid, (xp, level)) in enumerate(items, start=1):
+        try:
+            name = dashboard_member_name(uid)
+        except Exception:
+            name = f"User {uid}"
+        nm_v5_write_level_sqlite(gid, uid, xp, level)
+        nm_v5_write_level_pg(gid, uid, xp, level)
+        out.append({"rank": i, "user_id": uid, "name": name, "level": int(level), "xp": int(xp)})
+    return out
+
+@app.route("/dashboard/sync-all")
+def nm_v5_sync_all_route():
+    gid = nm_v5_sync_gid()
+    # protection
+    protection = nm_v5_get_protection_settings(gid)
+    nm_v5_set_protection_settings(gid, protection)
+
+    # levels
+    level_count = 0
+    for row in dashboard_level_rows(10000):
+        level_count += 1
+
+    # balances if old stable function exists
+    money_count = 0
+    try:
+        if "nm_stable_top_balances" in globals():
+            for uid, bal in nm_stable_top_balances(gid, 10000):
+                money_count += 1
+        elif "dashboard_money_rows" in globals():
+            money_count = len(dashboard_money_rows(10000))
+    except Exception:
+        pass
+
+    coin = "NM Coin"
+    try:
+        coin = nm_coin_name(gid)
+    except Exception:
+        pass
+
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Full Sync Done</h1>
+      <p>Guild: <b>{int(gid)}</b></p>
+      <p>Coin: <b>{dash_escape(str(coin), 100)}</b></p>
+      <p>Money rows synced: <b>{int(money_count)}</b></p>
+      <p>Level rows synced: <b>{int(level_count)}</b></p>
+      <p>Protection saved: <b>Yes</b></p>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back</a></p>
+    </div>
+    """
+
+def nm_v5_protection_level_boot():
+    try:
+        gid = int(globals().get("GUILD_ID", 0) or 0)
+        if gid:
+            nm_v5_set_protection_settings(gid, nm_v5_get_protection_settings(gid))
+            print(f"✅ NM V5 protection persistence active: guild={gid}")
+    except Exception as e:
+        try: print(f"NM V5 protection/level boot skipped: {e}")
         except Exception: pass
 
 
