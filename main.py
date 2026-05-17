@@ -86,7 +86,7 @@ def nm_persistent_sqlite_connect(*args, **kwargs):
 
 TOKEN = os.getenv("TOKEN")
 
-GUILD_ID = 1318663576210243616  # fallback only, not a locked main server
+GUILD_ID = 1318663576210243616
 
 LOG_CHANNEL_ID = None
 
@@ -4791,25 +4791,17 @@ class GameRolesView(discord.ui.View):
 app = Flask(__name__)
 
 # =========================
-# NM DASHBOARD MULTI-GUILD ROUTING FIX
-# Fixes opening other servers from the left server rail.
+# NM STABLE MULTI-GUILD CORE
+# Safe version: no aggressive rewrites, only selected guild routing + persistence.
 # =========================
 
-def nm_route_selected_guild_id(default=None):
+def nm_stable_selected_guild_id(default=None):
+    """Single safe resolver for dashboard-selected guild."""
     try:
         path = str(getattr(request, "path", "") or "")
         m = re.search(r"/dashboard/guild/(\d+)", path)
         if m:
             gid = int(m.group(1))
-            session["selected_guild_id"] = gid
-            session["dashboard_active_guild_id"] = gid
-            return gid
-    except Exception:
-        pass
-
-    try:
-        if getattr(request, "view_args", None) and request.view_args.get("guild_id"):
-            gid = int(request.view_args.get("guild_id"))
             session["selected_guild_id"] = gid
             session["dashboard_active_guild_id"] = gid
             return gid
@@ -4827,21 +4819,22 @@ def nm_route_selected_guild_id(default=None):
         pass
 
     try:
-        gid = session.get("selected_guild_id") or session.get("dashboard_active_guild_id") or default or GUILD_ID
+        gid = session.get("dashboard_active_guild_id") or session.get("selected_guild_id") or default or GUILD_ID
         return int(gid)
     except Exception:
         return int(default or GUILD_ID or 0)
 
 
-def nm_route_selected_guild():
+def nm_stable_selected_guild(default=None):
     try:
-        return bot.get_guild(int(nm_route_selected_guild_id())) if bot else None
+        gid = nm_stable_selected_guild_id(default)
+        return bot.get_guild(int(gid)) if bot else None
     except Exception:
         return None
 
 
-def nm_route_member_count():
-    guild = nm_route_selected_guild()
+def nm_stable_selected_member_count():
+    guild = nm_stable_selected_guild()
     if not guild:
         return 0
     try:
@@ -4850,247 +4843,11 @@ def nm_route_member_count():
         return 0
 
 
-def nm_can_open_dashboard_guild(guild_id):
-    try:
-        gid = int(guild_id)
-        # Bot owner can open all guild dashboards.
-        try:
-            user_id = int((session.get("discord_user") or session.get("user") or {}).get("id") or session.get("user_id") or 0)
-        except Exception:
-            user_id = 0
-
-        try:
-            if "PRIVATE_OWNER_IDS" in globals() and user_id in PRIVATE_OWNER_IDS:
-                return True
-        except Exception:
-            pass
-
-        # If old dashboard owner helper exists, respect it.
-        try:
-            if "is_dashboard_owner_id" in globals() and is_dashboard_owner_id(user_id):
-                return True
-        except Exception:
-            pass
-
-        guild = bot.get_guild(gid) if bot else None
-        if not guild:
-            return False
-
-        member = guild.get_member(user_id)
-        if not member:
-            return False
-
-        perms = getattr(member, "guild_permissions", None)
-        if perms and (perms.administrator or perms.manage_guild):
-            return True
-
-        return False
-    except Exception:
-        return False
-
-
 @app.before_request
-def nm_multiguild_select_before_request():
+def nm_stable_dashboard_before_request():
     try:
         if request.path.startswith("/dashboard"):
-            nm_route_selected_guild_id()
-    except Exception:
-        pass
-
-
-@app.route("/dashboard/guild/<int:guild_id>", endpoint="nm_open_guild_dashboard_root_v2")
-def nm_open_guild_dashboard_root(guild_id):
-    session["selected_guild_id"] = int(guild_id)
-    session["dashboard_active_guild_id"] = int(guild_id)
-    return redirect(f"/dashboard?guild_id={int(guild_id)}")
-
-
-@app.route("/dashboard/guild/<int:guild_id>/<path:page>", endpoint="nm_open_guild_dashboard_page_v2")
-def nm_open_guild_dashboard_page(guild_id, page):
-    session["selected_guild_id"] = int(guild_id)
-    session["dashboard_active_guild_id"] = int(guild_id)
-
-    page = str(page or "").strip("/").lower()
-    route_map = {
-        "overview": "/dashboard",
-        "setup": "/dashboard/guild-setup",
-        "guild-setup": "/dashboard/guild-setup",
-        "command-center": "/dashboard/command-center",
-        "log-vault": "/dashboard/log-vault",
-        "logs": "/dashboard/log-vault",
-        "user-lookup": "/dashboard/user-lookup",
-        "warnings": "/dashboard/warnings",
-        "protection": "/dashboard/protection",
-        "economy": "/dashboard/economy",
-        "money-audit": "/dashboard/money-audit",
-        "levels": "/dashboard/levels",
-        "casino": "/dashboard/casino",
-        "shop": "/dashboard/shop",
-        "events": "/dashboard/events",
-        "memory": "/dashboard/memory",
-        "owner-console": "/dashboard/owner-console",
-        "admin-access": "/dashboard/admin-access",
-        "control": "/dashboard/control",
-        "control-center": "/dashboard/control",
-        "audit": "/dashboard/audit",
-        "audit-center": "/dashboard/audit",
-        "settings": "/dashboard/settings",
-        "oauth-debug": "/dashboard/oauth-debug",
-    }
-    target = route_map.get(page, "/dashboard")
-    return redirect(f"{target}?guild_id={int(guild_id)}")
-
-
-
-# =========================
-# NM SYSTEM GLOBAL CLEANUP
-# No server is special. GUILD_ID is only fallback for old data / emergency.
-# =========================
-
-MAIN_GUILD_ID = int(globals().get("GUILD_ID", 0) or 0)
-
-def nm_runtime_guild_id(source=None):
-    """Return the real guild being operated on from context, route, form, query, or fallback."""
-    try:
-        if source is not None:
-            # Discord context/message/guild/interaction
-            if hasattr(source, "guild") and getattr(source, "guild", None):
-                return int(source.guild.id)
-            if hasattr(source, "message") and getattr(source.message, "guild", None):
-                return int(source.message.guild.id)
-            if hasattr(source, "guild_id") and getattr(source, "guild_id", None):
-                return int(source.guild_id)
-            if hasattr(source, "id"):
-                return int(source.id)
-    except Exception:
-        pass
-
-    try:
-        path = str(getattr(request, "path", "") or "")
-        match = re.search(r"/dashboard/guild/(\d+)", path)
-        if match:
-            gid = int(match.group(1))
-            session["selected_guild_id"] = gid
-            session["dashboard_active_guild_id"] = gid
-            return gid
-    except Exception:
-        pass
-
-    try:
-        gid = (
-            request.args.get("guild_id")
-            or request.form.get("guild_id")
-            or session.get("selected_guild_id")
-            or session.get("dashboard_active_guild_id")
-            or MAIN_GUILD_ID
-        )
-        return int(gid)
-    except Exception:
-        return int(MAIN_GUILD_ID or 0)
-
-
-def nm_runtime_guild(source=None):
-    try:
-        gid = nm_runtime_guild_id(source)
-        return bot.get_guild(gid) if bot else None
-    except Exception:
-        return None
-
-
-def nm_get_guild_config(guild_id=None):
-    gid = int(guild_id or nm_runtime_guild_id())
-    try:
-        if "get_guild_settings" in globals():
-            data = get_guild_settings(gid) or {}
-            if isinstance(data, dict):
-                return data
-    except Exception:
-        pass
-    return {}
-
-
-def nm_config_value(key, fallback=None, guild_id=None):
-    cfg = nm_get_guild_config(guild_id)
-    value = cfg.get(key)
-    if value in (None, "", "0", 0):
-        return fallback
-    return value
-
-
-def nm_channel_from_config(guild, *keys, fallback_id=None):
-    if not guild:
-        return None
-    gid = int(guild.id)
-    cfg = nm_get_guild_config(gid)
-    for key in keys:
-        raw = cfg.get(key)
-        try:
-            if raw:
-                ch = guild.get_channel(int(raw))
-                if ch:
-                    return ch
-        except Exception:
-            pass
-
-    try:
-        if fallback_id and gid == MAIN_GUILD_ID:
-            return guild.get_channel(int(fallback_id))
-    except Exception:
-        pass
-    return None
-
-
-def nm_is_main_guild(guild_id):
-    try:
-        return int(guild_id) == int(MAIN_GUILD_ID)
-    except Exception:
-        return False
-
-
-def nm_disable_main_guild_lock():
-    """Marker only: old main-guild-only checks are intentionally disabled."""
-    return True
-
-
-
-# =========================
-# NM ABSOLUTE SELECTED GUILD FIX
-# المصدر الوحيد للسيرفر المختار: الرابط /dashboard/guild/<id>/... ثم guild_id ثم السيشن
-# =========================
-
-def nm_absolute_selected_guild_id():
-    return nm_route_selected_guild_id()
-
-def nm_absolute_selected_guild():
-    return nm_route_selected_guild()
-
-def nm_absolute_member_count():
-    guild = nm_absolute_selected_guild()
-    if not guild:
-        return 0
-    try:
-        # Discord's member_count is the best source; member cache can be incomplete.
-        return int(getattr(guild, "member_count", 0) or len(getattr(guild, "members", []) or []) or 0)
-    except Exception:
-        return 0
-
-
-def nm_absolute_human_bot_counts():
-    guild = nm_absolute_selected_guild()
-    if not guild:
-        return 0, 0, 0
-    members = list(getattr(guild, "members", []) or [])
-    bots = len([m for m in members if getattr(m, "bot", False)])
-    total = int(getattr(guild, "member_count", 0) or len(members) or 0)
-    humans = max(0, total - bots)
-    return total, humans, bots
-
-
-@app.before_request
-def nm_force_selected_guild_from_url_old():
-    try:
-        if request.path.startswith("/dashboard"):
-            nm_absolute_selected_guild_id()
+            nm_stable_selected_guild_id()
     except Exception:
         pass
 
@@ -5153,8 +4910,9 @@ def nm_int(value, default=0):
         return default
 
 
+
 def nm_active_guild_id():
-    return nm_route_selected_guild_id()
+    return nm_stable_selected_guild_id()
 
 def nm_set_active_guild(guild_id):
     guild_id = nm_int(guild_id, GUILD_ID)
@@ -5352,7 +5110,7 @@ def nm_current_dashboard_guild_id():
     return nm_safe_int(
         request.args.get("guild_id")
         or request.form.get("guild_id")
-        or nm_absolute_selected_guild_id()
+        or session.get("selected_guild_id")
         or GUILD_ID,
         GUILD_ID
     )
@@ -6151,13 +5909,29 @@ def dashboard_role_badge_html():
     return "<span class='pill bad'>No Access</span>"
 
 
-
 def dashboard_count_table(table):
-    return nm_selected_table_count(table)
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {table}")
+        value = cur.fetchone()[0]
+        conn.close()
+        return int(value or 0)
+    except:
+        return 0
 
 
 def dashboard_total_coins():
-    return nm_selected_economy_total()
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy")
+        value = cur.fetchone()[0]
+        conn.close()
+        return int(value or 0)
+    except:
+        return 0
+
 
 def dashboard_set_level_data(user_id, xp=None, level=None):
     old_xp, old_level = get_level_data(user_id)
@@ -6188,39 +5962,19 @@ def dashboard_member_name(user_id):
     return dashboard_member_identity_html(user_id, guild_id=dashboard_current_guild_id_safe(), include_id=True, include_roles=True, compact=False)
 
 
-
 def dashboard_money_rows(limit=10):
     rows = []
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "economy")
-        cur.execute("SELECT user_id, balance FROM economy WHERE guild_id = ? ORDER BY balance DESC LIMIT ?", (nm_selected_guild_id(), int(limit)))
-        data = cur.fetchall()
-        conn.commit()
-        conn.close()
-    except Exception:
-        data = []
-    for i, (user_id, balance) in enumerate(data, start=1):
+    for i, (user_id, balance) in enumerate(get_top_money(limit), start=1):
         rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "balance": int(balance or 0)})
     return rows
 
 
 def dashboard_level_rows(limit=10):
     rows = []
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "levels")
-        cur.execute("SELECT user_id, xp, level FROM levels WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT ?", (nm_selected_guild_id(), int(limit)))
-        data = cur.fetchall()
-        conn.commit()
-        conn.close()
-    except Exception:
-        data = []
-    for i, (user_id, xp, level) in enumerate(data, start=1):
+    for i, (user_id, xp, level) in enumerate(get_top_levels(limit), start=1):
         rows.append({"rank": i, "user_id": int(user_id), "name": dashboard_member_name(user_id), "level": int(level or 1), "xp": int(xp or 0)})
     return rows
+
 
 def dashboard_memory_summary():
     status = local_memory_status()
@@ -7227,61 +6981,6 @@ def dash_escape(value, limit=500):
     return html.escape(text)
 
 
-
-# =========================
-# NM SELECTED GUILD DATA FIX
-# يمنع خلط بيانات السيرفرات في الداشبورد
-# =========================
-
-def nm_selected_guild_id():
-    return nm_route_selected_guild_id()
-
-def nm_selected_guild():
-    return nm_route_selected_guild()
-
-def nm_selected_member_count():
-    return nm_route_member_count()
-
-def nm_ensure_table_guild_id(cur, table):
-    try:
-        cur.execute(f"PRAGMA table_info({table})")
-        cols = [r[1] for r in cur.fetchall()]
-        if "guild_id" not in cols:
-            cur.execute(f"ALTER TABLE {table} ADD COLUMN guild_id INTEGER DEFAULT 0")
-        try:
-            cur.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_guild_id ON {table}(guild_id)")
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"Could not ensure guild_id for {table}: {e}")
-
-def nm_selected_table_count(table):
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, table)
-        cur.execute(f"SELECT COUNT(*) FROM {table} WHERE guild_id = ?", (nm_selected_guild_id(),))
-        value = int(cur.fetchone()[0] or 0)
-        conn.commit()
-        conn.close()
-        return value
-    except Exception:
-        return 0
-
-def nm_selected_economy_total():
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "economy")
-        cur.execute("SELECT COALESCE(SUM(balance), 0) FROM economy WHERE guild_id = ?", (nm_selected_guild_id(),))
-        value = int(cur.fetchone()[0] or 0)
-        conn.commit()
-        conn.close()
-        return value
-    except Exception:
-        return 0
-
-
 def cc_time(unix_time):
     try:
         unix_time = int(unix_time)
@@ -7294,16 +6993,13 @@ def cc_since_hours(hours=24):
     return int(time.time()) - (int(hours) * 60 * 60)
 
 
-
-def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details="", guild_id=0):
+def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_name="", amount=0, details=""):
     try:
-        gid = int(guild_id or nm_selected_guild_id())
         conn = db_connect()
         cur = conn.cursor()
         cur.execute("""
             CREATE TABLE IF NOT EXISTS command_center_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER DEFAULT 0,
                 event_type TEXT,
                 user_id INTEGER DEFAULT 0,
                 user_name TEXT DEFAULT '',
@@ -7314,13 +7010,11 @@ def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_n
                 created_at INTEGER
             )
         """)
-        nm_ensure_table_guild_id(cur, "command_center_events")
         cur.execute("""
             INSERT INTO command_center_events
-            (guild_id, event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (event_type, user_id, user_name, channel_id, channel_name, amount, details, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            gid,
             str(event_type)[:80],
             int(user_id or 0),
             str(user_name or "")[:120],
@@ -7335,11 +7029,10 @@ def cc_record_event(event_type, user_id=0, user_name="", channel_id=0, channel_n
             DELETE FROM command_center_events
             WHERE id NOT IN (
                 SELECT id FROM command_center_events
-                WHERE guild_id = ?
                 ORDER BY id DESC
                 LIMIT ?
-            ) AND guild_id = ?
-        """, (gid, COMMAND_CENTER_EVENT_LIMIT, gid))
+            )
+        """, (COMMAND_CENTER_EVENT_LIMIT,))
 
         conn.commit()
         conn.close()
@@ -7351,13 +7044,11 @@ def cc_count_events(event_type=None, since=0):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         if event_type:
-            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND event_type = ? AND created_at >= ?", (nm_selected_guild_id(), str(event_type), int(since)))
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE event_type = ? AND created_at >= ?", (str(event_type), int(since)))
         else:
-            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND created_at >= ?", (nm_selected_guild_id(), int(since)))
+            cur.execute("SELECT COUNT(*) FROM command_center_events WHERE created_at >= ?", (int(since),))
         count = int(cur.fetchone()[0] or 0)
-        conn.commit()
         conn.close()
         return count
     except:
@@ -7368,9 +7059,8 @@ def cc_sum_amount(event_type=None, since=0, positive_only=False, negative_only=F
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
-        query = "SELECT COALESCE(SUM(amount), 0) FROM command_center_events WHERE guild_id = ? AND created_at >= ?"
-        params = [nm_selected_guild_id(), int(since)]
+        query = "SELECT COALESCE(SUM(amount), 0) FROM command_center_events WHERE created_at >= ?"
+        params = [int(since)]
         if event_type:
             query += " AND event_type = ?"
             params.append(str(event_type))
@@ -7380,7 +7070,6 @@ def cc_sum_amount(event_type=None, since=0, positive_only=False, negative_only=F
             query += " AND amount < 0"
         cur.execute(query, tuple(params))
         total = int(cur.fetchone()[0] or 0)
-        conn.commit()
         conn.close()
         return total
     except:
@@ -7391,29 +7080,28 @@ def cc_recent_events(limit=80, event_type=None):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         if event_type:
             cur.execute("""
                 SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
                 FROM command_center_events
-                WHERE guild_id = ? AND event_type = ?
+                WHERE event_type = ?
                 ORDER BY id DESC
                 LIMIT ?
-            """, (nm_selected_guild_id(), str(event_type), int(limit)))
+            """, (str(event_type), int(limit)))
         else:
             cur.execute("""
                 SELECT event_type, user_id, user_name, channel_name, amount, details, created_at
                 FROM command_center_events
-                WHERE guild_id = ?
                 ORDER BY id DESC
                 LIMIT ?
-            """, (nm_selected_guild_id(), int(limit)))
+            """, (int(limit),))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
         return []
+
+
 
 def cc_log_channel_ids():
     """Channels excluded from activity analytics so log rooms do not dominate Top Active Channels."""
@@ -7467,42 +7155,36 @@ def cc_log_channel_filter_sql(prefix=""):
     return " AND " + " AND ".join(clauses), params
 
 
-
 def cc_count_clean_messages(since=0):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         extra_sql, extra_params = cc_log_channel_filter_sql()
         cur.execute(
-            "SELECT COUNT(*) FROM command_center_events WHERE guild_id = ? AND event_type = 'message' AND created_at >= ? AND channel_name != ''" + extra_sql,
-            tuple([nm_selected_guild_id(), int(since)] + extra_params)
+            "SELECT COUNT(*) FROM command_center_events WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''" + extra_sql,
+            tuple([int(since)] + extra_params)
         )
         count = int(cur.fetchone()[0] or 0)
-        conn.commit()
         conn.close()
         return count
     except Exception:
         return 0
 
-
 def cc_top_channels(since=0, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         extra_sql, extra_params = cc_log_channel_filter_sql()
         cur.execute("""
             SELECT channel_name, COUNT(*)
             FROM command_center_events
-            WHERE guild_id = ? AND event_type = 'message' AND created_at >= ? AND channel_name != ''
+            WHERE event_type = 'message' AND created_at >= ? AND channel_name != ''
         """ + extra_sql + """
             GROUP BY channel_name
             ORDER BY COUNT(*) DESC
             LIMIT ?
-        """, tuple([nm_selected_guild_id(), int(since)] + extra_params + [int(limit)]))
+        """, tuple([int(since)] + extra_params + [int(limit)]))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
@@ -7513,17 +7195,15 @@ def cc_top_users_by_event(event_type="message", since=0, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         cur.execute("""
             SELECT user_id, user_name, COUNT(*)
             FROM command_center_events
-            WHERE guild_id = ? AND event_type = ? AND created_at >= ? AND user_id != 0
+            WHERE event_type = ? AND created_at >= ? AND user_id != 0
             GROUP BY user_id, user_name
             ORDER BY COUNT(*) DESC
             LIMIT ?
-        """, (nm_selected_guild_id(), str(event_type), int(since), int(limit)))
+        """, (str(event_type), int(since), int(limit)))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
@@ -7534,27 +7214,25 @@ def cc_money_movers(since=0, positive=True, limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "command_center_events")
         if positive:
             cur.execute("""
                 SELECT user_id, user_name, SUM(amount) AS total
                 FROM command_center_events
-                WHERE guild_id = ? AND event_type = 'money' AND amount > 0 AND created_at >= ? AND user_id != 0
+                WHERE event_type = 'money' AND amount > 0 AND created_at >= ? AND user_id != 0
                 GROUP BY user_id, user_name
                 ORDER BY total DESC
                 LIMIT ?
-            """, (nm_selected_guild_id(), int(since), int(limit)))
+            """, (int(since), int(limit)))
         else:
             cur.execute("""
                 SELECT user_id, user_name, SUM(amount) AS total
                 FROM command_center_events
-                WHERE guild_id = ? AND event_type = 'money' AND amount < 0 AND created_at >= ? AND user_id != 0
+                WHERE event_type = 'money' AND amount < 0 AND created_at >= ? AND user_id != 0
                 GROUP BY user_id, user_name
                 ORDER BY total ASC
                 LIMIT ?
-            """, (nm_selected_guild_id(), int(since), int(limit)))
+            """, (int(since), int(limit)))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
@@ -7565,17 +7243,15 @@ def cc_active_warning_rows(limit=10):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "warning_history")
         cur.execute("""
             SELECT user_id, COUNT(*) AS total
             FROM warning_history
-            WHERE guild_id = ? AND status = 'active'
+            WHERE status = 'active'
             GROUP BY user_id
             ORDER BY total DESC
             LIMIT ?
-        """, (nm_selected_guild_id(), int(limit)))
+        """, (int(limit),))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
@@ -7586,21 +7262,19 @@ def cc_warning_reason_rows(limit=8):
     try:
         conn = db_connect()
         cur = conn.cursor()
-        nm_ensure_table_guild_id(cur, "warning_history")
         cur.execute("""
             SELECT reason, COUNT(*) AS total
             FROM warning_history
-            WHERE guild_id = ?
             GROUP BY reason
             ORDER BY total DESC
             LIMIT ?
-        """, (nm_selected_guild_id(), int(limit)))
+        """, (int(limit),))
         rows = cur.fetchall()
-        conn.commit()
         conn.close()
         return rows
     except:
         return []
+
 
 def cc_database_size():
     try:
@@ -7624,9 +7298,8 @@ def cc_bot_uptime_text():
 
 
 
-
 def cc_guild_snapshot():
-    guild = nm_absolute_selected_guild()
+    guild = nm_stable_selected_guild()
     if not guild:
         return {
             "guild_ok": False,
@@ -7840,10 +7513,9 @@ def dashboard_global_bot_stats(force=False):
 
 
 
-
 def dashboard_global_stats_html(compact=False):
     if compact:
-        members = nm_route_member_count()
+        members = nm_stable_selected_member_count()
         return f"""
         <div class="globalstats compact">
           <div><b>1</b><span>Server</span></div>
@@ -7860,10 +7532,6 @@ def dashboard_global_stats_html(compact=False):
       <div class="card stat"><div class="icon">📡</div><div class="num">{stats['text_channels']:,} / {stats['voice_channels']:,}</div><div class="label">Text / Voice channels</div></div>
     </div>
     """
-
-# =========================
-# PROBOT-STYLE SERVER RAIL
-# =========================
 
 def dashboard_guild_initials(name):
     try:
@@ -7953,7 +7621,7 @@ def dashboard_server_rail_html():
         return ""
 
     guilds = dashboard_visible_bot_guilds_for_current_user(limit=90)
-    active_id = int(session.get("dashboard_active_guild_id") or GUILD_ID)
+    active_id = int(nm_stable_selected_guild_id())
 
     items = []
     # Home/account button
@@ -7998,71 +7666,6 @@ def dashboard_server_rail_html():
     return "<aside class='serverrail'>" + "".join(items) + "</aside>"
 
 
-
-# =========================
-# NM SAFE GUILD BANNER FIX
-# يمنع كراش guild_banner في صفحات الداشبورد
-# =========================
-
-def nm_safe_guild_banner(guild=None, title=None, subtitle=None, icon="⚙️", extra_html=""):
-    try:
-        if guild is None:
-            if "nm_runtime_guild" in globals():
-                guild = nm_runtime_guild()
-            elif "nm_absolute_selected_guild" in globals():
-                guild = nm_absolute_selected_guild()
-            elif bot:
-                gid = None
-                try:
-                    path = str(getattr(request, "path", "") or "")
-                    m = re.search(r"/dashboard/guild/(\d+)", path)
-                    if m:
-                        gid = int(m.group(1))
-                except Exception:
-                    pass
-                if not gid:
-                    try:
-                        gid = int(request.args.get("guild_id") or session.get("selected_guild_id") or GUILD_ID)
-                    except Exception:
-                        gid = GUILD_ID
-                guild = bot.get_guild(int(gid))
-
-        guild_name = title or (getattr(guild, "name", None) if guild else "Selected Server")
-        guild_id = getattr(guild, "id", None) if guild else None
-        icon_url = ""
-        try:
-            if guild and getattr(guild, "icon", None):
-                icon_url = guild.icon.url
-        except Exception:
-            icon_url = ""
-
-        if icon_url:
-            avatar = f"<img src='{dash_escape(icon_url, 300)}' style='width:62px;height:62px;border-radius:22px;object-fit:cover;border:1px solid var(--line);'>"
-        else:
-            avatar = f"<div style='width:62px;height:62px;border-radius:22px;background:rgba(139,92,246,.18);display:grid;place-items:center;font-size:30px;border:1px solid var(--line);'>{icon}</div>"
-
-        sub = subtitle or (f"Guild ID: <code>{int(guild_id)}</code>" if guild_id else "No guild selected")
-        return f"""
-        <div class="card" style="margin-bottom:16px">
-          <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
-            {avatar}
-            <div style="min-width:0">
-              <h1 style="margin:0 0 6px">{dash_escape(str(guild_name), 120)}</h1>
-              <div class="muted">{sub}</div>
-              {extra_html or ""}
-            </div>
-          </div>
-        </div>
-        """
-    except Exception as e:
-        return f"""
-        <div class="card" style="margin-bottom:16px">
-          <h2>Selected Server</h2>
-          <p class="muted">Guild banner unavailable.</p>
-        </div>
-        """
-
-
 @app.route('/dashboard/select-guild/<int:guild_id>')
 def dashboard_select_guild(guild_id):
     denied = dashboard_require_admin()
@@ -8076,12 +7679,9 @@ def dashboard_select_guild(guild_id):
 
 
 
-def dashboard_active_guild_stats():
-    try:
-        gid = int(session.get("selected_guild_id") or request.args.get("guild_id") or GUILD_ID)
-    except:
-        gid = GUILD_ID
 
+def dashboard_active_guild_stats():
+    gid = nm_stable_selected_guild_id()
     guild = bot.get_guild(int(gid)) if bot else None
     if not guild:
         return {
@@ -8105,13 +7705,13 @@ def dashboard_active_guild_stats():
         "member_count": member_count,
     }
 
-
 def dashboard_selected_server_count():
     return 1
 
 
+
 def dashboard_selected_member_count():
-    return nm_route_member_count()
+    return nm_stable_selected_member_count()
 
 def nm_db_table_count(table_name):
     try:
@@ -8146,56 +7746,6 @@ def nm_db_sum_column(table_name, column_name):
         except:
             return 0
 
-
-# =========================
-# NM PER-GUILD ECONOMY COMPAT
-# =========================
-
-def nm_ensure_economy_table(cur):
-    cur.execute("CREATE TABLE IF NOT EXISTS economy (guild_id INTEGER DEFAULT 0, user_id INTEGER, balance INTEGER DEFAULT 0)")
-    try:
-        nm_ensure_guild_column(cur, "economy")
-    except Exception:
-        pass
-
-def nm_get_balance_global_safe(user_id, guild_id=None):
-    gid = int(guild_id or nm_runtime_guild_id())
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_economy_table(cur)
-        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (gid, int(user_id)))
-        row = cur.fetchone()
-        if not row:
-            cur.execute("INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, 0)", (gid, int(user_id)))
-            conn.commit()
-            value = 0
-        else:
-            value = int(row[0] or 0)
-        conn.close()
-        return value
-    except Exception as e:
-        print(f"nm_get_balance_global_safe error: {e}")
-        return 0
-
-def nm_add_balance_global_safe(user_id, amount, guild_id=None):
-    gid = int(guild_id or nm_runtime_guild_id())
-    try:
-        conn = db_connect()
-        cur = conn.cursor()
-        nm_ensure_economy_table(cur)
-        cur.execute("SELECT balance FROM economy WHERE guild_id=? AND user_id=? LIMIT 1", (gid, int(user_id)))
-        if not cur.fetchone():
-            cur.execute("INSERT INTO economy (guild_id, user_id, balance) VALUES (?, ?, 0)", (gid, int(user_id)))
-        cur.execute("UPDATE economy SET balance=COALESCE(balance,0)+? WHERE guild_id=? AND user_id=?", (int(amount), gid, int(user_id)))
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"nm_add_balance_global_safe error: {e}")
-        return False
-
-
 DASHBOARD_BASE_TEMPLATE = r'''
 <!doctype html>
 <html lang="en">
@@ -8229,7 +7779,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
 <div class="layout">
   {{ server_rail|safe }}
   <aside class="sidebar">
-    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Selected server control panel</p></div></div>
+    <div class="brand"><div class="logo">⚙️</div><div><h1>{{ brand }}</h1><p>Fast selected-server control panel</p></div></div>
     {{ global_stats_compact|safe }}
     <nav class="navlist">
       <div class="navsection">Monitor</div>
@@ -8405,53 +7955,6 @@ document.addEventListener("DOMContentLoaded", function () {
 
 <script>
 document.addEventListener("DOMContentLoaded", function () {
-  const m = location.pathname.match(/\/dashboard\/guild\/(\d+)/);
-  const gid = m ? m[1] : new URLSearchParams(location.search).get("guild_id");
-  if (!gid) return;
-
-  document.querySelectorAll('a[href^="/dashboard"]').forEach(a => {
-    try {
-      let u = new URL(a.getAttribute("href"), location.origin);
-      if (!u.pathname.includes("/dashboard/guild/") && !u.searchParams.get("guild_id")) {
-        u.searchParams.set("guild_id", gid);
-        a.setAttribute("href", u.pathname + u.search + u.hash);
-      }
-    } catch(e) {}
-  });
-});
-</script>
-
-
-<script>
-document.addEventListener("DOMContentLoaded", function () {
-  const pathMatch = location.pathname.match(/\/dashboard\/guild\/(\d+)/);
-  const gid = pathMatch ? pathMatch[1] : new URLSearchParams(location.search).get("guild_id");
-  if (!gid) return;
-  document.querySelectorAll('a[href^="/dashboard"]').forEach(a => {
-    try {
-      const raw = a.getAttribute("href");
-      const u = new URL(raw, location.origin);
-      if (!u.pathname.includes("/dashboard/guild/") && !u.searchParams.get("guild_id")) {
-        u.searchParams.set("guild_id", gid);
-        a.setAttribute("href", u.pathname + u.search + u.hash);
-      }
-    } catch(e) {}
-  });
-  document.querySelectorAll('form[action^="/dashboard"], form:not([action])').forEach(f => {
-    if (!f.querySelector('input[name="guild_id"]')) {
-      const input = document.createElement("input");
-      input.type = "hidden";
-      input.name = "guild_id";
-      input.value = gid;
-      f.appendChild(input);
-    }
-  });
-});
-</script>
-
-
-<script>
-document.addEventListener("DOMContentLoaded", function () {
   const pathMatch = location.pathname.match(/\/dashboard\/guild\/(\d+)/);
   const gid = pathMatch ? pathMatch[1] : new URLSearchParams(location.search).get("guild_id");
   if (!gid) return;
@@ -8587,21 +8090,22 @@ def dashboard_oauth_debug():
 # GLOBAL DASHBOARD PHASE 3 HELPERS
 # =========================
 
-def dashboard_set_active_guild(guild_id=None):
-    gid = int(guild_id or nm_absolute_selected_guild_id())
+
+def dashboard_set_active_guild(guild_id):
     try:
-        session["selected_guild_id"] = gid
+        gid = int(guild_id)
+    except Exception:
+        gid = int(GUILD_ID)
+    try:
         session["dashboard_active_guild_id"] = gid
+        session["selected_guild_id"] = gid
     except Exception:
         pass
     return gid
 
+
 def dashboard_get_active_guild_id():
-    raw = request.args.get("guild_id") or session.get("dashboard_active_guild_id") or GUILD_ID
-    return dashboard_set_active_guild(raw)
-
-
-guild_banner = ""  # GLOBAL_GUILD_BANNER_FALLBACK: prevents runtime crashes if a legacy page misses local banner
+    return nm_stable_selected_guild_id()
 
 def dashboard_guild_banner(guild_id, label="Selected Guild"):
     guild = bot.get_guild(int(guild_id)) if bot else None
@@ -9011,7 +8515,6 @@ def dashboard_guild_selector_page():
 
 @app.route("/dashboard/guild/<int:guild_id>/setup", methods=["GET", "POST"])
 def dashboard_guild_setup_page(guild_id):
-    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_login()
     if denied:
         return denied
@@ -9112,7 +8615,6 @@ def dashboard_guild_protection_redirect(guild_id):
 
 @app.route("/dashboard/economy", methods=["GET"])
 def dashboard_economy_page():
-    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -9154,7 +8656,6 @@ def dashboard_economy_page():
 
 @app.route('/dashboard/money-audit', methods=['GET'])
 def dashboard_money_audit_page():
-    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_owner()
     if denied:
         return denied
@@ -9260,7 +8761,6 @@ def dashboard_money_audit_page():
 
 @app.route("/dashboard/levels", methods=["GET"])
 def dashboard_levels_page():
-    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -9340,7 +8840,7 @@ def dashboard_events_page():
     status = "ON" if EVENTS_ENABLED else "OFF"
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
+    {guild_banner}
     <div class="grid">
       <div class="card stat"><div class="icon">🎉</div><div class="num">{status}</div><div class="label">Events Status</div></div>
       <div class="card stat"><div class="icon">🏆</div><div class="num">{short_money(DEFAULT_EVENT_PRIZE)}</div><div class="label">Default Prize</div></div>
@@ -9516,7 +9016,7 @@ def dashboard_warnings_page():
 
     body = f'''
     {dashboard_toast_html()}
-    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
+    {guild_banner}
 
     <style>
       .warning-tabs {{
@@ -10518,7 +10018,7 @@ def dashboard_control_page():
     emergency_button_text = "Disable Emergency" if control.get("emergency_lockdown") else "Enable Emergency Lockdown"
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
+    {guild_banner}
     <div class="hero"><div class="card"><div class="big">🛡️ Admin Control Center</div><p class="muted">اقفل وافتح أي أمر أو نظام كامل بدون تعديل الكود. التغييرات فورية وتحفظ بعد الريستارت.</p></div><div class="card {emergency_class}"><h3>🚨 Emergency Mode</h3><p class="muted">يقفل الاقتصاد والقمار واللفل والتحويلات وأغلب أوامر الأعضاء، ويترك الأدوات الإدارية الأساسية.</p><form method="post" action="/dashboard/control/emergency"><input type="hidden" name="enabled" value="{emergency_enabled_value}"><button class="btn {emergency_button_class}">{emergency_button_text}</button></form></div></div>
     <form method="post" action="/dashboard/control/save">
       <div class="card"><h3>🧩 System Toggles</h3><div class="switchgrid">{system_cards}</div></div>
@@ -11024,7 +10524,7 @@ def dashboard_log_vault_page():
 
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
+    {guild_banner}
     <style>
       .vault-shell {{ display:grid; grid-template-columns: 320px 1fr; gap:16px; align-items:start; }}
       .vault-rooms {{ position:sticky; top:12px; max-height:calc(100vh - 120px); overflow:auto; border:1px solid var(--line); border-radius:24px; background:rgba(2,6,23,.55); padding:12px; }}
@@ -11165,7 +10665,6 @@ def dashboard_command_center_page():
 
     since_24h = cc_since_hours(24)
     since_1h = cc_since_hours(1)
-    dashboard_set_active_guild(selected_guild_id)
     guild_data = cc_guild_snapshot()
 
     bot_ping = "Offline"
@@ -11286,7 +10785,7 @@ def dashboard_command_center_page():
     </div>
 
     <div id="overview" class="grid">
-      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{guild_data['members']}</div><div class="cc-sub">Online: {guild_data['online']} • Voice: {guild_data['voice']} • Bots: {guild_data['bots']}</div></div>
+      <div class="card"><h3>👥 Members</h3><div class="cc-stat">{guild_data['humans']}</div><div class="cc-sub">Online: {guild_data['online']} • Voice: {guild_data['voice']} • Bots: {guild_data['bots']}</div></div>
       <div class="card"><h3>💬 Messages 24h</h3><div class="cc-stat">{messages_24h:,}</div><div class="cc-sub">Last hour: {messages_1h:,}</div></div>
       <div class="card"><h3>⌨️ Commands 24h</h3><div class="cc-stat">{commands_24h:,}</div><div class="cc-sub">Last hour: {commands_1h:,}</div></div>
       <div class="card"><h3>⚠️ Violations 24h</h3><div class="cc-stat">{violations_24h:,}</div><div class="cc-sub">Last hour: {violations_1h:,}</div></div>
@@ -11357,7 +10856,6 @@ def dashboard_command_center_page():
 
 @app.route("/dashboard/protection", methods=["GET"])
 def dashboard_protection_page():
-    guild_banner = nm_safe_guild_banner()
     denied = dashboard_require_admin()
     if denied:
         return denied
@@ -11433,7 +10931,7 @@ def dashboard_protection_page():
     guild_banner = dashboard_guild_banner(selected_guild_id, "Protection Guild")
     body = f"""
     {dashboard_toast_html()}
-    {guild_banner if 'guild_banner' in locals() else nm_safe_guild_banner()}
+    {guild_banner}
     <style>
       .protect-hero{{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(260px,.8fr);gap:16px}}
       .protect-switch{{display:grid;grid-template-columns:54px minmax(0,1fr) 48px;align-items:center;gap:12px;padding:14px;border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.045);margin-bottom:10px}}
@@ -11881,7 +11379,7 @@ async def booster_weekly_loop():
 
             if guild:
                 role = guild.get_role(SERVER_BOOSTER_ROLE_ID)
-                channel = nm_channel_from_config(guild, 'commands_channel_id', 'commands_channel', 'commands', fallback_id=COMMANDS_CHANNEL_ID)
+                channel = guild.get_channel(COMMANDS_CHANNEL_ID)
 
                 if role:
                     for member in list(role.members):
@@ -11954,26 +11452,9 @@ async def on_guild_join(guild):
     )
 
 
-
-def nm_global_cleanup_audit():
-    try:
-        checks = [
-            "ctx.guild.id != GUILD_ID",
-            "message.guild.id != GUILD_ID",
-            "guild.id != GUILD_ID",
-            "interaction.guild.id != GUILD_ID",
-        ]
-        found = [c for c in checks if c in open(__file__, "r", encoding="utf-8").read()]
-        if found:
-            print(f"⚠️ NM Global Cleanup audit: remaining old lock patterns: {found}")
-        else:
-            print("✅ NM Global Cleanup audit: no obvious main-guild lock patterns found.")
-    except Exception as e:
-        print(f"NM Global Cleanup audit failed: {e}")
-
+@bot.event
 async def on_ready():
-    print("✅ NM safe guild banner fix active")
-    nm_global_cleanup_audit()
+    print("✅ NM stable polished build active")
     print(f"✅ NM persistent storage active: {NM_DATA_DIR}")
     try:
         await nm_sync_slash_commands()
@@ -12789,7 +12270,7 @@ async def on_member_update(before, after):
         executor_text = entry.user.mention if entry and entry.user else "غير معروف"
 
         if any(role.id == SERVER_BOOSTER_ROLE_ID for role in added):
-            channel = after.nm_channel_from_config(guild, 'commands_channel_id', 'commands_channel', 'commands', fallback_id=COMMANDS_CHANNEL_ID)
+            channel = after.guild.get_channel(COMMANDS_CHANNEL_ID)
             success, remaining, balance_amount, reward = claim_booster_weekly(after.id)
 
             if channel and success:
@@ -16374,6 +15855,52 @@ try:
         await ctx.reply(f"✅ Synced slash commands: `{count}`")
 except Exception:
     pass
+
+
+
+# =========================
+# NM STABLE GUILD OPEN ROUTES
+# These routes are intentionally placed late so specific routes like /setup win first.
+# =========================
+
+@app.route("/dashboard/guild/<int:guild_id>", endpoint="nm_stable_open_guild_root")
+def nm_stable_open_guild_root(guild_id):
+    dashboard_set_active_guild(int(guild_id))
+    return redirect(f"/dashboard?guild_id={int(guild_id)}")
+
+
+@app.route("/dashboard/guild/<int:guild_id>/<path:page>", endpoint="nm_stable_open_guild_page")
+def nm_stable_open_guild_page(guild_id, page):
+    dashboard_set_active_guild(int(guild_id))
+    page = str(page or "").strip("/").lower()
+    route_map = {
+        "overview": "/dashboard",
+        "setup": "/dashboard/guild-setup",
+        "guild-setup": "/dashboard/guild-setup",
+        "command-center": "/dashboard/command-center",
+        "log-vault": "/dashboard/log-vault",
+        "logs": "/dashboard/log-vault",
+        "user-lookup": "/dashboard/user-lookup",
+        "warnings": "/dashboard/warnings",
+        "protection": "/dashboard/protection",
+        "economy": "/dashboard/economy",
+        "money-audit": "/dashboard/money-audit",
+        "levels": "/dashboard/levels",
+        "casino": "/dashboard/casino",
+        "shop": "/dashboard/shop",
+        "events": "/dashboard/events",
+        "memory": "/dashboard/memory",
+        "owner-console": "/dashboard/owner-console",
+        "admin-access": "/dashboard/admin-access",
+        "control": "/dashboard/control",
+        "control-center": "/dashboard/control",
+        "audit": "/dashboard/audit",
+        "audit-center": "/dashboard/audit",
+        "settings": "/dashboard/settings",
+        "oauth-debug": "/dashboard/oauth-debug",
+    }
+    target = route_map.get(page, "/dashboard")
+    return redirect(f"{target}?guild_id={int(guild_id)}")
 
 
 keep_alive()
