@@ -4316,7 +4316,152 @@ def oauth_get_user(access_token):
             body = e.read().decode("utf-8")
         except Exception:
             body = "No response body"
+
         raise Exception(f"Discord user fetch failed: HTTP {e.code}. Response: {body}")
+
+
+def oauth_get_user_guilds(access_token):
+    req = urllib.request.Request(
+        f"{DISCORD_API_BASE}/users/@me/guilds",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+            "User-Agent": "NM-System-Dashboard/1.0",
+        },
+        method="GET"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as response:
+            data = json.loads(response.read().decode("utf-8"))
+            return data if isinstance(data, list) else []
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8")
+        except Exception:
+            body = "No response body"
+        raise Exception(f"Discord guilds fetch failed: HTTP {e.code}. Response: {body}")
+
+
+def dashboard_user_guilds():
+    guilds = session.get("discord_guilds") or []
+    return guilds if isinstance(guilds, list) else []
+
+
+def dashboard_user_guild_map():
+    result = {}
+    for item in dashboard_user_guilds():
+        try:
+            result[int(item.get("id"))] = item
+        except Exception:
+            pass
+    return result
+
+
+def dashboard_oauth_guild_permissions(guild_id):
+    item = dashboard_user_guild_map().get(int(guild_id))
+    if not item:
+        return 0, False
+    try:
+        perms = int(item.get("permissions") or 0)
+    except Exception:
+        perms = 0
+    return perms, bool(item.get("owner"))
+
+
+def dashboard_has_manage_guild_oauth(guild_id):
+    try:
+        perms, is_owner = dashboard_oauth_guild_permissions(int(guild_id))
+        return bool(is_owner or (perms & 0x8) or (perms & 0x20))
+    except Exception:
+        return False
+
+
+def dashboard_require_login():
+    if not session.get("discord_user"):
+        return redirect("/login")
+    return None
+
+
+def dashboard_bot_guild_ids():
+    try:
+        return {int(g.id) for g in bot.guilds}
+    except Exception:
+        return set()
+
+
+def dashboard_get_bot_guild(guild_id):
+    try:
+        return bot.get_guild(int(guild_id))
+    except Exception:
+        return None
+
+
+def dashboard_can_manage_guild(guild_id):
+    try:
+        guild_id = int(guild_id)
+    except Exception:
+        return False
+    if dashboard_current_user_is_owner():
+        return True
+    if guild_id in dashboard_bot_guild_ids() and dashboard_has_manage_guild_oauth(guild_id):
+        return True
+    return False
+
+
+def dashboard_guild_channels_html(guild, selected_id=0, text_only=True, include_none=True):
+    options = []
+    if include_none:
+        options.append(f"<option value='0' {'selected' if not selected_id else ''}>Not set</option>")
+    if not guild:
+        return "".join(options)
+    channels = guild.text_channels if text_only else guild.channels
+    for channel in channels:
+        try:
+            selected = "selected" if int(channel.id) == int(selected_id or 0) else ""
+            options.append(f"<option value='{int(channel.id)}' {selected}>#{dash_escape(channel.name, 80)}</option>")
+        except Exception:
+            pass
+    return "".join(options)
+
+
+def dashboard_guild_categories_html(guild, selected_id=0, include_none=True):
+    options = []
+    if include_none:
+        options.append(f"<option value='0' {'selected' if not selected_id else ''}>Not set</option>")
+    if not guild:
+        return "".join(options)
+    for category in guild.categories:
+        try:
+            selected = "selected" if int(category.id) == int(selected_id or 0) else ""
+            options.append(f"<option value='{int(category.id)}' {selected}>📁 {dash_escape(category.name, 80)}</option>")
+        except Exception:
+            pass
+    return "".join(options)
+
+
+def update_guild_settings_from_dashboard(guild_id, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done=True):
+    try:
+        now = int(time.time())
+        guild = dashboard_get_bot_guild(int(guild_id))
+        guild_name = str(guild.name)[:180] if guild else get_guild_settings(guild_id).get("guild_name", "")
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute('''
+            INSERT OR IGNORE INTO guild_settings
+            (guild_id, guild_name, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (int(guild_id), guild_name, int(bool(enabled)), int(commands_channel_id or 0), int(gambling_channel_id or 0), int(logs_category_id or 0), int(bool(setup_done)), now, now))
+        cur.execute('''
+            UPDATE guild_settings
+            SET guild_name = ?, enabled = ?, commands_channel_id = ?, gambling_channel_id = ?, logs_category_id = ?, setup_done = ?, updated_at = ?
+            WHERE guild_id = ?
+        ''', (guild_name, int(bool(enabled)), int(commands_channel_id or 0), int(gambling_channel_id or 0), int(logs_category_id or 0), int(bool(setup_done)), now, int(guild_id)))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"Dashboard guild settings update error: {e}")
+        return False
 
 
 async def dashboard_fetch_member(user_id):
@@ -5848,6 +5993,7 @@ DASHBOARD_BASE_TEMPLATE = r'''
     <nav class="navlist">
       <div class="navsection">Monitor</div>
       <a class="navitem" href="/dashboard"><span class="navicon">🏠</span><span>Overview</span></a>
+      <a class="navitem" href="/dashboard/guilds"><span class="navicon">🌍</span><span>Guilds</span></a>
       <a class="navitem" href="/dashboard/command-center"><span class="navicon">🧠</span><span>Command Center</span></a>
       <a class="navitem" href="/dashboard/log-vault"><span class="navicon">🗄️</span><span>Log Vault</span></a>
       <a class="navitem" href="/dashboard/user"><span class="navicon">👤</span><span>User Lookup</span></a>
@@ -5962,8 +6108,11 @@ def dashboard_callback():
         return render_dashboard_page("OAuth Error", "<div class='card danger'><h3>OAuth Error</h3><p>Discord ما رجع code.</p></div>", status=400)
     try:
         token_data = oauth_post_token(code)
-        user = oauth_get_user(token_data["access_token"])
+        access_token = token_data["access_token"]
+        user = oauth_get_user(access_token)
+        user_guilds = oauth_get_user_guilds(access_token)
         session["discord_user"] = {"id": user.get("id"), "username": user.get("username"), "global_name": user.get("global_name"), "avatar": user.get("avatar")}
+        session["discord_guilds"] = user_guilds
     except Exception as e:
         return render_dashboard_page("OAuth Error", f"<div class='card danger'><h3>OAuth Failed</h3><p>{clean_text(str(e), 600)}</p></div>", status=500)
     return redirect("/dashboard")
@@ -6028,6 +6177,129 @@ def dashboard_home():
     </div>
     '''
     return render_dashboard_page("Overview", body)
+
+
+@app.route("/dashboard/guilds", methods=["GET"])
+def dashboard_guild_selector_page():
+    denied = dashboard_require_login()
+    if denied:
+        return denied
+    init_db()
+    bot_ids = dashboard_bot_guild_ids()
+    oauth_map = dashboard_user_guild_map()
+    rows = []
+    candidate_ids = set(oauth_map.keys()) & bot_ids
+    if dashboard_current_user_is_owner():
+        candidate_ids |= bot_ids
+
+    for guild_id in sorted(candidate_ids):
+        guild = dashboard_get_bot_guild(guild_id)
+        oauth_item = oauth_map.get(guild_id, {})
+        settings = get_guild_settings(guild_id)
+        if not dashboard_can_manage_guild(guild_id):
+            continue
+        name = guild.name if guild else (oauth_item.get("name") or settings.get("guild_name") or f"Guild {guild_id}")
+        status = "Ready" if settings.get("setup_done") else "Needs setup"
+        status_class = "ok" if settings.get("setup_done") else "warn"
+        enabled = "Enabled" if settings.get("enabled") else "Disabled"
+        enabled_class = "ok" if settings.get("enabled") else "bad"
+        commands_text = f"<#{settings.get('commands_channel_id')}>" if settings.get('commands_channel_id') else "Not set"
+        gambling_text = f"<#{settings.get('gambling_channel_id')}>" if settings.get('gambling_channel_id') else "Not set"
+        rows.append(f'''
+        <div class="card">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+            <div><h3>🌍 {dash_escape(name, 120)}</h3><p class="muted small"><code>{guild_id}</code></p></div>
+            <div style="text-align:right"><span class="pill {status_class}">{status}</span> <span class="pill {enabled_class}">{enabled}</span></div>
+          </div>
+          <div style="height:10px"></div>
+          <p class="muted small">Commands: {commands_text} • Gambling: {gambling_text}</p>
+          <a class="btn primary" href="/dashboard/guild/{guild_id}/setup">Open Setup</a>
+        </div>
+        ''')
+
+    if not rows:
+        rows.append('''
+        <div class="card warn">
+          <h3>ما فيه سيرفرات قابلة للإدارة</h3>
+          <p class="muted">تأكد أن البوت موجود في السيرفر وأن حسابك عنده Manage Server أو Administrator، أو أنك داخل كـ Owner في الداشبورد.</p>
+          <a class="btn" href="/login">Refresh Discord Login</a>
+        </div>
+        ''')
+
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="hero">
+      <div class="card"><div class="big">🌍 Guild Selector</div><p class="muted">اختار السيرفر اللي تبي تضبطه. هذي بداية تحويل البوت إلى Multi-Guild Dashboard.</p></div>
+      <div class="card"><h3>Phase 2</h3><p><span class="pill ok">Dashboard Guild Setup</span></p><p class="muted small">كل سيرفر يقدر يكون له روم أوامر، روم قمار، وكاتقوري لوقات خاص فيه.</p></div>
+    </div>
+    <div style="height:14px"></div>
+    <div class="grid2">{''.join(rows)}</div>
+    '''
+    return render_dashboard_page("Guilds", body)
+
+
+@app.route("/dashboard/guild/<int:guild_id>/setup", methods=["GET", "POST"])
+def dashboard_guild_setup_page(guild_id):
+    denied = dashboard_require_login()
+    if denied:
+        return denied
+    init_db()
+    guild = dashboard_get_bot_guild(guild_id)
+    if not guild:
+        return render_dashboard_page("Guild Setup", "<div class='card danger'><h3>Bot is not in this server</h3><p>البوت لازم يكون داخل السيرفر عشان تقدر تضبطه.</p></div>", status=404)
+    if not dashboard_can_manage_guild(guild_id):
+        return dashboard_access_denied_html("ما عندك صلاحية إدارة هذا السيرفر من الداشبورد. تحتاج Manage Server أو Administrator داخل السيرفر.")
+
+    if request.method == "POST":
+        enabled = request.form.get("enabled") == "on"
+        commands_channel_id = safe_int(request.form.get("commands_channel_id"), 0)
+        gambling_channel_id = safe_int(request.form.get("gambling_channel_id"), 0)
+        logs_category_id = safe_int(request.form.get("logs_category_id"), 0)
+        ok = update_guild_settings_from_dashboard(guild_id, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done=True)
+        if ok:
+            dashboard_log_action("guild_setup_update", f"Guild {guild_id}: commands={commands_channel_id}, gambling={gambling_channel_id}, logs={logs_category_id}, enabled={enabled}", admin=session.get("discord_user"))
+            session["toast"] = "تم حفظ إعدادات السيرفر."
+        else:
+            session["toast"] = "صار خطأ أثناء حفظ إعدادات السيرفر."
+        return redirect(f"/dashboard/guild/{guild_id}/setup")
+
+    settings = get_guild_settings(guild_id)
+    enabled_checked = "checked" if settings.get("enabled") else ""
+    commands_options = dashboard_guild_channels_html(guild, settings.get("commands_channel_id"), text_only=True)
+    gambling_options = dashboard_guild_channels_html(guild, settings.get("gambling_channel_id"), text_only=True)
+    logs_options = dashboard_guild_categories_html(guild, settings.get("logs_category_id"))
+    current_commands = f"<#{settings.get('commands_channel_id')}>" if settings.get('commands_channel_id') else "<span class='muted'>Not set</span>"
+    current_gambling = f"<#{settings.get('gambling_channel_id')}>" if settings.get('gambling_channel_id') else "<span class='muted'>Not set</span>"
+    current_logs = f"<#{settings.get('logs_category_id')}>" if settings.get('logs_category_id') else "<span class='muted'>Not set</span>"
+    setup_badge = "Setup done" if settings.get("setup_done") else "Needs setup"
+    setup_class = "ok" if settings.get("setup_done") else "warn"
+
+    body = f'''
+    {dashboard_toast_html()}
+    <div class="hero">
+      <div class="card"><div class="big">⚙️ {dash_escape(guild.name, 120)}</div><p class="muted">Guild ID: <code>{guild.id}</code></p><p><span class="pill {setup_class}">{setup_badge}</span></p></div>
+      <div class="card"><h3>What this controls</h3><p class="muted small">هذه الإعدادات تستخدمها أوامر السلاش العالمية مثل /salary و /luck، وبعد المراحل القادمة بتصير كل أنظمة البوت تقرأ إعدادات السيرفر من هنا.</p></div>
+    </div>
+    <div style="height:14px"></div>
+    <form class="card" method="post" action="/dashboard/guild/{guild.id}/setup">
+      <h3>🌍 Server Setup</h3>
+      <label style="display:flex;align-items:center;gap:10px;margin:10px 0;"><input type="checkbox" name="enabled" {enabled_checked} style="width:auto;"><span>Enable bot systems in this server</span></label>
+      <div class="grid3">
+        <div><label>Commands Channel</label><select name="commands_channel_id">{commands_options}</select><p class="muted small">الأوامر الاقتصادية والعامة تشتغل هنا.</p></div>
+        <div><label>Gambling Channel</label><select name="gambling_channel_id">{gambling_options}</select><p class="muted small">أوامر القمار مثل /luck تشتغل هنا.</p></div>
+        <div><label>Logs Category</label><select name="logs_category_id">{logs_options}</select><p class="muted small">مكان إنشاء/ترتيب رومات اللوقات لاحقًا.</p></div>
+      </div>
+      <div style="height:14px"></div>
+      <button class="btn primary" type="submit">Save Guild Setup</button>
+      <a class="btn" href="/dashboard/guilds">Back to Guilds</a>
+    </form>
+    <div style="height:14px"></div>
+    <div class="grid2">
+      <div class="card"><h3>✅ Current Effective Settings</h3><p>Commands: {current_commands}</p><p>Gambling: {current_gambling}</p><p>Logs Category: {current_logs}</p></div>
+      <div class="card"><h3>🧪 Test Commands</h3><p class="muted small">بعد الحفظ جرب داخل السيرفر:</p><p><code>/setup_status</code></p><p><code>/ping</code></p><p><code>/salary</code></p></div>
+    </div>
+    '''
+    return render_dashboard_page("Guild Setup", body)
 
 
 @app.route("/dashboard/economy", methods=["GET"])
@@ -11455,4 +11727,3 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
-    
