@@ -8432,7 +8432,7 @@ def dashboard_home():
     memory_ok = sum(1 for m in memory if m['badge'] == 'OK')
     body = f'''
     {dashboard_toast_html()}
-    <div class="hero"><div class="card"><div class="big">NM System</div><p class="muted">Control servers, economy, levels, memory backups, casino and protection from one powerful dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
+    <div class="hero"><div class="card"><div class="big">NM System</div><p class="muted">Control servers, economy, levels, memory backups, casino and protection from one powerful dashboard.</p><div style="height:12px"></div><a class="btn primary" href="/dashboard/economy">Manage Economy</a> <a class="btn" href="/dashboard/settings">Bot Settings</a> <a class="btn secondary" href="/dashboard/settings-coin">Coin Settings</a></div><div class="card"><h3>⚡ Quick Status</h3><p><span class="pill ok">Bot Online</span></p><p class="muted">Memory files healthy: <b>{memory_ok}/{len(memory)}</b></p><p class="muted">Guide interval: <b>{round(ECONOMY_EXPLAIN_INTERVAL_SECONDS/3600, 2)}h</b></p></div></div>
     <div class="grid">
       <div class="card stat"><div class="icon">🪙</div><div class="num">{fmt_num(economy_users)}</div><div class="label">Economy users</div></div>
       <div class="card stat"><div class="icon">💰</div><div class="num">{fmt_num(total_coins)}</div><div class="label">Total {nm_coin_name()}</div></div>
@@ -18561,7 +18561,7 @@ def nm_coin_set_custom_coin_page():
     current = nm_coin_name(gid)
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Set Server Coin</h1>
+      <h1>Settings • Coin Name</h1>
       <p>Default is <b>NM Coin</b>. Changing it here saves it forever for this server only.</p>
       <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
         <label>Coin Name</label>
@@ -19048,7 +19048,7 @@ def nm_hotfix_set_coin_page():
     current = nm_hotfix_coin_name(gid)
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Set Server Coin</h1>
+      <h1>Settings • Coin Name</h1>
       <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
         <label>Coin Name</label>
         <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
@@ -19656,8 +19656,8 @@ def nm_stable_set_coin_route():
     current = nm_coin_name(gid)
     return f"""
     <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
-      <h1>Set Server Coin</h1>
-      <p>Default is <b>NM Coin</b>. Custom value is saved per server.</p>
+      <h1>Settings • Coin Name</h1>
+      <p>This is saved from Settings per server. Default is <b>NM Coin</b>.</p>
       <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
         <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
         <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save Coin</button>
@@ -19717,6 +19717,126 @@ def nm_stable_polish_boot():
     except Exception as e:
         try: print(f"NM stable polish boot ignored: {e}")
         except Exception: pass
+
+
+
+# =====================================================================
+# NM SETTINGS INLINE COIN SAVE
+# Makes Coin Name saved directly from dashboard/settings/customization forms.
+# /dashboard/set-custom-coin stays as fallback only.
+# =====================================================================
+
+def nm_inline_settings_gid():
+    try:
+        return int(
+            request.args.get("guild_id")
+            or request.form.get("guild_id")
+            or session.get("selected_guild_id")
+            or session.get("dashboard_active_guild_id")
+            or globals().get("GUILD_ID", 0)
+            or 0
+        )
+    except Exception:
+        return int(globals().get("GUILD_ID", 0) or 0)
+
+def nm_inline_current_coin(guild_id=None):
+    gid = int(guild_id or nm_inline_settings_gid())
+    try:
+        if "nm_coin_name" in globals():
+            return str(nm_coin_name(gid) or "NM Coin")
+    except Exception:
+        pass
+    try:
+        if "nm_stable_get_settings" in globals():
+            return str(nm_stable_get_settings(gid).get("coin_name") or "NM Coin")
+    except Exception:
+        pass
+    return "NM Coin"
+
+def nm_inline_save_coin_from_form():
+    try:
+        if request.method != "POST" or not request.path.startswith("/dashboard"):
+            return False
+        coin = (
+            request.form.get("coin_name")
+            or request.form.get("currency_name")
+            or request.form.get("economy_coin_name")
+            or request.form.get("money_name")
+            or request.form.get("coin")
+        )
+        brand = (
+            request.form.get("bot_brand")
+            or request.form.get("brand_name")
+            or request.form.get("bot_name")
+        )
+        if coin is None and brand is None:
+            return False
+
+        gid = nm_inline_settings_gid()
+
+        try:
+            settings = nm_stable_get_settings(gid) if "nm_stable_get_settings" in globals() else get_guild_settings(gid)
+        except Exception:
+            settings = {}
+
+        if coin is not None and str(coin).strip():
+            c = str(coin).strip()
+            settings["coin_name"] = c
+            settings["currency_name"] = c
+            settings["economy_coin_name"] = c
+            settings["money_name"] = c
+            settings["coin"] = c
+
+        if brand is not None and str(brand).strip():
+            b = str(brand).strip()
+            settings["bot_brand"] = b
+            settings["brand_name"] = b
+            settings["bot_name"] = b
+
+        try:
+            if "nm_stable_save_settings" in globals():
+                nm_stable_save_settings(gid, settings)
+            else:
+                save_guild_settings(gid, settings)
+        except Exception:
+            pass
+
+        return True
+    except Exception as e:
+        try:
+            print(f"NM inline settings coin save failed: {e}")
+        except Exception:
+            pass
+        return False
+
+@app.after_request
+def nm_inline_settings_after_request(response):
+    nm_inline_save_coin_from_form()
+    return response
+
+@app.route("/dashboard/settings-coin", methods=["GET", "POST"])
+def nm_settings_coin_inline_page():
+    gid = nm_inline_settings_gid()
+
+    if request.method == "POST":
+        nm_inline_save_coin_from_form()
+        return redirect(f"/dashboard/stable-sync?guild_id={int(gid)}")
+
+    current = nm_inline_current_coin(gid)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:40px">
+      <h1>Settings • Coin Name</h1>
+      <p>This is now part of Settings. It saves per server and stays after redeploy.</p>
+      <form method="POST" style="background:#111a33;padding:20px;border-radius:14px;max-width:520px">
+        <input type="hidden" name="guild_id" value="{int(gid)}">
+        <label style="display:block;margin-bottom:8px;color:#94a3b8;font-weight:800">Coin Name</label>
+        <input name="coin_name" value="{dash_escape(current, 100)}" style="display:block;width:100%;padding:12px;margin:10px 0 16px;border-radius:10px;border:1px solid #334155;background:#020617;color:white">
+        <button style="background:#8b5cf6;color:white;border:0;border-radius:10px;padding:12px 18px;font-weight:800">Save in Settings</button>
+      </form>
+      <p><a style="color:#8b5cf6" href="/dashboard?guild_id={int(gid)}">Back to Dashboard Settings</a></p>
+    </div>
+    """
+
 
 
 keep_alive()
