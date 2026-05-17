@@ -11729,6 +11729,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_auto_restore_bundled_memory("on_ready")
     await nm_restore_latest_discord_memory_backup("on_ready")
     nm_bridge_local_restore_to_data("on_ready")
     print("✅ NM stable polished build active")
@@ -15333,10 +15334,110 @@ async def slash_balance_ar(interaction: discord.Interaction, member: discord.Mem
 
 
 
+
+# =========================
+# NM AUTO RESTORE BUNDLED MEMORY
+# Put nm_system.db/json files next to main.py once. On startup this copies the best non-empty data into /data automatically.
+# =========================
+
+def nm_auto_restore_score(path):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return 0
+        if p.suffix.lower() == ".db":
+            try:
+                conn = sqlite3.connect(str(p))
+                cur = conn.cursor()
+                cur.execute("PRAGMA integrity_check")
+                integrity = str(cur.fetchone()[0] or "")
+                if integrity.lower() != "ok":
+                    # Damaged DB still may have readable rows, but give it lower priority.
+                    penalty = 100000
+                else:
+                    penalty = 0
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+                tables = [r[0] for r in cur.fetchall()]
+                score = len(tables)
+                for table in tables:
+                    try:
+                        cur.execute(f"SELECT COUNT(*) FROM {table}")
+                        score += int(cur.fetchone()[0] or 0)
+                    except Exception:
+                        pass
+                conn.close()
+                return max(0, score - penalty)
+            except Exception:
+                return 0
+        if p.suffix.lower() == ".json":
+            try:
+                import json
+                raw = p.read_text(encoding="utf-8")
+                if not raw.strip():
+                    return 0
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return len(data)
+                if isinstance(data, list):
+                    return len(data)
+                return 1
+            except Exception:
+                return p.stat().st_size
+        return p.stat().st_size
+    except Exception:
+        return 0
+
+
+def nm_auto_restore_bundled_memory(reason="startup"):
+    try:
+        data_dir = Path(globals().get("NM_DATA_DIR", "/data"))
+        try:
+            data_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            data_dir = Path(".")
+
+        files = [
+            "nm_system.db",
+            "warnings.json",
+            "log_channels.json",
+            "dashboard_settings.json",
+            "protection_settings.json",
+            "guild_settings.json",
+            "money_audit.json",
+        ]
+
+        changed = []
+        for filename in files:
+            bundled = Path(filename)
+            target = data_dir / filename
+
+            bundled_score = nm_auto_restore_score(bundled)
+            target_score = nm_auto_restore_score(target)
+
+            # Restore if /data is empty/weaker. Never replace useful /data with empty bundled file.
+            if bundled.exists() and bundled_score > 0 and bundled_score > target_score:
+                shutil.copy2(bundled, target)
+                changed.append(f"{filename}: bundled({bundled_score}) -> data({target_score})")
+
+            # Mirror data back to local for memory-backup systems if local is empty.
+            elif target.exists() and target_score > 0 and bundled_score == 0:
+                shutil.copy2(target, bundled)
+                changed.append(f"{filename}: data({target_score}) -> bundled/local({bundled_score})")
+
+        if changed:
+            print("✅ NM AUTO RESTORE applied:", "; ".join(changed))
+        else:
+            print(f"✅ NM AUTO RESTORE checked: no changes needed ({reason})")
+    except Exception as e:
+        print(f"❌ NM AUTO RESTORE failed: {e}")
+
+
 # =========================
 # NM MONEY DUPLICATION KILL SWITCH + PERSISTENT REWARD LOCKS
 # يمنع تكرار الراتب/فلوس الرسائل بعد كل Redeploy
 # =========================
+
+nm_auto_restore_bundled_memory("module import")
 
 def nm_reward_lock_table():
     try:
@@ -16527,6 +16628,17 @@ def nm_disable_auto_money_route():
     except Exception as e:
         return f"<h2>Error</h2><pre>{dash_escape(str(e), 1000)}</pre>"
     return "<h2>Auto message money disabled</h2><p>Salary still works with persistent cooldown.</p><a href='/dashboard'>Back</a>"
+
+
+
+
+@app.route("/dashboard/force-restore-bundled-memory")
+def nm_force_restore_bundled_memory_route():
+    try:
+        nm_auto_restore_bundled_memory("manual force")
+        return "<h2>Bundled memory restore checked/applied.</h2><p>Refresh the dashboard.</p><a href='/dashboard'>Back</a>"
+    except Exception as e:
+        return f"<h2>Restore failed</h2><pre>{dash_escape(str(e), 1000)}</pre>"
 
 
 
