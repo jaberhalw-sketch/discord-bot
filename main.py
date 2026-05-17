@@ -25424,20 +25424,55 @@ except Exception as e:
         pass
 
 
-keep_alive()
+# =====================================================================
+# NM V5 GLOBAL MODE STATUS + PRE-RUN SAFE ROUTE OVERRIDES
+# This block must stay BEFORE keep_alive()/bot.run(). Anything after bot.run
+# will not execute because bot.run is blocking/retry-looped.
+# =====================================================================
 
-while True:
+@app.route("/dashboard/global-mode-status")
+def nm_v5_global_mode_status_page():
+    denied = dashboard_require_admin()
+    if denied:
+        return denied
     try:
-        bot.run(TOKEN)
-    except discord.errors.DiscordServerError as e:
-        print(f"Discord login server error: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
-    except discord.errors.HTTPException as e:
-        print(f"Discord HTTP error: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
-    except Exception as e:
-        print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
-        time.sleep(30)
+        guilds = list(getattr(bot, "guilds", []) or [])
+    except Exception:
+        guilds = []
+    selected_gid = nm_v5_final_gid()
+    rows = []
+    for g in guilds:
+        try:
+            settings = get_guild_settings(int(g.id))
+            rows.append(
+                f"<tr><td>{dash_escape(getattr(g,'name','Unknown'),120)}</td>"
+                f"<td><code>{int(g.id)}</code></td>"
+                f"<td>{'✅ Enabled' if settings.get('enabled', True) else '⛔ Disabled'}</td>"
+                f"<td>{dash_escape(nm_v5_get_coin_name(int(g.id)),80)}</td>"
+                f"<td><a href='/dashboard?guild_id={int(g.id)}'>Open</a> • "
+                f"<a href='/dashboard/economy-strict-status?guild_id={int(g.id)}'>Economy</a></td></tr>"
+            )
+        except Exception as e:
+            rows.append(f"<tr><td colspan='5'>Guild read error: {dash_escape(str(e),200)}</td></tr>")
+    if not rows:
+        rows.append("<tr><td colspan='5'>No guilds visible yet. Check Discord login/intents after redeploy.</td></tr>")
+    old_lock = int(globals().get("GUILD_ID", 0) or 0)
+    legacy = int(globals().get("LEGACY_DEFAULT_GUILD_ID", 0) or 0)
+    return f"""
+    <div style="font-family:Arial;background:#0b1020;color:white;min-height:100vh;padding:34px">
+      <style>.card{{background:#0f172a;border:1px solid #26345c;border-radius:20px;padding:18px;margin:12px 0}} table{{width:100%;border-collapse:collapse}} th,td{{border-bottom:1px solid #1e293b;padding:12px;text-align:left}} a{{color:#8b5cf6}} code{{background:#020617;padding:3px 6px;border-radius:7px}}</style>
+      <h1>🌍 Global Multi-Guild Mode</h1>
+      <div class="card">
+        <p><b>GUILD_ID lock:</b> {old_lock} {'✅ Global/unlocked' if old_lock == 0 else '⚠️ Still locked'}</p>
+        <p><b>Legacy reference only:</b> {legacy}</p>
+        <p><b>Selected guild:</b> <code>{int(selected_gid or 0)}</code></p>
+        <p>كل سيرفر له إعدادات واقتصاد وكوين مستقل. السيرفر القديم ليس مميزًا.</p>
+      </div>
+      <div class="card"><h2>Visible Guilds</h2><table><tr><th>Name</th><th>ID</th><th>Status</th><th>Coin</th><th>Actions</th></tr>{''.join(rows)}</table></div>
+      <p><a href="/dashboard/health-check">Health Check</a> • <a href="/dashboard/runtime-errors">Runtime Errors</a></p>
+    </div>
+    """
+
 
 # =====================================================================
 # NM V5 FINANCIAL AUDIT PRO SAFE ROW FIX - 2026-05-17
@@ -25594,3 +25629,19 @@ except Exception as e:
         print(f"NM V5 Financial Audit Pro safe route override failed: {e}")
     except Exception:
         pass
+
+keep_alive()
+
+while True:
+    try:
+        bot.run(TOKEN)
+    except discord.errors.DiscordServerError as e:
+        print(f"Discord login server error: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
+    except discord.errors.HTTPException as e:
+        print(f"Discord HTTP error: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
+    except Exception as e:
+        print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
+        time.sleep(30)
+
