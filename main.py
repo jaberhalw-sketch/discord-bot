@@ -11743,6 +11743,7 @@ async def on_guild_join(guild):
 
 @bot.event
 async def on_ready():
+    nm_v5_admin_pro_boot()
     nm_v5_admin_people_boot()
     nm_v5_admin_access_boot()
     nm_v5_discord_sync_boot()
@@ -22414,6 +22415,440 @@ except Exception as e:
 def nm_v5_admin_people_boot():
     try:
         print("✅ NM V5 admin access people-card UI active")
+    except Exception:
+        pass
+
+
+
+# =====================================================================
+# NM V5 ADMIN ACCESS PRO+
+# Upgrades Admin Access:
+# - Better people-card UI
+# - Stats cards
+# - Live save
+# - Audit history
+# - Last owner protection
+# - Backup/export JSON
+# - Persistent after redeploy
+# =====================================================================
+
+def nm_v5_admin_audit_path():
+    try:
+        p = Path("/data")
+        p.mkdir(parents=True, exist_ok=True)
+        return p / "admin_access_audit_v5.json"
+    except Exception:
+        return Path("admin_access_audit_v5.json")
+
+def nm_v5_admin_audit_load():
+    try:
+        p = nm_v5_admin_audit_path()
+        if p.exists() and p.stat().st_size > 0:
+            data = json.loads(p.read_text(encoding="utf-8") or "[]")
+            return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+def nm_v5_admin_audit_save(data):
+    try:
+        p = nm_v5_admin_audit_path()
+        p.write_text(json.dumps(data[-300:] if isinstance(data, list) else [], ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+def nm_v5_admin_actor_name():
+    try:
+        user = session.get("discord_user") or {}
+        return str(user.get("username") or user.get("global_name") or user.get("id") or "Dashboard")
+    except Exception:
+        return "Dashboard"
+
+def nm_v5_admin_audit(gid, action, target="", details=""):
+    try:
+        data = nm_v5_admin_audit_load()
+        data.append({
+            "guild_id": int(gid),
+            "action": str(action),
+            "target": str(target),
+            "details": str(details),
+            "actor": nm_v5_admin_actor_name(),
+            "time": int(time.time()),
+        })
+        nm_v5_admin_audit_save(data)
+    except Exception:
+        pass
+
+def nm_v5_admin_count_access(settings, members=None):
+    owner_count = 0
+    admin_count = 0
+    try:
+        if members:
+            for m in members:
+                access = nm_v5_admin_people_access_for_member(m, settings)
+                if access == "Owner":
+                    owner_count += 1
+                elif access == "Admin":
+                    admin_count += 1
+        else:
+            owner_count = len(settings.get("owner_user_ids", [])) + len(settings.get("owner_role_ids", []))
+            admin_count = len(settings.get("admin_user_ids", [])) + len(settings.get("admin_role_ids", []))
+    except Exception:
+        pass
+    return owner_count, admin_count
+
+def nm_v5_admin_pro_save_user(gid, user_id, access):
+    settings = nm_v5_admin_get(gid)
+    owner_users = set(nm_v5_admin_clean_ids(settings.get("owner_user_ids", [])))
+    admin_users = set(nm_v5_admin_clean_ids(settings.get("admin_user_ids", [])))
+
+    uid = int(user_id)
+
+    # last owner protection
+    if access == "remove" and uid in owner_users and len(owner_users) <= 1 and not settings.get("owner_role_ids"):
+        return False, "Cannot remove the last Owner. Add another Owner first."
+
+    owner_users.discard(uid)
+    admin_users.discard(uid)
+
+    if access == "owner":
+        owner_users.add(uid)
+    elif access == "admin":
+        admin_users.add(uid)
+    elif access == "remove":
+        pass
+    else:
+        return False, "Invalid access."
+
+    settings["owner_user_ids"] = sorted(owner_users)
+    settings["admin_user_ids"] = sorted(admin_users)
+    settings["updated_at"] = int(time.time())
+    settings["updated_by"] = nm_v5_admin_actor_name()
+    nm_v5_admin_set(gid, settings)
+
+    nm_v5_admin_audit(gid, f"set_user_{access}", target=str(uid), details=f"user_id={uid} access={access}")
+    return True, "Saved"
+
+@app.route("/dashboard/admin-access-user", methods=["POST"])
+def nm_v5_admin_access_user_api():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_v5_admin_gid()
+    uid = request.form.get("user_id") or request.json.get("user_id") if request.is_json else request.form.get("user_id")
+    access = request.form.get("access") or request.json.get("access") if request.is_json else request.form.get("access")
+    try:
+        ok, msg = nm_v5_admin_pro_save_user(gid, int(uid), str(access))
+    except Exception as e:
+        ok, msg = False, str(e)
+    return jsonify({"ok": bool(ok), "message": msg})
+
+@app.route("/dashboard/admin-access-export")
+def nm_v5_admin_access_export():
+    denied = dashboard_require_owner()
+    if denied:
+        return denied
+    gid = nm_v5_admin_gid()
+    settings = nm_v5_admin_get(gid)
+    audit = [x for x in nm_v5_admin_audit_load() if int(x.get("guild_id", 0)) == int(gid)][-50:]
+    payload = {
+        "guild_id": int(gid),
+        "settings": settings,
+        "audit_tail": audit,
+        "exported_at": int(time.time()),
+    }
+    return jsonify(payload)
+
+def nm_v5_admin_audit_html(gid, limit=8):
+    rows = [x for x in nm_v5_admin_audit_load() if int(x.get("guild_id", 0)) == int(gid)][-limit:]
+    rows = list(reversed(rows))
+    if not rows:
+        return "<div class='empty'>No Admin Access changes yet.</div>"
+    html = []
+    for r in rows:
+        try:
+            t = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r.get("time", 0) or 0)))
+        except Exception:
+            t = "Unknown"
+        html.append(f"""
+        <div class="audit-row">
+          <div><b>{dash_escape(r.get('action',''), 80)}</b><div class="muted small">{dash_escape(r.get('details',''), 180)}</div></div>
+          <div class="muted small">{dash_escape(r.get('actor',''), 80)}<br>{t}</div>
+        </div>
+        """)
+    return "".join(html)
+
+def nm_v5_admin_people_page_pro():
+    if not dashboard_session_is_private_owner(session.get("discord_user") or {}):
+        denied = dashboard_require_owner()
+        if denied:
+            return denied
+    elif not session.get("discord_user"):
+        return redirect("/login")
+
+    gid = nm_v5_admin_gid()
+    settings = nm_v5_admin_get(gid)
+
+    try:
+        members = dashboard_get_guild_members_sync(force_chunk=str(request.args.get("refresh", "")) == "1")
+    except Exception:
+        members = []
+
+    clean_members = []
+    for m in members:
+        try:
+            if getattr(m, "bot", False):
+                continue
+            clean_members.append(m)
+        except Exception:
+            pass
+
+    def sort_key(m):
+        access = nm_v5_admin_people_access_for_member(m, settings)
+        status, _ = nm_v5_admin_people_status(m)
+        return (
+            0 if access == "Owner" else (1 if access == "Admin" else 2),
+            0 if status == "online" else (1 if status in ("idle", "dnd") else 2),
+            str(getattr(m, "display_name", "")).lower()
+        )
+
+    clean_members = sorted(clean_members, key=sort_key)
+    owner_count, admin_count = nm_v5_admin_count_access(settings, clean_members)
+
+    cards = []
+    for m in clean_members:
+        access = nm_v5_admin_people_access_for_member(m, settings)
+        cards.append(nm_v5_admin_people_card(m, access, gid))
+    if not cards:
+        cards.append("<div class='empty'>No members loaded. اضغط Refresh Members أو تأكد إن Server Members Intent شغال.</div>")
+
+    roles = dashboard_get_guild_roles()
+    def role_options(selected_ids):
+        selected = {int(x) for x in selected_ids}
+        opts = []
+        for role in roles:
+            try:
+                rid = int(role.id)
+                name = dash_escape(getattr(role, "name", str(rid)), 80)
+                sel = "selected" if rid in selected else ""
+                opts.append(f"<option value='{rid}' {sel}>{name} ({rid})</option>")
+            except Exception:
+                pass
+        return "".join(opts)
+
+    owner_users_value = ", ".join(str(x) for x in settings.get("owner_user_ids", []))
+    admin_users_value = ", ".join(str(x) for x in settings.get("admin_user_ids", []))
+    updated_at = int(settings.get("updated_at") or 0)
+    updated_txt = time.strftime("%Y-%m-%d %H:%M", time.localtime(updated_at)) if updated_at else "Never"
+
+    body = f"""
+    <style>
+      .pro-hero {{
+        background:linear-gradient(135deg,#0b1224,#1d1550);
+        border:1px solid #26345c; border-radius:26px; padding:22px; margin-bottom:18px;
+        display:flex; align-items:center; justify-content:space-between; gap:14px; flex-wrap:wrap;
+      }}
+      .pro-stats {{ display:flex; gap:12px; flex-wrap:wrap; }}
+      .pro-stat {{ background:#081126; border:1px solid #26345c; border-radius:18px; padding:14px 18px; min-width:130px; }}
+      .pro-stat b {{ font-size:28px; }}
+      .admin-topbar {{
+        display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap;
+        background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:18px; margin-bottom:18px;
+      }}
+      .search-box {{
+        flex:1; min-width:260px; background:#020617; color:white; border:1px solid #334155;
+        border-radius:14px; padding:13px 14px; font-weight:700;
+      }}
+      .filter-tabs {{ display:flex; gap:8px; flex-wrap:wrap; }}
+      .filter-tab {{
+        border:1px solid #334155; background:#111827; color:#e5e7eb; border-radius:999px;
+        padding:10px 14px; font-weight:900; cursor:pointer;
+      }}
+      .filter-tab.active {{ background:#6d5dfc; border-color:#8b5cf6; color:white; }}
+      .member-list {{ display:grid; grid-template-columns:1fr; gap:12px; }}
+      .member-card {{
+        background:#0b1224; border:1px solid #1e293b; border-radius:22px; padding:14px;
+        display:flex; align-items:center; justify-content:space-between; gap:14px;
+        box-shadow:0 16px 38px rgba(0,0,0,.18);
+      }}
+      .member-main {{ display:flex; align-items:center; gap:14px; min-width:0; }}
+      .member-avatar {{ width:62px; height:62px; border-radius:50%; object-fit:cover; background:#111827; border:1px solid #334155; }}
+      .member-info {{ min-width:0; }}
+      .member-title {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }}
+      .member-name {{ font-size:19px; font-weight:1000; color:white; }}
+      .member-sub {{ color:#94a3b8; margin-top:5px; font-size:13px; }}
+      .member-roles {{ display:flex; gap:6px; flex-wrap:wrap; margin-top:9px; }}
+      .role-chip {{
+        border:1px solid #334155; background:#111827; color:#e5e7eb; border-radius:999px;
+        padding:5px 9px; font-size:12px; font-weight:800;
+      }}
+      .muted-chip {{ color:#94a3b8; }}
+      .access-badge, .status-badge {{
+        border-radius:999px; padding:5px 9px; font-size:12px; font-weight:1000;
+        border:1px solid #334155; background:#111827; color:#cbd5e1;
+      }}
+      .access-badge.owner {{ background:#78350f; color:#fde68a; border-color:#f59e0b; }}
+      .access-badge.admin {{ background:#172554; color:#bfdbfe; border-color:#3b82f6; }}
+      .access-badge.none {{ background:#111827; color:#94a3b8; }}
+      .member-actions {{ display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }}
+      .small-btn {{ border:0; border-radius:12px; padding:10px 12px; font-weight:1000; cursor:pointer; color:white; }}
+      .owner-btn {{ background:#b45309; }}
+      .admin-btn {{ background:#2563eb; }}
+      .remove-btn {{ background:#374151; }}
+      .advanced-box {{ display:none; margin-top:16px; }}
+      .advanced-box.show {{ display:block; }}
+      .advanced-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:16px; }}
+      select[multiple] {{ min-height:160px; }}
+      .audit-row {{
+        display:flex; justify-content:space-between; gap:12px; background:#0b1224; border:1px solid #1e293b;
+        border-radius:16px; padding:12px; margin:8px 0;
+      }}
+      .empty {{ background:#0b1224; border:1px solid #334155; border-radius:18px; padding:22px; color:#94a3b8; }}
+      @media (max-width:900px) {{
+        .member-card {{ flex-direction:column; align-items:stretch; }}
+        .member-actions {{ justify-content:flex-start; }}
+        .advanced-grid {{ grid-template-columns:1fr; }}
+      }}
+    </style>
+
+    <div class="pro-hero">
+      <div>
+        <h2>🔐 Admin Access Pro+</h2>
+        <p class="muted">تحكم مباشر بالأشخاص بصورهم وأسمائهم. كل تغيير ينحفظ لايف وما يضيع بعد Redeploy.</p>
+        <p><span class="pill ok">Saved in /data/admin_access_v5.json</span> <span id="saveState" class="pill">Ready</span></p>
+      </div>
+      <div class="pro-stats">
+        <div class="pro-stat"><b>{owner_count}</b><br><span class="muted">Owners</span></div>
+        <div class="pro-stat"><b>{admin_count}</b><br><span class="muted">Admins</span></div>
+        <div class="pro-stat"><b>{len(clean_members)}</b><br><span class="muted">Members</span></div>
+        <div class="pro-stat"><b>{updated_txt}</b><br><span class="muted">Last Save</span></div>
+      </div>
+    </div>
+
+    <div class="admin-topbar">
+      <input id="memberSearch" class="search-box" placeholder="Search member name / username..." oninput="filterMembers()">
+      <div class="filter-tabs">
+        <button class="filter-tab active" type="button" onclick="setFilter('all', this)">All</button>
+        <button class="filter-tab" type="button" onclick="setFilter('owner', this)">Owners</button>
+        <button class="filter-tab" type="button" onclick="setFilter('admin', this)">Admins</button>
+        <button class="filter-tab" type="button" onclick="setFilter('none', this)">No Access</button>
+      </div>
+      <a class="btn" href="/dashboard/admin-access?refresh=1&guild_id={int(gid)}">🔄 Refresh</a>
+      <a class="btn" href="/dashboard/admin-access-export?guild_id={int(gid)}">📦 Export</a>
+      <button class="btn" type="button" onclick="toggleAdvanced()">⚙️ Advanced Roles</button>
+    </div>
+
+    <form id="accessForm" method="POST" action="/dashboard/admin-access-live">
+      <input type="hidden" name="guild_id" value="{int(gid)}">
+      <textarea id="ownerUsers" name="owner_users" style="display:none">{dash_escape(owner_users_value, 5000)}</textarea>
+      <textarea id="adminUsers" name="admin_users" style="display:none">{dash_escape(admin_users_value, 5000)}</textarea>
+
+      <div id="advancedBox" class="advanced-box">
+        <div class="advanced-grid">
+          <div class="card">
+            <h3>👑 Owner Roles</h3>
+            <select name="owner_roles" multiple>{role_options(settings.get("owner_role_ids", []))}</select>
+          </div>
+          <div class="card">
+            <h3>🛡️ Admin Roles</h3>
+            <select name="admin_roles" multiple>{role_options(settings.get("admin_role_ids", []))}</select>
+          </div>
+        </div>
+        <div class="card">
+          <button class="btn primary" type="submit">💾 Save Advanced Roles</button>
+        </div>
+      </div>
+    </form>
+
+    <div class="card">
+      <h3>👥 Members</h3>
+      <div id="memberList" class="member-list">{''.join(cards)}</div>
+    </div>
+
+    <div class="card">
+      <h3>🧾 Admin Access Audit</h3>
+      {nm_v5_admin_audit_html(gid)}
+    </div>
+
+    <script>
+      let currentFilter = 'all';
+      function parseIds(value) {{
+        return value.split(',').map(x => x.trim()).filter(Boolean);
+      }}
+      function unique(arr) {{
+        return [...new Set(arr)];
+      }}
+      function setSaveState(text) {{
+        document.getElementById('saveState').textContent = text;
+      }}
+      async function saveAccess() {{
+        const form = document.getElementById('accessForm');
+        const fd = new FormData(form);
+        setSaveState('Saving...');
+        const res = await fetch('/dashboard/admin-access-live', {{ method:'POST', body:fd, headers:{{'X-Requested-With':'fetch'}} }});
+        setSaveState(res.ok ? 'Saved ✓' : 'Save failed');
+        setTimeout(() => setSaveState('Ready'), 1600);
+        return res.ok;
+      }}
+      async function setUserAccess(userId, access) {{
+        let owners = parseIds(document.getElementById('ownerUsers').value);
+        let admins = parseIds(document.getElementById('adminUsers').value);
+
+        if (access === 'remove' && owners.includes(userId) && owners.length <= 1) {{
+          alert('ما تقدر تشيل آخر Owner. أضف Owner ثاني أول.');
+          return;
+        }}
+
+        owners = owners.filter(x => x !== userId);
+        admins = admins.filter(x => x !== userId);
+
+        if (access === 'owner') owners.push(userId);
+        if (access === 'admin') admins.push(userId);
+
+        document.getElementById('ownerUsers').value = unique(owners).join(', ');
+        document.getElementById('adminUsers').value = unique(admins).join(', ');
+
+        const ok = await saveAccess();
+        if (ok) location.reload();
+      }}
+      function setFilter(filter, btn) {{
+        currentFilter = filter;
+        document.querySelectorAll('.filter-tab').forEach(x => x.classList.remove('active'));
+        btn.classList.add('active');
+        filterMembers();
+      }}
+      function filterMembers() {{
+        const q = document.getElementById('memberSearch').value.toLowerCase().trim();
+        document.querySelectorAll('.member-card').forEach(card => {{
+          const name = card.dataset.userName || '';
+          const access = card.dataset.access || 'none';
+          const matchSearch = !q || name.includes(q);
+          const matchFilter = currentFilter === 'all' || access === currentFilter;
+          card.style.display = (matchSearch && matchFilter) ? '' : 'none';
+        }});
+      }}
+      function toggleAdvanced() {{
+        document.getElementById('advancedBox').classList.toggle('show');
+      }}
+      document.getElementById('accessForm').addEventListener('submit', async (e) => {{
+        e.preventDefault();
+        const ok = await saveAccess();
+        if (ok) location.reload();
+      }});
+    </script>
+    """
+    return render_dashboard_page("Admin Access Pro+", body)
+
+try:
+    app.view_functions["dashboard_admin_access_page"] = nm_v5_admin_people_page_pro
+except Exception as e:
+    try: print(f"NM V5 Admin Access Pro+ override skipped: {e}")
+    except Exception: pass
+
+def nm_v5_admin_pro_boot():
+    try:
+        print("✅ NM V5 Admin Access Pro+ active")
     except Exception:
         pass
 
