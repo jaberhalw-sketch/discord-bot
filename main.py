@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 from datetime import timedelta
 import os
 import json
@@ -471,6 +472,20 @@ def init_db():
 
     if "last_boost_weekly" not in economy_columns:
         cur.execute("ALTER TABLE economy ADD COLUMN last_boost_weekly INTEGER DEFAULT 0")
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS guild_settings (
+            guild_id INTEGER PRIMARY KEY,
+            guild_name TEXT DEFAULT '',
+            enabled INTEGER DEFAULT 1,
+            commands_channel_id INTEGER DEFAULT 0,
+            gambling_channel_id INTEGER DEFAULT 0,
+            logs_category_id INTEGER DEFAULT 0,
+            setup_done INTEGER DEFAULT 0,
+            created_at INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
+        )
+    """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS suggestions (
@@ -1331,6 +1346,110 @@ def clean_text(text, limit=900):
     return text
 
 
+
+
+# =========================
+# MULTI-GUILD FOUNDATION / PUBLIC BOT PHASE 1
+# =========================
+
+def create_default_guild_settings(guild):
+    if not guild:
+        return
+    try:
+        now = int(time.time())
+        if int(guild.id) == int(GUILD_ID):
+            commands_id = COMMANDS_CHANNEL_ID
+            gambling_id = GAMBLING_CHANNEL_ID
+            logs_id = LOGS_CATEGORY_ID
+            setup_done = 1
+        else:
+            commands_id = 0
+            gambling_id = 0
+            logs_id = 0
+            setup_done = 0
+
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT OR IGNORE INTO guild_settings
+            (guild_id, guild_name, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done, created_at, updated_at)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
+        """, (int(guild.id), str(guild.name)[:180], int(commands_id), int(gambling_id), int(logs_id), int(setup_done), now, now))
+        cur.execute("UPDATE guild_settings SET guild_name = ?, updated_at = ? WHERE guild_id = ?", (str(guild.name)[:180], now, int(guild.id)))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Create guild settings error: {e}")
+
+
+def get_guild_settings(guild_id):
+    try:
+        conn = db_connect()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT guild_id, guild_name, enabled, commands_channel_id, gambling_channel_id, logs_category_id, setup_done
+            FROM guild_settings WHERE guild_id = ?
+        """, (int(guild_id),))
+        row = cur.fetchone()
+        conn.close()
+        if row:
+            return {
+                "guild_id": int(row[0]),
+                "guild_name": row[1] or "",
+                "enabled": bool(row[2]),
+                "commands_channel_id": int(row[3] or 0),
+                "gambling_channel_id": int(row[4] or 0),
+                "logs_category_id": int(row[5] or 0),
+                "setup_done": bool(row[6]),
+            }
+    except Exception as e:
+        print(f"Get guild settings error: {e}")
+
+    return {
+        "guild_id": int(guild_id or 0),
+        "guild_name": "",
+        "enabled": True,
+        "commands_channel_id": 0,
+        "gambling_channel_id": 0,
+        "logs_category_id": 0,
+        "setup_done": False,
+    }
+
+
+def get_effective_commands_channel_id(guild_id):
+    settings = get_guild_settings(guild_id)
+    if int(guild_id) == int(GUILD_ID) and not settings.get("commands_channel_id"):
+        return COMMANDS_CHANNEL_ID
+    return int(settings.get("commands_channel_id") or 0)
+
+
+def get_effective_gambling_channel_id(guild_id):
+    settings = get_guild_settings(guild_id)
+    if int(guild_id) == int(GUILD_ID) and not settings.get("gambling_channel_id"):
+        return GAMBLING_CHANNEL_ID
+    return int(settings.get("gambling_channel_id") or 0)
+
+
+def is_guild_enabled(guild_id):
+    if not guild_id:
+        return False
+    return bool(get_guild_settings(guild_id).get("enabled", True))
+
+
+async def interaction_channel_check(interaction, channel_id, label="الأوامر"):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ هذا الأمر يشتغل داخل السيرفر فقط.", ephemeral=True)
+        return False
+
+    if not is_guild_enabled(interaction.guild.id):
+        await interaction.response.send_message("❌ البوت غير مفعل في هذا السيرفر.", ephemeral=True)
+        return False
+
+    if channel_id and interaction.channel and interaction.channel.id != int(channel_id):
+        await interaction.response.send_message(f"📍 استخدم {label} هنا: <#{int(channel_id)}>", ephemeral=True)
+        return False
+
+    return True
 
 async def require_commands_channel(ctx):
     if ctx.channel.id == COMMANDS_CHANNEL_ID:
@@ -7974,8 +8093,15 @@ async def admin_control_command_guard(ctx):
 
 @bot.event
 async def on_guild_join(guild):
-    if guild.id != GUILD_ID:
-        await guild.leave()
+    init_db()
+    create_default_guild_settings(guild)
+    await send_log(
+        bot.get_guild(GUILD_ID),
+        "🌍 Bot Added To New Server",
+        f"**Server:** `{guild.name}`\n**Guild ID:** `{guild.id}`\n**Members:** `{getattr(guild, 'member_count', 0)}`",
+        COLOR_BLUE,
+        log_type="server"
+    )
 
 
 @bot.event
@@ -7990,6 +8116,15 @@ async def on_ready():
             print(f"Memory restored on startup: {restore_message}")
 
     init_db()
+
+    for live_guild in bot.guilds:
+        create_default_guild_settings(live_guild)
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"Slash commands synced globally: {len(synced)}")
+    except Exception as e:
+        print(f"Slash sync error: {e}")
 
     if guild:
         await ensure_custom_roles(guild)
@@ -11091,6 +11226,182 @@ async def event_start_command(ctx, minutes: int = None, prize: str = None, *, ti
 
 
 
+
+# =========================
+# SLASH COMMANDS / PUBLIC BOT PHASE 1
+# Prefix commands stay available, but these are the start of the global / commands version.
+# =========================
+
+@bot.tree.command(name="ping", description="Check bot latency")
+async def slash_ping(interaction: discord.Interaction):
+    latency = round(bot.latency * 1000) if bot and getattr(bot, "latency", None) is not None else 0
+    await interaction.response.send_message(f"🏓 Pong • `{latency}ms`", ephemeral=True)
+
+
+@bot.tree.command(name="balance", description="Show your wallet balance")
+async def slash_balance(interaction: discord.Interaction, member: discord.Member = None):
+    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
+    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+        return
+
+    target = member or interaction.user
+    balance_amount = get_balance(target.id)
+    xp, level_num = get_level_data(target.id)
+    needed = level_num * 100
+    salary_bonus = DAILY_REWARD_BASE + (int(level_num) * 25)
+    rank = get_money_rank(target.id)
+    progress = clean_bar(xp / needed if needed else 0, 14)
+
+    embed = discord.Embed(
+        title=f"{ECONOMY_EMOJI} Economy Wallet",
+        description=f"**محفظة {target.mention}**\n`{progress}` **{xp:,}/{needed:,} XP**",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_author(name=f"{target.display_name} • Wallet", icon_url=target.display_avatar.url)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.add_field(name="💼 الرصيد", value=coin_line(balance_amount), inline=False)
+    embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**" if rank else "غير معروف", inline=True)
+    embed.add_field(name="🏅 اللفل", value=f"**{level_num}**", inline=True)
+    embed.add_field(name="💸 الراتب القادم", value=coin_line(salary_bonus), inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Slash Economy")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="salary", description="Claim your salary")
+async def slash_salary(interaction: discord.Interaction):
+    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
+    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+        return
+
+    xp, level = get_level_data(interaction.user.id)
+    success, remaining, balance_amount, reward = claim_daily(interaction.user.id, level)
+
+    if not success:
+        embed = discord.Embed(
+            title="⏳ الراتب غير جاهز",
+            description=f"راتبك القادم بعد **{format_seconds(remaining)}**.",
+            color=COLOR_ORANGE,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_author(name=f"{interaction.user.display_name} • Salary", icon_url=interaction.user.display_avatar.url)
+        embed.add_field(name="💼 محفظتك الآن", value=coin_line(balance_amount), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+
+    embed = discord.Embed(
+        title="💸 Salary Claimed",
+        description=f"تم إيداع راتبك بنجاح: {coin_line(reward)}",
+        color=COLOR_GREEN,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_author(name=f"{interaction.user.display_name} • Salary", icon_url=interaction.user.display_avatar.url)
+    embed.add_field(name="💼 رصيدك الجديد", value=coin_line(balance_amount), inline=False)
+    embed.set_footer(text=f"{BOT_BRAND} • Slash Salary")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="top", description="Show top richest members")
+async def slash_top(interaction: discord.Interaction):
+    commands_channel_id = get_effective_commands_channel_id(interaction.guild.id if interaction.guild else 0)
+    if not await interaction_channel_check(interaction, commands_channel_id, "أوامر الاقتصاد"):
+        return
+
+    rows = get_top_money(10)
+    if not rows:
+        await interaction.response.send_message("ما فيه بيانات اقتصاد للحين.", ephemeral=True)
+        return
+
+    text = ""
+    for index, (user_id, balance_amount) in enumerate(rows, start=1):
+        text += f"`{index}.` <@{user_id}> — **{balance_amount:,}** {COIN_NAME}\n"
+
+    embed = discord.Embed(
+        title=f"{ECONOMY_EMOJI} Richest Members",
+        description=text[:3900],
+        color=COLOR_YELLOW,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text=f"{BOT_BRAND} • Slash Leaderboard")
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="luck", description="50/50 gamble using your bot coins")
+@app_commands.describe(amount="Bet amount, example: 5000")
+async def slash_luck(interaction: discord.Interaction, amount: int):
+    gambling_channel_id = get_effective_gambling_channel_id(interaction.guild.id if interaction.guild else 0)
+    if not await interaction_channel_check(interaction, gambling_channel_id, "روم القمار"):
+        return
+
+    if amount <= 0:
+        await interaction.response.send_message("❌ مبلغ الرهان لازم يكون أكبر من صفر.", ephemeral=True)
+        return
+
+    ok, remaining = can_gamble_now(interaction.user.id)
+    if not ok:
+        await interaction.response.send_message(f"⏳ انتظر **{remaining:.1f} ثانية** قبل محاولة القمار التالية.", ephemeral=True)
+        return
+
+    balance_before = get_balance(interaction.user.id)
+    if balance_before < amount:
+        await interaction.response.send_message(f"❌ رصيدك ما يكفي. رصيدك الحالي: **{balance_before:,}**", ephemeral=True)
+        return
+
+    remove_money(interaction.user.id, amount)
+    win = random.random() < 0.50
+
+    if win:
+        payout = amount * 2
+        balance_after = add_money(interaction.user.id, payout)
+        embed = gambling_embed(
+            "🎲 Lucky Roll",
+            "✅ **فوز نظيف** — دبل الرهان وصل لمحفظتك.",
+            COLOR_GREEN,
+            interaction.user,
+            amount,
+            result_amount=amount,
+            balance=balance_after,
+            details="Chance: **50%** • Payout: **x2**",
+            game_name="Slash Lucky Roll"
+        )
+    else:
+        balance_after = get_balance(interaction.user.id)
+        embed = gambling_embed(
+            "🎲 Lucky Roll",
+            "❌ **خسارة** — الرهان راح للكازينو.",
+            COLOR_RED,
+            interaction.user,
+            amount,
+            result_amount=-amount,
+            balance=balance_after,
+            details="Chance: **50%** • Better luck next time",
+            game_name="Slash Lucky Roll"
+        )
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="setup_status", description="Show this server setup status")
+async def slash_setup_status(interaction: discord.Interaction):
+    if not interaction.guild:
+        await interaction.response.send_message("❌ هذا الأمر يشتغل داخل السيرفر فقط.", ephemeral=True)
+        return
+
+    create_default_guild_settings(interaction.guild)
+    settings = get_guild_settings(interaction.guild.id)
+    embed = discord.Embed(
+        title="🌍 Retards System Setup Status",
+        description="هذه أول نسخة من دعم السيرفرات المتعددة. باقي الداشبورد العالمي بنضيفه بالمرحلة الجاية.",
+        color=COLOR_BLUE,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="Server", value=f"{interaction.guild.name}\n`{interaction.guild.id}`", inline=False)
+    embed.add_field(name="Commands Channel", value=f"<#{settings['commands_channel_id']}>" if settings['commands_channel_id'] else "Not set", inline=True)
+    embed.add_field(name="Gambling Channel", value=f"<#{settings['gambling_channel_id']}>" if settings['gambling_channel_id'] else "Not set", inline=True)
+    embed.add_field(name="Setup Done", value="Yes" if settings['setup_done'] else "No", inline=True)
+    embed.set_footer(text=f"{BOT_BRAND} • Global Phase 1")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.event
 async def on_command_completion(ctx):
     try:
@@ -11144,3 +11455,4 @@ while True:
     except Exception as e:
         print(f"Unexpected bot crash: {type(e).__name__}: {e}. Retrying in 30 seconds...")
         time.sleep(30)
+    
