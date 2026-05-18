@@ -1,0 +1,743 @@
+import os, time, html, json, urllib.parse, urllib.request, urllib.error
+from flask import Flask, request, redirect, session
+from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
+from nmcore.db import db, init_db
+from nmcore.ui import page
+from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel
+from nmcore.services import real_estate
+from nmcore.services.warnings import summary as warn_summary
+from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update
+
+DISCORD_API = "https://discord.com/api/v10"
+ADMINISTRATOR_BIT = 0x8
+
+
+def esc(x):
+    return html.escape(str(x or ""))
+
+
+def oauth_config():
+    return {
+        "client_id": os.getenv("DISCORD_CLIENT_ID", "").strip(),
+        "client_secret": os.getenv("DISCORD_CLIENT_SECRET", "").strip(),
+        "base_url": os.getenv("DASHBOARD_BASE_URL", "").rstrip("/"),
+    }
+
+
+def redirect_uri():
+    cfg = oauth_config()
+    return f"{cfg['base_url']}/auth/discord/callback"
+
+
+def oauth_ready():
+    cfg = oauth_config()
+    return bool(cfg["client_id"] and cfg["client_secret"] and cfg["base_url"])
+
+
+def discord_api_get(path, token):
+    req = urllib.request.Request(
+        DISCORD_API + path,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "NM-System-V9-Dashboard"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def exchange_code_for_token(code):
+    cfg = oauth_config()
+    data = urllib.parse.urlencode({
+        "client_id": cfg["client_id"],
+        "client_secret": cfg["client_secret"],
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri(),
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        DISCORD_API + "/oauth2/token",
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": "NM-System-V9-Dashboard"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def is_admin_guild(g):
+    try:
+        if bool(g.get("owner")):
+            return True
+        perms = int(g.get("permissions") or 0)
+        return bool(perms & ADMINISTRATOR_BIT)
+    except Exception:
+        return False
+
+
+def bot_guild_ids(bot=None):
+    try:
+        if bot and getattr(bot, "guilds", None):
+            return {int(g.id) for g in bot.guilds}
+    except Exception:
+        pass
+    return set()
+
+
+def bot_guild_name(bot=None, guild_id=0):
+    try:
+        gid_int = int(guild_id or 0)
+        if bot and getattr(bot, "guilds", None):
+            for g in bot.guilds:
+                if int(g.id) == gid_int:
+                    return g.name
+    except Exception:
+        pass
+
+    for g in session.get("discord_guilds", []):
+        try:
+            if int(g.get("id", 0)) == int(guild_id or 0):
+                return g.get("name") or str(guild_id)
+        except Exception:
+            pass
+
+    return str(guild_id or "")
+
+
+def filter_manageable_to_bot_guilds(manageable, bot=None):
+    ids = bot_guild_ids(bot)
+    if not ids:
+        return manageable
+    return [g for g in manageable if str(g.get("id", "")).isdigit() and int(g["id"]) in ids]
+
+
+def dashboard_access_denied_html():
+    denied = session.pop("access_denied_gid", 0)
+    if not denied:
+        return ""
+    return f"""
+    <div class='card'>
+      <h3 class='bad'>Dashboard access denied</h3>
+      <p>You cannot open this server dashboard.</p>
+      <p class='muted'>Reason: the bot is not in this guild, or you do not have Owner/Administrator permission.</p>
+      <p>Requested Guild ID: <code>{esc(denied)}</code></p>
+    </div>
+    """
+
+
+def dashboard_user():
+    return session.get("discord_user") or {}
+
+
+def allowed_guild_ids():
+    return {
+        int(g["id"])
+        for g in session.get("discord_guilds", [])
+        if str(g.get("id", "")).isdigit()
+    }
+
+
+def require_login():
+    if session.get("discord_user") and session.get("discord_access_token"):
+        return None
+
+    session.clear()
+    return redirect("/login")
+
+
+def gid(bot=None):
+    allowed = allowed_guild_ids()
+
+    raw = (
+        request.args.get("guild_id")
+        or request.form.get("guild_id")
+        or session.get("guild_id")
+        or 0
+    )
+
+    try:
+        selected = int(raw or 0)
+    except Exception:
+        selected = 0
+
+    if selected and selected in allowed:
+        session["guild_id"] = selected
+        return selected
+
+    if selected and selected not in allowed:
+        session["access_denied_gid"] = selected
+        session.pop("guild_id", None)
+        return 0
+
+    if allowed:
+        first = sorted(allowed)[0]
+        session["guild_id"] = first
+        return first
+
+    return 0
+
+
+def guild_selector_html(active_gid):
+    guilds = session.get("discord_guilds", [])
+
+    if not guilds:
+        return """
+        <div class='card'>
+          <b>No manageable Discord servers found.</b><br>
+          You need Owner or Administrator permission, and the bot must be inside that server.
+          <br><br>
+          <a class='btn' href='/logout'>Logout</a>
+        </div>
+        """
+
+    options = "".join(
+        f"<option value='{esc(g['id'])}' {'selected' if int(g['id']) == int(active_gid or 0) else ''}>{esc(g.get('name', 'Unknown'))}</option>"
+        for g in guilds
+        if str(g.get("id", "")).isdigit()
+    )
+
+    return f"""
+    <div class='card'>
+      <form method='get' action='/dashboard'>
+        <label>Server</label>
+        <select name='guild_id'>{options}</select>
+        <button>Open</button>
+        <a class='btn' href='/logout' style='background:#334155;margin-left:8px'>Logout</a>
+      </form>
+    </div>
+    """
+
+
+def create_app(bot=None):
+    app = Flask(__name__)
+    app.secret_key = DASHBOARD_SECRET_KEY
+    init_db()
+
+    @app.before_request
+    def refresh_bot_guilds():
+        try:
+            if bot and getattr(bot, "guilds", None):
+                for g in bot.guilds:
+                    ensure_guild(g.id, g.name)
+        except Exception:
+            pass
+
+    @app.route("/")
+    def root():
+        return redirect("/dashboard")
+
+    @app.route("/login")
+    def login():
+        if session.get("discord_user") and session.get("discord_access_token"):
+            return redirect("/dashboard")
+
+        if session.get("discord_user") or session.get("discord_access_token"):
+            session.clear()
+
+        if not oauth_ready():
+            cfg = oauth_config()
+            body = f"""
+            <div class='card'>
+              <h2 class='bad'>Discord Login is not configured</h2>
+              <p>Add these Railway Variables:</p>
+              <pre>DISCORD_CLIENT_ID
+DISCORD_CLIENT_SECRET
+DASHBOARD_BASE_URL</pre>
+              <p>Current:</p>
+              <ul>
+                <li>DISCORD_CLIENT_ID: {'✅' if cfg['client_id'] else '❌'}</li>
+                <li>DISCORD_CLIENT_SECRET: {'✅' if cfg['client_secret'] else '❌'}</li>
+                <li>DASHBOARD_BASE_URL: {'✅' if cfg['base_url'] else '❌'}</li>
+              </ul>
+            </div>
+            """
+            return page("NM System Login", body, 0)
+
+        body = """
+        <div class='card' style='max-width:560px'>
+          <h2>Login with Discord</h2>
+          <p class='muted'>Only server Owners or Administrators can open their server dashboard.</p>
+          <a class='btn' href='/auth/discord'>🔐 Continue with Discord</a>
+        </div>
+        """
+        return page("NM System Login", body, 0)
+
+    @app.route("/auth/discord")
+    def auth_discord():
+        if not oauth_ready():
+            return redirect("/login")
+
+        cfg = oauth_config()
+        params = urllib.parse.urlencode({
+            "client_id": cfg["client_id"],
+            "redirect_uri": redirect_uri(),
+            "response_type": "code",
+            "scope": "identify guilds",
+            "prompt": "consent",
+        })
+
+        return redirect(f"{DISCORD_API}/oauth2/authorize?{params}")
+
+    @app.route("/auth/discord/callback")
+    def auth_callback():
+        if not oauth_ready():
+            return redirect("/login")
+
+        code = request.args.get("code", "")
+        if not code:
+            return "Missing Discord OAuth code", 400
+
+        try:
+            token_data = exchange_code_for_token(code)
+            access_token = token_data.get("access_token")
+
+            if not access_token:
+                session.clear()
+                return "Discord OAuth did not return access token", 400
+
+            user = discord_api_get("/users/@me", access_token)
+            guilds = discord_api_get("/users/@me/guilds", access_token)
+            manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
+
+            session.clear()
+            session["discord_access_token"] = access_token
+            session["discord_user"] = {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "global_name": user.get("global_name"),
+                "avatar": user.get("avatar"),
+            }
+            session["discord_guilds"] = manageable
+
+            if manageable:
+                session["guild_id"] = int(manageable[0]["id"])
+
+            session.modified = True
+            return redirect("/dashboard")
+
+        except urllib.error.HTTPError as e:
+            session.clear()
+            try:
+                detail = e.read().decode("utf-8")
+            except Exception:
+                detail = str(e)
+            return f"Discord OAuth failed: {esc(detail)}", 400
+
+        except Exception as e:
+            session.clear()
+            return f"Discord OAuth error: {esc(type(e).__name__)}: {esc(e)}", 500
+
+    @app.route("/logout")
+    def logout():
+        session.clear()
+        return redirect("/login")
+
+    @app.route("/dashboard")
+    def home():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        if not g:
+            return page("Dashboard Overview", dashboard_access_denied_html() + guild_selector_html(0), 0)
+
+        ensure_guild(g)
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(balance),0) total FROM balances WHERE guild_id=?", (g,))
+        eco = cur.fetchone()
+        cur.execute("SELECT COUNT(*) c FROM money_ledger WHERE guild_id=?", (g,))
+        led = cur.fetchone()
+        active, cleared = warn_summary(g)
+        conn.close()
+
+        user = dashboard_user()
+        g_name = bot_guild_name(bot, g)
+        body = guild_selector_html(g) + f"""
+        <div class='card'>
+          <div class='muted'>Logged in as</div>
+          <b>{esc(user.get('global_name') or user.get('username'))}</b>
+          <code>{esc(user.get('id'))}</code>
+        </div>
+
+        <div class='grid'>
+          <div class='card'><div class='muted'>Guild</div><div class='stat'>{esc(g_name)}</div><div class='muted'><code>{g}</code></div></div>
+          <div class='card'><div class='muted'>Coin</div><div class='stat'>{esc(get_coin_name(g))}</div></div>
+          <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(eco['c'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Total Money</div><div class='stat'>{int(eco['total'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(led['c'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Warnings</div><div class='stat'>{active:,}</div></div>
+        </div>
+        """
+        return page("Dashboard Overview", body, g)
+
+    @app.route("/dashboard/economy")
+    def economy_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT user_id,balance,updated_at FROM balances WHERE guild_id=? ORDER BY balance DESC LIMIT 100", (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['balance']):,}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
+            for r in rows
+        )
+
+        return page("Economy", guild_selector_html(g) + f"<div class='card'><table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/money-tracker")
+    def money_tracker():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        uid = request.args.get("user_id", "").strip()
+
+        q = "SELECT * FROM money_ledger WHERE guild_id=?"
+        params = [g]
+
+        if uid.isdigit():
+            q += " AND user_id=?"
+            params.append(int(uid))
+
+        q += " ORDER BY id DESC LIMIT 250"
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(q, params)
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{r['user_id']}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+            for r in rows
+        )
+
+        form = f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID' value='{esc(uid)}'><button>Filter</button></form></div>"
+
+        return page("Money Tracker", guild_selector_html(g) + form + f"<div class='card'><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/casino")
+    def casino_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT source_label, COUNT(*) c,
+            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
+            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid
+            FROM money_ledger
+            WHERE guild_id=? AND source_type LIKE 'casino_%'
+            GROUP BY source_label
+        """, (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{esc(r['source_label'])}</td><td>{r['c']}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td></tr>"
+            for r in rows
+        )
+
+        return page("Casino", guild_selector_html(g) + f"<div class='card'><p>No max bet. User can only bet available balance. Bet is deducted first.</p><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/levels")
+    def levels_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM levels WHERE guild_id=? ORDER BY level DESC,xp DESC LIMIT 100", (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{r['user_id']}</td><td>{r['level']}</td><td>{r['xp']}</td></tr>"
+            for r in rows
+        )
+
+        return page("Levels", guild_selector_html(g) + f"<div class='card'><table><tr><th>User</th><th>Level</th><th>XP</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/real-estate")
+    def real_estate_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        real_estate.seed(g)
+        rows = real_estate.rows(g)
+
+        trs = "".join(
+            f"<tr><td>{r['id']}</td><td>{esc(r['display_name'])}</td><td>{r['owner_id'] or '-'}</td><td>{int(r['price']):,}</td><td>{int(r['rent']):,}</td><td>{r['level']}</td></tr>"
+            for r in rows
+        )
+
+        return page("Real Estate", guild_selector_html(g) + f"<div class='card'><table><tr><th>ID</th><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/warnings")
+    def warnings_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM warnings WHERE guild_id=? ORDER BY id DESC LIMIT 150", (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{r['id']}</td><td>{r['user_id']}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td></tr>"
+            for r in rows
+        )
+
+        return page("Warnings", guild_selector_html(g) + f"<div class='card'><table><tr><th>ID</th><th>User</th><th>Reason</th><th>Status</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/protection", methods=["GET", "POST"])
+    def protection_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        if request.method == "POST":
+            data = {
+                "enabled": 1 if request.form.get("enabled") else 0,
+                "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
+                "links_enabled": 1 if request.form.get("links_enabled") else 0,
+                "delete_messages": 1 if request.form.get("delete_messages") else 0,
+                "bad_words": request.form.get("bad_words", "")
+            }
+            prot_update(g, data)
+            return redirect(f"/dashboard/protection?guild_id={g}")
+
+        s = prot_get(g)
+        body = guild_selector_html(g) + f"""
+        <div class='card'>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+
+            <label><input type=checkbox name=enabled {'checked' if s.get('enabled') else ''}> Enabled</label><br>
+            <label><input type=checkbox name=bad_words_enabled {'checked' if s.get('bad_words_enabled') else ''}> Bad Words</label><br>
+            <label><input type=checkbox name=links_enabled {'checked' if s.get('links_enabled') else ''}> Links</label><br>
+            <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label><br><br>
+
+            <textarea name=bad_words style='width:100%;height:120px'>{esc(s.get('bad_words'))}</textarea><br><br>
+            <button>Save</button>
+          </form>
+        </div>
+        """
+        return page("Protection", body, g)
+
+    @app.route("/dashboard/logs")
+    def logs_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM log_events WHERE guild_id=? ORDER BY id DESC LIMIT 200", (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{esc(r['event_type'])}</td><td>{r['user_id']}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
+            for r in rows
+        )
+
+        return page("Logs", guild_selector_html(g) + f"<div class='card'><table><tr><th>Type</th><th>User</th><th>Title</th><th>Details</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/live")
+    def live_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM live_activity WHERE guild_id=? ORDER BY id DESC LIMIT 200", (g,))
+        rows = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{esc(r['activity_type'])}</td><td>{esc(r['actor_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td><td>{int(r['amount']):,}</td></tr>"
+            for r in rows
+        )
+
+        return page("Live Activity", guild_selector_html(g) + f"<div class='card'><table><tr><th>Type</th><th>Actor</th><th>Title</th><th>Details</th><th>Amount</th></tr>{trs}</table></div>", g)
+
+    @app.route("/dashboard/settings", methods=["GET", "POST"])
+    def settings_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        if request.method == "POST":
+            if "coin_name" in request.form:
+                set_coin_name(g, request.form.get("coin_name"))
+
+            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id"]:
+                if key in request.form:
+                    update_channel(g, key, int(request.form.get(key) or 0))
+
+            for k, v in all_toggles(g).items():
+                set_system_enabled(g, k, bool(request.form.get(f"toggle_{k}")))
+
+            return redirect(f"/dashboard/settings?guild_id={g}")
+
+        gs = get_guild_settings(g)
+        toggles = all_toggles(g)
+
+        checks = "".join(
+            f"<label><input type=checkbox name='toggle_{k}' {'checked' if v else ''}> {k}</label><br>"
+            for k, v in toggles.items()
+        )
+
+        body = guild_selector_html(g) + f"""
+        <div class='card'>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+
+            <h3>Guild Settings</h3>
+
+            Coin Name<br>
+            <input name=coin_name value='{esc(get_coin_name(g))}'><br><br>
+
+            Commands Channel ID<br>
+            <input name=commands_channel_id value='{int(gs.get('commands_channel_id') or 0)}'><br>
+
+            Gambling Channel ID<br>
+            <input name=gambling_channel_id value='{int(gs.get('gambling_channel_id') or 0)}'><br>
+
+            Logs Channel ID<br>
+            <input name=logs_channel_id value='{int(gs.get('logs_channel_id') or 0)}'><br><br>
+
+            <h3>System Toggles</h3>
+            {checks}
+            <br>
+            <button>Save</button>
+          </form>
+        </div>
+        """
+        return page("Settings", body, g)
+
+    @app.route("/dashboard/shop")
+    def shop_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        return page("Shop", guild_selector_html(g) + "<div class='card'><p>Shop core is ready. Add custom items next.</p></div>", g)
+
+    @app.route("/dashboard/giveaways")
+    def giveaways_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        return page("Giveaways", guild_selector_html(g) + "<div class='card'><p>Giveaway storage is ready. Discord commands can be expanded next.</p></div>", g)
+
+    @app.route("/dashboard/user")
+    def user_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        uid = request.args.get("user_id", "").strip()
+
+        if not uid.isdigit():
+            return page("User Lookup", guild_selector_html(g) + f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
+
+        uid = int(uid)
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, uid))
+        bal = cur.fetchone()
+        cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (g, uid))
+        lvl = cur.fetchone()
+        cur.execute("SELECT * FROM money_ledger WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
+        ledger = cur.fetchall()
+        conn.close()
+
+        trs = "".join(
+            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{r['source_type']}</td><td>{esc(r['reason'])}</td></tr>"
+            for r in ledger
+        )
+
+        body = guild_selector_html(g) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
+          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div></div>
+        </div>
+
+        <div class='card'>
+          <table>
+            <tr><th>TX</th><th>Amount</th><th>Source</th><th>Reason</th></tr>
+            {trs}
+          </table>
+        </div>
+        """
+        return page("User Lookup", body, g)
+
+    @app.route("/dashboard/health")
+    def health():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        cfg = oauth_config()
+        bot_online = bool(bot and getattr(bot, "user", None))
+        bot_name = str(bot.user) if bot_online else "Not ready"
+        bot_ids = bot_guild_ids(bot)
+        current_connected = int(g or 0) in bot_ids if g else False
+        current_name = bot_guild_name(bot, g) if g else "None"
+
+        body = guild_selector_html(g) + f"""
+        <div class='card'>
+          <h2 class='ok'>V9 Unified + Discord Login OK</h2>
+          <p>Bot Online: {'✅' if bot_online else '❌'}</p>
+          <p>Bot Name: <code>{esc(bot_name)}</code></p>
+          <p>Bot Guilds Count: <code>{len(bot_ids)}</code></p>
+          <p>Current Guild Connected: {'✅' if current_connected else '❌'}</p>
+          <p>Current Guild: <b>{esc(current_name)}</b> <code>{esc(g)}</code></p>
+          <p>DB: <code>{esc(DB_FILE)}</code></p>
+          <p>Discord Login: ✅</p>
+          <p>Redirect URI: <code>{esc(redirect_uri())}</code></p>
+          <p>Base URL: <code>{esc(cfg['base_url'])}</code></p>
+        </div>
+        """
+        return page("Health", body, g)
+
+    return app
