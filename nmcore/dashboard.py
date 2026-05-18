@@ -212,6 +212,20 @@ def guild_selector_html(active_gid):
     """
 
 
+
+
+def server_pill_html(active_gid, bot=None):
+    if not active_gid:
+        return ""
+    name = bot_guild_name(bot, active_gid)
+    return f"""
+    <div style='display:flex;align-items:center;gap:10px;margin:-8px 0 18px;flex-wrap:wrap'>
+      <span class='muted'>Server</span>
+      <b>{esc(name)}</b>
+      <code>{esc(active_gid)}</code>
+      <a class='btn' style='background:#334155;padding:8px 11px;box-shadow:none' href='/dashboard'>Change</a>
+    </div>
+    """
 def create_app(bot=None):
     app = Flask(__name__)
     app.secret_key = DASHBOARD_SECRET_KEY
@@ -395,7 +409,7 @@ DASHBOARD_BASE_URL</pre>
             for r in rows
         )
 
-        return page("Economy", guild_selector_html(g) + f"<div class='card'><table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table></div>", g)
+        return page("Economy", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table></div>", g)
 
     @app.route("/dashboard/money-tracker")
     def money_tracker():
@@ -464,7 +478,7 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
 
-        body = guild_selector_html(g) + form + f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No ledger yet.</span>'}</div>"
+        body = server_pill_html(g, bot) + form + f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No ledger yet.</span>'}</div>"
         body += f"<div class='card'><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th></tr>{trs}</table></div>"
 
         return page("Money Tracker", body, g)
@@ -534,7 +548,7 @@ DASHBOARD_BASE_URL</pre>
             for r in biggest_winners
         )
 
-        body = guild_selector_html(g) + f"""
+        body = server_pill_html(g, bot) + f"""
         <div class='grid'>
           <div class='card'><div class='muted'>Casino Rows</div><div class='stat'>{int(total['rows'] or 0):,}</div></div>
           <div class='card'><div class='muted'>Casino Took</div><div class='stat'>{int(total['took'] or 0):,}</div></div>
@@ -565,7 +579,7 @@ DASHBOARD_BASE_URL</pre>
             for r in rows
         )
 
-        return page("Levels", guild_selector_html(g) + f"<div class='card'><table><tr><th>User</th><th>Level</th><th>XP</th></tr>{trs}</table></div>", g)
+        return page("Levels", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>User</th><th>Level</th><th>XP</th></tr>{trs}</table></div>", g)
 
     @app.route("/dashboard/real-estate")
     def real_estate_page():
@@ -582,7 +596,7 @@ DASHBOARD_BASE_URL</pre>
             for r in rows
         )
 
-        return page("Real Estate", guild_selector_html(g) + f"<div class='card'><table><tr><th>ID</th><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", g)
+        return page("Real Estate", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>ID</th><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", g)
 
     @app.route("/dashboard/warnings")
     def warnings_page():
@@ -650,7 +664,7 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
 
-        body = guild_selector_html(g) + form
+        body = server_pill_html(g, bot) + form
         body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th></tr>{grouped_trs}</table></div>"
         body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th></tr>{trs}</table></div>"
 
@@ -706,7 +720,7 @@ DASHBOARD_BASE_URL</pre>
             for r in auto_warnings
         )
 
-        body = guild_selector_html(g) + f"""
+        body = server_pill_html(g, bot) + f"""
         <div class='grid'>
           <div class='card'><div class='muted'>Protection</div><div class='stat'>{'ON' if s.get('enabled') else 'OFF'}</div></div>
           <div class='card'><div class='muted'>Bad Words</div><div class='stat'>{bad_count:,}</div></div>
@@ -741,18 +755,66 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+        event_type = request.args.get("event_type", "").strip()
+        user_id = request.args.get("user_id", "").strip()
+        limit_raw = request.args.get("limit", "200").strip()
+
+        try:
+            limit = max(25, min(int(limit_raw or 200), 1000))
+        except Exception:
+            limit = 200
+
+        q = "SELECT * FROM log_events WHERE guild_id=?"
+        params = [g]
+
+        if event_type:
+            q += " AND event_type=?"
+            params.append(event_type)
+
+        if user_id.isdigit():
+            q += " AND user_id=?"
+            params.append(int(user_id))
+
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+
         conn = db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM log_events WHERE guild_id=? ORDER BY id DESC LIMIT 200", (g,))
+        cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("""SELECT event_type, COUNT(*) c FROM log_events
+        WHERE guild_id=? GROUP BY event_type ORDER BY c DESC LIMIT 30""", (g,))
+        types = cur.fetchall()
         conn.close()
 
+        chips = "".join(
+            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/logs?guild_id={g}&event_type={esc(r['event_type'])}'>{esc(r['event_type'])} ({int(r['c'])})</a>"
+            for r in types
+        )
+
+        form = f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=event_type placeholder='event_type' value='{esc(event_type)}'>
+            <input name=user_id placeholder='User ID' value='{esc(user_id)}'>
+            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+        """
+
         trs = "".join(
-            f"<tr><td>{esc(r['event_type'])}</td><td>{r['user_id']}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
+            f"<tr><td>{r['id']}</td><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['channel_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
             for r in rows
         )
 
-        return page("Logs", guild_selector_html(g) + f"<div class='card'><table><tr><th>Type</th><th>User</th><th>Title</th><th>Details</th></tr>{trs}</table></div>", g)
+        body = server_pill_html(g, bot) + form
+        body += f"<div class='card'><h3>Event Types</h3>{chips or '<span class=muted>No logs yet.</span>'}</div>"
+        body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>User</th><th>Name</th><th>Channel</th><th>Title</th><th>Details</th></tr>{trs}</table></div>"
+        return page("Logs", body, g)
 
     @app.route("/dashboard/live")
     def live_page():
@@ -761,18 +823,41 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+        activity_type = request.args.get("activity_type", "").strip()
+
         conn = db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM live_activity WHERE guild_id=? ORDER BY id DESC LIMIT 200", (g,))
+
+        q = "SELECT * FROM live_activity WHERE guild_id=?"
+        params = [g]
+        if activity_type:
+            q += " AND activity_type=?"
+            params.append(activity_type)
+        q += " ORDER BY id DESC LIMIT 250"
+
+        cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("""SELECT activity_type, COUNT(*) c FROM live_activity
+        WHERE guild_id=? GROUP BY activity_type ORDER BY c DESC LIMIT 20""", (g,))
+        types = cur.fetchall()
+
         conn.close()
 
+        chips = "".join(
+            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/live?guild_id={g}&activity_type={esc(r['activity_type'])}'>{esc(r['activity_type'])} ({int(r['c'])})</a>"
+            for r in types
+        )
+
         trs = "".join(
-            f"<tr><td>{esc(r['activity_type'])}</td><td>{esc(r['actor_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td><td>{int(r['amount']):,}</td></tr>"
+            f"<tr><td>{r['id']}</td><td>{esc(r['activity_type'])}</td><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td><td>{int(r['amount']):,}</td></tr>"
             for r in rows
         )
 
-        return page("Live Activity", guild_selector_html(g) + f"<div class='card'><table><tr><th>Type</th><th>Actor</th><th>Title</th><th>Details</th><th>Amount</th></tr>{trs}</table></div>", g)
+        body = server_pill_html(g, bot)
+        body += f"<div class='card'><h3>Live Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'} <a class='btn' style='background:#334155;margin:4px' href='/dashboard/live?guild_id={g}'>Reset</a></div>"
+        body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>Actor</th><th>Name</th><th>Title</th><th>Details</th><th>Amount</th></tr>{trs}</table></div>"
+        return page("Live Activity", body, g)
 
     @app.route("/dashboard/settings", methods=["GET", "POST"])
     def settings_page():
@@ -807,7 +892,7 @@ DASHBOARD_BASE_URL</pre>
             for k, v in toggles.items()
         )
 
-        body = guild_selector_html(g) + f"""
+        body = server_pill_html(g, bot) + f"""
         <div class='grid'>
           <div class='card'><div class='muted'>Commands Room</div><div class='stat'>{f'<#{commands_channel_id}>' if commands_channel_id else 'OFF'}</div></div>
           <div class='card'><div class='muted'>Gambling Room</div><div class='stat'>{f'<#{gambling_channel_id}>' if gambling_channel_id else 'OFF'}</div></div>
@@ -850,7 +935,7 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
-        return page("Shop", guild_selector_html(g) + "<div class='card'><p>Shop core is ready. Add custom items next.</p></div>", g)
+        return page("Shop", server_pill_html(g, bot) + "<div class='card'><p>Shop core is ready. Add custom items next.</p></div>", g)
 
     @app.route("/dashboard/giveaways")
     def giveaways_page():
@@ -859,7 +944,7 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
-        return page("Giveaways", guild_selector_html(g) + "<div class='card'><p>Giveaway storage is ready. Discord commands can be expanded next.</p></div>", g)
+        return page("Giveaways", server_pill_html(g, bot) + "<div class='card'><p>Giveaway storage is ready. Discord commands can be expanded next.</p></div>", g)
 
     @app.route("/dashboard/user")
     def user_page():
@@ -871,37 +956,65 @@ DASHBOARD_BASE_URL</pre>
         uid = request.args.get("user_id", "").strip()
 
         if not uid.isdigit():
-            return page("User Lookup", guild_selector_html(g) + f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
+            return page("User Lookup", server_pill_html(g, bot) + f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
 
         uid = int(uid)
 
         conn = db()
         cur = conn.cursor()
+
         cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, uid))
         bal = cur.fetchone()
+
         cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (g, uid))
         lvl = cur.fetchone()
+
         cur.execute("SELECT * FROM money_ledger WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
         ledger = cur.fetchall()
+
+        cur.execute("SELECT * FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
+        warns = cur.fetchall()
+
+        cur.execute("SELECT * FROM properties WHERE guild_id=? AND owner_id=? ORDER BY id LIMIT 50", (g, uid))
+        props = cur.fetchall()
+
         conn.close()
 
-        trs = "".join(
-            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{r['source_type']}</td><td>{esc(r['reason'])}</td></tr>"
+        ledger_trs = "".join(
+            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{r['balance_before']:,}</td><td>{r['balance_after']:,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
             for r in ledger
         )
 
-        body = guild_selector_html(g) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
-          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div></div>
+        warn_trs = "".join(
+            f"<tr><td>{r['id']}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td><td>{esc(r['moderator_name'])}</td></tr>"
+            for r in warns
+        )
+
+        prop_trs = "".join(
+            f"<tr><td>{r['id']}</td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{int(r['rent']):,}</td></tr>"
+            for r in props
+        )
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id value='{uid}' placeholder='User ID'>
+            <button>Search</button>
+          </form>
         </div>
 
-        <div class='card'>
-          <table>
-            <tr><th>TX</th><th>Amount</th><th>Source</th><th>Reason</th></tr>
-            {trs}
-          </table>
+        <div class='grid'>
+          <div class='card'><div class='muted'>User ID</div><div class='stat'><code>{uid}</code></div></div>
+          <div class='card'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
+          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div></div>
+          <div class='card'><div class='muted'>Warnings</div><div class='stat'>{len(warns):,}</div></div>
+          <div class='card'><div class='muted'>Properties</div><div class='stat'>{len(props):,}</div></div>
         </div>
+
+        <div class='card'><h3>Money History</h3><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{ledger_trs}</table></div>
+        <div class='card'><h3>Warnings</h3><table><tr><th>ID</th><th>Reason</th><th>Status</th><th>By</th></tr>{warn_trs}</table></div>
+        <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th></tr>{prop_trs}</table></div>
         """
         return page("User Lookup", body, g)
 
@@ -919,7 +1032,7 @@ DASHBOARD_BASE_URL</pre>
         current_connected = int(g or 0) in bot_ids if g else False
         current_name = bot_guild_name(bot, g) if g else "None"
 
-        body = guild_selector_html(g) + f"""
+        body = server_pill_html(g, bot) + f"""
         <div class='card'>
           <h2 class='ok'>V9 Unified + Discord Login OK</h2>
           <p>Bot Online: {'✅' if bot_online else '❌'}</p>
