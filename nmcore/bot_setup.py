@@ -1,5 +1,5 @@
 import discord
-from nmcore.services.settings import ensure_guild, command_system, is_system_enabled
+from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
 from nmcore.services.levels import message_xp
 from nmcore.services.protection import get_settings, contains_bad, has_link, matched_bad_word
 from nmcore.services.activity import log_event
@@ -25,10 +25,21 @@ def setup_bot(bot):
         ensure_guild(ctx.guild.id, ctx.guild.name)
 
         sys = command_system(ctx.command.name)
+
         if not is_system_enabled(ctx.guild.id, sys):
             await ctx.reply(embed=embed(
                 "🔒 النظام مقفل",
                 f"نظام `{sys}` مقفل من الداشبورد.",
+                "warn",
+                ctx.author
+            ))
+            return False
+
+        required_channel_id = channel_restriction_for_system(ctx.guild.id, sys)
+        if required_channel_id and int(ctx.channel.id) != int(required_channel_id):
+            await ctx.reply(embed=embed(
+                "📍 الروم غير صحيح",
+                f"هذا الأمر مخصص للروم الصحيح فقط: <#{required_channel_id}>",
                 "warn",
                 ctx.author
             ))
