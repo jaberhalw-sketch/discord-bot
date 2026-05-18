@@ -5,7 +5,7 @@ from nmcore.services.protection import get_settings, contains_bad, has_link, mat
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
-from nmcore.commands import economy, casino, levels, real_estate, moderation, admin
+from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
 
 
@@ -16,6 +16,8 @@ def setup_bot(bot):
     real_estate.setup(bot)
     moderation.setup(bot)
     admin.setup(bot)
+    shop.setup(bot)
+    giveaways.setup(bot)
 
     @bot.check
     async def global_toggle_check(ctx):
