@@ -5,6 +5,8 @@ from nmcore.db import db, init_db
 from nmcore.ui import page
 from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel
 from nmcore.services import real_estate
+from nmcore.services import shop as shop_service
+from nmcore.services import giveaways as giveaway_service
 from nmcore.services.warnings import summary as warn_summary
 from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
 
@@ -928,23 +930,177 @@ DASHBOARD_BASE_URL</pre>
         """
         return page("Settings", body, g)
 
-    @app.route("/dashboard/shop")
+    @app.route("/dashboard/shop", methods=["GET", "POST"])
     def shop_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
-        return page("Shop", server_pill_html(g, bot) + "<div class='card'><p>Shop core is ready. Add custom items next.</p></div>", g)
+        shop_service.ensure_tables()
 
-    @app.route("/dashboard/giveaways")
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+
+            if action == "seed":
+                shop_service.seed_defaults(g)
+                return redirect(f"/dashboard/shop?guild_id={g}")
+
+            if action == "add":
+                item_key = request.form.get("item_key", "").strip()
+                name = request.form.get("name", "").strip()
+                description = request.form.get("description", "").strip()
+                price = int(request.form.get("price") or 0)
+                role_id = int(request.form.get("role_id") or 0)
+                enabled = 1 if request.form.get("enabled") else 0
+                shop_service.upsert_item(g, item_key, name, description, price, role_id, enabled)
+                return redirect(f"/dashboard/shop?guild_id={g}")
+
+            if action == "toggle":
+                item_id = int(request.form.get("item_id") or 0)
+                enabled = int(request.form.get("enabled") or 0)
+                shop_service.set_enabled(g, item_id, enabled)
+                return redirect(f"/dashboard/shop?guild_id={g}")
+
+        items = shop_service.items(g, include_disabled=True)
+        purchases = shop_service.recent_purchases(g, 100)
+
+        item_trs = "".join(
+            f"""<tr>
+              <td>{r['id']}</td>
+              <td><code>{esc(r['item_key'])}</code></td>
+              <td>{esc(r['name'])}</td>
+              <td>{int(r['price']):,}</td>
+              <td>{'<code>'+esc(r['role_id'])+'</code>' if int(r['role_id'] or 0) else '-'}</td>
+              <td>{'✅' if int(r['enabled']) else '❌'}</td>
+              <td>
+                <form method='post' style='display:inline'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=action value='toggle'>
+                  <input type=hidden name=item_id value='{r['id']}'>
+                  <input type=hidden name=enabled value='{0 if int(r['enabled']) else 1}'>
+                  <button>{'Disable' if int(r['enabled']) else 'Enable'}</button>
+                </form>
+              </td>
+            </tr>"""
+            for r in items
+        )
+
+        purchase_trs = "".join(
+            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['item_key'])}</td><td>{int(r['price']):,}</td><td><code>{esc(r['money_tx_id'])[:12]}</code></td></tr>"
+            for r in purchases
+        )
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Shop Items</div><div class='stat'>{len(items):,}</div></div>
+          <div class='card'><div class='muted'>Recent Purchases</div><div class='stat'>{len(purchases):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Add / Update Item</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='add'>
+            <input name=item_key placeholder='item_key مثل vip_day' required>
+            <input name=name placeholder='Display name' required>
+            <input name=price placeholder='Price' type=number min=0 required>
+            <input name=role_id placeholder='Role ID optional' type=number min=0>
+            <br><br>
+            <textarea name=description placeholder='Description' style='width:100%;height:80px'></textarea><br><br>
+            <label><input type=checkbox name=enabled checked> Enabled</label>
+            <button>Save Item</button>
+          </form>
+          <form method=post style='margin-top:12px'>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='seed'>
+            <button style='background:#334155'>Add Default Items</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Items</h3>
+          <table><tr><th>ID</th><th>Key</th><th>Name</th><th>Price</th><th>Role ID</th><th>Enabled</th><th>Action</th></tr>{item_trs}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Recent Purchases</h3>
+          <table><tr><th>ID</th><th>User</th><th>Item</th><th>Price</th><th>TX</th></tr>{purchase_trs}</table>
+        </div>
+        """
+        return page("Shop", body, g)
+
+    @app.route("/dashboard/giveaways", methods=["GET", "POST"])
     def giveaways_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
-        return page("Giveaways", server_pill_html(g, bot) + "<div class='card'><p>Giveaway storage is ready. Discord commands can be expanded next.</p></div>", g)
+        giveaway_service.ensure_tables()
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+
+            if action == "create":
+                prize = request.form.get("prize", "").strip()
+                winner_count = int(request.form.get("winner_count") or 1)
+                created_by_id = int((dashboard_user() or {}).get("id") or 0)
+                created_by_name = dashboard_user().get("global_name") or dashboard_user().get("username") or "Dashboard"
+                giveaway_service.create_giveaway(g, prize, winner_count, created_by_id, created_by_name)
+                return redirect(f"/dashboard/giveaways?guild_id={g}")
+
+            if action == "close":
+                giveaway_id = int(request.form.get("giveaway_id") or 0)
+                giveaway_service.close_giveaway(g, giveaway_id)
+                return redirect(f"/dashboard/giveaways?guild_id={g}")
+
+            if action == "pick":
+                giveaway_id = int(request.form.get("giveaway_id") or 0)
+                giveaway_service.pick_winners(g, giveaway_id)
+                return redirect(f"/dashboard/giveaways?guild_id={g}")
+
+        rows = giveaway_service.giveaways(g, 100)
+
+        giveaway_trs = ""
+        for r in rows:
+            entries = giveaway_service.entry_count(g, int(r["id"]))
+            winners = giveaway_service.winner_list(g, int(r["id"]))
+            giveaway_trs += f"""<tr>
+              <td>{r['id']}</td>
+              <td>{esc(r['prize'])}</td>
+              <td>{int(r['winner_count'])}</td>
+              <td>{entries}</td>
+              <td>{esc(r['status'])}</td>
+              <td>{esc(', '.join(str(w) for w in winners)) or '-'}</td>
+              <td>
+                <form method='post' style='display:inline'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=giveaway_id value='{r['id']}'>
+                  <button name=action value='pick'>Pick</button>
+                  <button name=action value='close' style='background:#334155'>Close</button>
+                </form>
+              </td>
+            </tr>"""
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='card'>
+          <h3>Create Giveaway</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='create'>
+            <input name=prize placeholder='Prize' required>
+            <input name=winner_count type=number min=1 value=1 style='width:120px'>
+            <button>Create</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Giveaways</h3>
+          <table><tr><th>ID</th><th>Prize</th><th>Winners</th><th>Entries</th><th>Status</th><th>Winner IDs</th><th>Action</th></tr>{giveaway_trs}</table>
+        </div>
+        """
+        return page("Giveaways", body, g)
 
     @app.route("/dashboard/user")
     def user_page():
