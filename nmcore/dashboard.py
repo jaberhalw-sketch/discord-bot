@@ -79,6 +79,56 @@ def is_admin_guild(g):
         return False
 
 
+def bot_guild_ids(bot=None):
+    try:
+        if bot and getattr(bot, "guilds", None):
+            return {int(g.id) for g in bot.guilds}
+    except Exception:
+        pass
+    return set()
+
+
+def bot_guild_name(bot=None, guild_id=0):
+    try:
+        gid_int = int(guild_id or 0)
+        if bot and getattr(bot, "guilds", None):
+            for g in bot.guilds:
+                if int(g.id) == gid_int:
+                    return g.name
+    except Exception:
+        pass
+
+    for g in session.get("discord_guilds", []):
+        try:
+            if int(g.get("id", 0)) == int(guild_id or 0):
+                return g.get("name") or str(guild_id)
+        except Exception:
+            pass
+
+    return str(guild_id or "")
+
+
+def filter_manageable_to_bot_guilds(manageable, bot=None):
+    ids = bot_guild_ids(bot)
+    if not ids:
+        return manageable
+    return [g for g in manageable if str(g.get("id", "")).isdigit() and int(g["id"]) in ids]
+
+
+def dashboard_access_denied_html():
+    denied = session.pop("access_denied_gid", 0)
+    if not denied:
+        return ""
+    return f"""
+    <div class='card'>
+      <h3 class='bad'>Dashboard access denied</h3>
+      <p>You cannot open this server dashboard.</p>
+      <p class='muted'>Reason: the bot is not in this guild, or you do not have Owner/Administrator permission.</p>
+      <p>Requested Guild ID: <code>{esc(denied)}</code></p>
+    </div>
+    """
+
+
 def dashboard_user():
     return session.get("discord_user") or {}
 
@@ -118,6 +168,11 @@ def gid(bot=None):
         session["guild_id"] = selected
         return selected
 
+    if selected and selected not in allowed:
+        session["access_denied_gid"] = selected
+        session.pop("guild_id", None)
+        return 0
+
     if allowed:
         first = sorted(allowed)[0]
         session["guild_id"] = first
@@ -133,7 +188,7 @@ def guild_selector_html(active_gid):
         return """
         <div class='card'>
           <b>No manageable Discord servers found.</b><br>
-          You need Owner or Administrator permission in a server.
+          You need Owner or Administrator permission, and the bot must be inside that server.
           <br><br>
           <a class='btn' href='/logout'>Logout</a>
         </div>
@@ -246,7 +301,7 @@ DASHBOARD_BASE_URL</pre>
 
             user = discord_api_get("/users/@me", access_token)
             guilds = discord_api_get("/users/@me/guilds", access_token)
-            manageable = [g for g in guilds if is_admin_guild(g)]
+            manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
 
             session.clear()
             session["discord_access_token"] = access_token
@@ -289,7 +344,7 @@ DASHBOARD_BASE_URL</pre>
 
         g = gid(bot)
         if not g:
-            return page("Dashboard Overview", guild_selector_html(0), 0)
+            return page("Dashboard Overview", dashboard_access_denied_html() + guild_selector_html(0), 0)
 
         ensure_guild(g)
 
@@ -303,6 +358,7 @@ DASHBOARD_BASE_URL</pre>
         conn.close()
 
         user = dashboard_user()
+        g_name = bot_guild_name(bot, g)
         body = guild_selector_html(g) + f"""
         <div class='card'>
           <div class='muted'>Logged in as</div>
@@ -311,7 +367,7 @@ DASHBOARD_BASE_URL</pre>
         </div>
 
         <div class='grid'>
-          <div class='card'><div class='muted'>Guild</div><div class='stat'>{g}</div></div>
+          <div class='card'><div class='muted'>Guild</div><div class='stat'>{esc(g_name)}</div><div class='muted'><code>{g}</code></div></div>
           <div class='card'><div class='muted'>Coin</div><div class='stat'>{esc(get_coin_name(g))}</div></div>
           <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(eco['c'] or 0):,}</div></div>
           <div class='card'><div class='muted'>Total Money</div><div class='stat'>{int(eco['total'] or 0):,}</div></div>
@@ -662,10 +718,20 @@ DASHBOARD_BASE_URL</pre>
 
         g = gid(bot)
         cfg = oauth_config()
+        bot_online = bool(bot and getattr(bot, "user", None))
+        bot_name = str(bot.user) if bot_online else "Not ready"
+        bot_ids = bot_guild_ids(bot)
+        current_connected = int(g or 0) in bot_ids if g else False
+        current_name = bot_guild_name(bot, g) if g else "None"
 
         body = guild_selector_html(g) + f"""
         <div class='card'>
           <h2 class='ok'>V9 Unified + Discord Login OK</h2>
+          <p>Bot Online: {'✅' if bot_online else '❌'}</p>
+          <p>Bot Name: <code>{esc(bot_name)}</code></p>
+          <p>Bot Guilds Count: <code>{len(bot_ids)}</code></p>
+          <p>Current Guild Connected: {'✅' if current_connected else '❌'}</p>
+          <p>Current Guild: <b>{esc(current_name)}</b> <code>{esc(g)}</code></p>
           <p>DB: <code>{esc(DB_FILE)}</code></p>
           <p>Discord Login: ✅</p>
           <p>Redirect URI: <code>{esc(redirect_uri())}</code></p>
