@@ -21314,10 +21314,12 @@ NM_V8_ACTIVITY_TABLE = "nm_activity_v8"
 NM_V8_PROPERTY_LEDGER_TABLE = "nm_property_ledger_v8"
 NM_V8_CASINO_WINDOW_TABLE = "nm_casino_window_v8"
 NM_V8_SNOWFLAKE_MIN = 10 ** 15
-NM_V8_DEFAULT_MAX_BET = int(os.getenv("NM_CASINO_MAX_BET", "250000"))
-NM_V8_MAX_BET_PERCENT = int(os.getenv("NM_CASINO_MAX_BET_PERCENT", "10"))
+# V8 casino policy: no artificial max bet / no 10-minute window limit.
+# Only real rule: the player cannot bet more than their current balance.
+NM_V8_DEFAULT_MAX_BET = 0
+NM_V8_MAX_BET_PERCENT = 100
 NM_V8_WINDOW_SECONDS = int(os.getenv("NM_CASINO_WINDOW_SECONDS", "600"))
-NM_V8_WINDOW_TOTAL = int(os.getenv("NM_CASINO_WINDOW_MAX_TOTAL", "1000000"))
+NM_V8_WINDOW_TOTAL = 0
 NM_V8_BALANCE_WARN = int(os.getenv("NM_BALANCE_WARN", "50000000"))
 NM_V8_DAILY_REWARD = int(os.getenv("NM_DAILY_REWARD", str(DAILY_REWARD_BASE if 'DAILY_REWARD_BASE' in globals() else 250)))
 NM_V8_SALARY_COOLDOWN = int(os.getenv("NM_SALARY_COOLDOWN_SECONDS", str(HOURLY_REWARD_COOLDOWN_SECONDS if 'HOURLY_REWARD_COOLDOWN_SECONDS' in globals() else 3600)))
@@ -21755,9 +21757,8 @@ class NMCore:
 
     @staticmethod
     def casino_limit(guild_id, user_id):
-        bal = NMCore.get_balance(guild_id, user_id)
-        by_pct = max(1, bal * NM_V8_MAX_BET_PERCENT // 100)
-        return max(0, min(bal, NM_V8_DEFAULT_MAX_BET, by_pct))
+        # No artificial gambling limit. Player may bet any amount up to their live balance.
+        return max(0, NMCore.get_balance(guild_id, user_id))
 
     @staticmethod
     def casino_window_total(guild_id, user_id):
@@ -21773,19 +21774,16 @@ class NMCore:
         gid, uid = NMCore.gid(guild_id), nm_v8_int(user_id,0)
         bal = NMCore.get_balance(gid, uid)
         if bet == "all":
-            bet = NMCore.casino_limit(gid, uid)
+            bet = bal
         if bet is None:
-            return False, 0, "اكتب مبلغ صحيح."
+            return False, 0, "اكتب مبلغ صحيح. مثال: `!حظ 1000` أو `!حظ all`."
         bet = nm_v8_int(bet, 0)
         if bet <= 0:
             return False, bet, "المبلغ لازم يكون أكبر من صفر."
-        if bal < bet:
+        if bal <= 0:
+            return False, bet, "ما عندك رصيد تلعب فيه."
+        if bet > bal:
             return False, bet, f"رصيدك ما يكفي. رصيدك الحالي: {NMCore.money(bal, gid)}"
-        max_bet = NMCore.casino_limit(gid, uid)
-        if bet > max_bet:
-            return False, bet, f"الرهان كبير على اقتصاد السيرفر. أقصى رهان لك الآن: {NMCore.money(max_bet, gid)}"
-        if NMCore.casino_window_total(gid, uid) + bet > NM_V8_WINDOW_TOTAL:
-            return False, bet, f"وصلت حد القمار المؤقت خلال {NM_V8_WINDOW_SECONDS//60} دقائق: {NMCore.money(NM_V8_WINDOW_TOTAL, gid)}"
         return True, bet, ""
 
     @staticmethod
@@ -21804,15 +21802,15 @@ class NMCore:
         if game_key in {"luck", "حظ"}:
             if random.random() < 0.48:
                 outcome, payout = "win", bet * 2
-            detail = "لعبة الحظ"
+            detail = "🎲 رمية حظ: 48% فوز / 52% خسارة"
         elif game_key in {"double", "دبل"}:
             if random.random() < 0.45:
                 outcome, payout = "win", bet * 2
-            detail = "لعبة الدبل"
+            detail = "⚡ دبل أو لا شيء"
         elif game_key in {"flip", "وجه"}:
             if random.random() < 0.50:
                 outcome, payout = "win", bet * 2
-            detail = "عملة"
+            detail = "🪙 وجه أو كتابة"
         elif game_key in {"slot", "سلوت"}:
             icons = ["🍒", "🍋", "💎", "7️⃣", "⭐"]
             roll = [random.choice(icons) for _ in range(3)]
@@ -21822,7 +21820,7 @@ class NMCore:
             elif len(set(roll)) == 2:
                 outcome, payout = "win", bet * 2
         elif game_key in {"blackjack", "bj", "بلاكجاك"}:
-            player = random.randint(16,22); dealer = random.randint(16,22); detail = f"أنت {player} | الديلر {dealer}"
+            player = random.randint(16,22); dealer = random.randint(16,22); detail = f"🃏 أنت: **{player}** | الديلر: **{dealer}**"
             if player > 21:
                 outcome, payout = "lose", 0
             elif dealer > 21 or player > dealer:
@@ -22093,8 +22091,13 @@ def nm_v8_financial_audit():
 
 def nm_v8_casino_guard():
     gid=NMCore.gid(); body=f"""
-    <div class='card ok'><h2>Casino controlled by NMCore</h2><p>Debit-first is active. If player bets all and loses, balance becomes 0.</p></div>
-    <div class='grid'><div class='card'><div class='muted'>Max Bet</div><div class='stat'>{NM_V8_DEFAULT_MAX_BET:,}</div></div><div class='card'><div class='muted'>Max % Balance</div><div class='stat'>{NM_V8_MAX_BET_PERCENT}%</div></div><div class='card'><div class='muted'>Window Max</div><div class='stat'>{NM_V8_WINDOW_TOTAL:,}</div></div></div>
+    <div class='card ok'><h2>🎰 Casino controlled by NMCore</h2><p>Debit-first is active. If a player bets all and loses, balance becomes 0.</p></div>
+    <div class='grid'>
+      <div class='card'><div class='muted'>Artificial Max Bet</div><div class='stat'>OFF</div><p class='muted'>لا يوجد سقف رهان من البوت.</p></div>
+      <div class='card'><div class='muted'>Only Limit</div><div class='stat'>Balance</div><p class='muted'>اللاعب لا يقدر يراهن أكثر من رصيده الحقيقي.</p></div>
+      <div class='card'><div class='muted'>10m Window Limit</div><div class='stat'>OFF</div><p class='muted'>تم إلغاء حد القمار المؤقت حسب طلبك.</p></div>
+    </div>
+    <div class='card'><h3>Audit</h3><p>كل رهان يسجل في <code>nm_money_ledger_v7</code> كمصدر <code>casino_bet</code>، وكل دفع فوز يسجل كمصدر <code>casino_payout</code>.</p></div>
     """
     return nm_v8_shell("Casino Guard", body, gid)
 
@@ -22203,55 +22206,223 @@ def nm_v8_remove_prefix_command(*names):
         except Exception: pass
 
 
+
+def nm_v8_system_key_for_command(command_name):
+    try:
+        return command_system(str(command_name))
+    except Exception:
+        mapping = {
+            "رصيدي": "economy", "رصيد": "economy", "balance": "economy",
+            "راتب": "economy", "salary": "economy", "daily": "economy",
+            "تحويل": "economy", "transfer": "economy",
+            "الغني": "economy", "اغنى": "economy", "topmoney": "economy", "rich": "economy",
+            "حظ": "gambling", "luck": "gambling",
+            "دبل": "gambling", "double": "gambling",
+            "سلوت": "gambling", "slot": "gambling",
+            "وجه": "gambling", "flip": "gambling",
+            "بلاكجاك": "gambling", "bj": "gambling", "blackjack": "gambling",
+            "عقارات": "shop", "شراء_عقار": "shop", "ايجار": "shop",
+        }
+        return mapping.get(str(command_name), "utility")
+
+
+def nm_v8_is_command_open(command_name):
+    try:
+        return bool(is_command_enabled(str(command_name)))
+    except Exception:
+        return True
+
+
+def nm_v8_is_system_open(system_name):
+    try:
+        return bool(is_system_enabled(str(system_name)))
+    except Exception:
+        return True
+
+
+async def nm_v8_guard(ctx, system_name=None, command_name=None):
+    """Hard guard used by V8 commands.
+
+    This is intentionally inside the command handler, not only bot.check,
+    so old bridges/overrides cannot bypass dashboard System Toggles.
+    """
+    try:
+        if not ctx or not getattr(ctx, "guild", None):
+            return False
+
+        command_name = str(command_name or (ctx.command.name if getattr(ctx, "command", None) else "") or "")
+        system_name = str(system_name or nm_v8_system_key_for_command(command_name))
+
+        if not nm_v8_is_command_open(command_name):
+            embed = discord.Embed(
+                title="🔒 الأمر مقفل",
+                description="الإدارة مقفلة هذا الأمر من الداشبورد.",
+                color=COLOR_RED if "COLOR_RED" in globals() else discord.Color.red()
+            )
+            embed.add_field(name="Command", value=f"`!{command_name}`", inline=True)
+            embed.add_field(name="System", value=f"`{system_name}`", inline=True)
+            embed.set_footer(text=f"{BOT_BRAND} • Dashboard Control")
+            await ctx.reply(embed=embed, delete_after=10)
+            return False
+
+        if not nm_v8_is_system_open(system_name):
+            embed = discord.Embed(
+                title="🔒 النظام مقفل",
+                description="هذا النظام مقفل من لوحة التحكم، لذلك الأمر ما يشتغل الآن.",
+                color=COLOR_RED if "COLOR_RED" in globals() else discord.Color.red()
+            )
+            embed.add_field(name="System", value=f"`{system_name}`", inline=True)
+            embed.add_field(name="Command", value=f"`!{command_name}`", inline=True)
+            embed.set_footer(text=f"{BOT_BRAND} • Dashboard Control")
+            await ctx.reply(embed=embed, delete_after=10)
+            return False
+
+        return True
+    except Exception as e:
+        try:
+            print(f"NM V8 guard error: {e}")
+        except Exception:
+            pass
+        return True
+
+
+def nm_v8_money_display(gid, amount):
+    try:
+        return f"{int(amount):,} {NMCore.coin(gid)}"
+    except Exception:
+        return f"0 {NMCore.coin(gid)}"
+
+
+def nm_v8_clean_command_embed(ctx, title, description="", color=None):
+    try:
+        color = color or (COLOR_PURPLE if "COLOR_PURPLE" in globals() else discord.Color.purple())
+        embed = discord.Embed(
+            title=title,
+            description=description or "",
+            color=color,
+            timestamp=discord.utils.utcnow()
+        )
+        if ctx and getattr(ctx, "author", None):
+            try:
+                embed.set_author(
+                    name=f"{ctx.author.display_name} • NM System",
+                    icon_url=ctx.author.display_avatar.url
+                )
+                embed.set_thumbnail(url=ctx.author.display_avatar.url)
+            except Exception:
+                pass
+        embed.set_footer(text=f"{BOT_BRAND} • Unified Core • Live Sync")
+        return embed
+    except Exception:
+        return discord.Embed(title=title, description=description or "", color=color or discord.Color.blurple())
+
+
+def nm_v8_progress_bar(current, total, size=12):
+    try:
+        current = max(0, int(current)); total = max(1, int(total))
+        filled = max(0, min(size, round((current / total) * size)))
+        return "▰" * filled + "▱" * (size - filled)
+    except Exception:
+        return "▱" * size
+
+
+def nm_v8_casino_name(game):
+    return {
+        "luck": "حظ",
+        "double": "دبل",
+        "slot": "سلوت",
+        "flip": "وجه",
+        "blackjack": "بلاك جاك",
+    }.get(str(game), str(game))
+
+
 def nm_v8_install_commands():
     # Remove old conflicting commands first. Other bot features remain untouched.
     nm_v8_remove_prefix_command('رصيدي','رصيد','balance','راتب','salary','daily','تحويل','transfer','الغني','اغنى','topmoney','rich','حظ','luck','دبل','double','سلوت','slot','وجه','flip','بلاكجاك','bj','blackjack','عقارات','شراء_عقار','ايجار')
 
     @bot.command(name='رصيدي', aliases=['رصيد','balance'])
     async def v8_balance_cmd(ctx, member: discord.Member=None):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "economy", "رصيدي"): return
         member = member or ctx.author; gid=ctx.guild.id; NMCore.ensure_guild(gid, ctx.guild.name)
         bal=NMCore.get_balance(gid, member.id); rank=NMCore.rank(gid, member.id)
         NMCore.activity(gid, 'command', actor_id=ctx.author.id, actor_name=ctx.author.display_name, target_id=member.id, channel_id=ctx.channel.id, message_id=ctx.message.id, title='رصيدي', details=f'Viewed balance of {member.id}')
-        await ctx.reply(f"💰 رصيد {member.mention}: **{bal:,}** {NMCore.coin(gid)}\n🏆 ترتيبك: **#{rank}**")
+        coin = NMCore.coin(gid)
+        embed = nm_v8_clean_command_embed(ctx, "💼 المحفظة", f"محفظة {member.mention}", COLOR_GREEN if "COLOR_GREEN" in globals() else discord.Color.green())
+        embed.add_field(name="💰 الرصيد", value=f"**{bal:,}** {coin}", inline=False)
+        embed.add_field(name="🏆 ترتيب الغنى", value=f"**#{rank}**", inline=True)
+        embed.add_field(name="🧾 المصدر", value="Discord + Dashboard Sync", inline=True)
+        await ctx.reply(embed=embed)
 
     @bot.command(name='راتب', aliases=['salary','daily'])
     async def v8_salary_cmd(ctx):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "economy", "راتب"): return
         gid=ctx.guild.id; uid=ctx.author.id; NMCore.ensure_guild(gid, ctx.guild.name)
         NMCore.ensure_balance(gid, uid); conn=NMCore.db(); cur=conn.cursor(); cur.execute('SELECT last_daily FROM guild_economy WHERE guild_id=? AND user_id=?', (gid,uid)); row=cur.fetchone(); last=nm_v8_int(row[0] if row else 0); now=nm_v8_now()
         if now-last < NM_V8_SALARY_COOLDOWN:
-            conn.close(); remain=NM_V8_SALARY_COOLDOWN-(now-last); await ctx.reply(f"⏳ باقي {remain//60} دقيقة على الراتب."); return
+            conn.close(); remain=NM_V8_SALARY_COOLDOWN-(now-last)
+            embed = nm_v8_clean_command_embed(ctx, "⏳ الراتب غير جاهز", f"باقي تقريبًا **{remain//60} دقيقة**.", COLOR_ORANGE if "COLOR_ORANGE" in globals() else discord.Color.orange())
+            await ctx.reply(embed=embed); return
         tx=NMCore.credit(gid, uid, NM_V8_DAILY_REWARD, 'salary', user_name=ctx.author.display_name, actor_id=uid, actor_name=ctx.author.display_name, channel_id=ctx.channel.id, message_id=ctx.message.id, reason='Salary claim')
         cur.execute('UPDATE guild_economy SET last_daily=? WHERE guild_id=? AND user_id=?', (now,gid,uid)); conn.commit(); conn.close()
-        await ctx.reply(f"✅ استلمت راتبك: **{NM_V8_DAILY_REWARD:,}** {NMCore.coin(gid)}\nرصيدك: **{tx.get('after',0):,}** {NMCore.coin(gid)}")
+        coin = NMCore.coin(gid)
+        embed = nm_v8_clean_command_embed(ctx, "💸 الراتب وصل", f"تم إيداع الراتب في محفظتك يا {ctx.author.mention}.", COLOR_GREEN if "COLOR_GREEN" in globals() else discord.Color.green())
+        embed.add_field(name="📥 دخلت لمحفظتك", value=f"**+{NM_V8_DAILY_REWARD:,}** {coin}", inline=True)
+        embed.add_field(name="💼 رصيدك الآن", value=f"**{tx.get('after',0):,}** {coin}", inline=True)
+        embed.add_field(name="🧾 العملية", value=f"`{str(tx.get('tx_id',''))[:10]}`", inline=True)
+        embed.add_field(name="⏳ الراتب القادم", value="بعد **60 دقيقة**", inline=False)
+        await ctx.reply(embed=embed)
 
     @bot.command(name='تحويل', aliases=['transfer'])
     async def v8_transfer_cmd(ctx, member: discord.Member, amount: int):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "economy", "تحويل"): return
         res=NMCore.transfer(ctx.guild.id, ctx.author.id, member.id, amount, actor_name=ctx.author.display_name, channel_id=ctx.channel.id, message_id=ctx.message.id)
         if not res.get('ok'):
-            await ctx.reply('❌ رصيدك ما يكفي أو المبلغ غير صحيح.'); return
-        await ctx.reply(f"✅ حولت **{amount:,}** {NMCore.coin(ctx.guild.id)} إلى {member.mention}")
+            embed = nm_v8_clean_command_embed(ctx, "❌ فشل التحويل", "رصيدك ما يكفي أو المبلغ غير صحيح.", COLOR_RED if "COLOR_RED" in globals() else discord.Color.red())
+            await ctx.reply(embed=embed); return
+        embed = nm_v8_clean_command_embed(ctx, "✅ تم التحويل", f"تم تحويل المبلغ إلى {member.mention}", COLOR_GREEN if "COLOR_GREEN" in globals() else discord.Color.green())
+        embed.add_field(name="المبلغ", value=f"**{amount:,}** {NMCore.coin(ctx.guild.id)}", inline=True)
+        embed.add_field(name="المستلم", value=member.mention, inline=True)
+        await ctx.reply(embed=embed)
 
     @bot.command(name='الغني', aliases=['اغنى','topmoney','rich'])
     async def v8_rich_cmd(ctx):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "economy", "الغني"): return
         rows=NMCore.top_balances(ctx.guild.id, 10, live_members_only=True)
         if not rows:
             await ctx.reply('ما فيه بيانات اقتصاد للحين.'); return
         lines=[f"**#{i}** <@{uid}> — **{bal:,}** {NMCore.coin(ctx.guild.id)}" for i,(uid,bal) in enumerate(rows,1)]
-        await ctx.reply('🏆 **أغنى اللاعبين**\n'+'\n'.join(lines))
+        embed = nm_v8_clean_command_embed(ctx, "🏆 أغنى اللاعبين", "\n".join(lines), COLOR_YELLOW if "COLOR_YELLOW" in globals() else discord.Color.gold())
+        await ctx.reply(embed=embed)
 
     async def casino_reply(ctx, game, amount):
-        if not ctx.guild: return
-        res=NMCore.play_casino(ctx.guild.id, ctx.author.id, ctx.author.display_name, game, amount, channel_id=ctx.channel.id, message_id=ctx.message.id)
+        if not await nm_v8_guard(ctx, "gambling", nm_v8_casino_name(game)): return
+        gid = ctx.guild.id
+        coin = NMCore.coin(gid)
+        before = NMCore.get_balance(gid, ctx.author.id)
+        res = NMCore.play_casino(gid, ctx.author.id, ctx.author.display_name, game, amount, channel_id=ctx.channel.id, message_id=ctx.message.id)
         if not res.get('ok'):
-            await ctx.reply(f"❌ {res.get('error','خطأ')}"); return
-        if res['outcome']=='win': icon='🎉 ربحت'
-        elif res['outcome']=='draw': icon='🤝 تعادل'
-        else: icon='💀 خسرت'
-        await ctx.reply(f"{icon} **{res['bet']:,}** {NMCore.coin(ctx.guild.id)}\n{res.get('detail','')}\nرصيدك: **{res['balance']:,}** {NMCore.coin(ctx.guild.id)}")
+            embed = nm_v8_clean_command_embed(ctx, "🎰 NM Casino", f"❌ {res.get('error','خطأ')}", COLOR_RED if "COLOR_RED" in globals() else discord.Color.red())
+            embed.add_field(name="💼 رصيدك", value=f"**{before:,}** {coin}", inline=True)
+            embed.add_field(name="🎲 ملاحظة", value="ما فيه سقف رهان؛ الحد الوحيد هو رصيدك.", inline=False)
+            await ctx.reply(embed=embed); return
+        after = res['balance']
+        delta = after - before
+        if res['outcome']=='win':
+            title='🎉 ربحت يا وحش'; color=COLOR_GREEN if "COLOR_GREEN" in globals() else discord.Color.green(); icon='🟢'
+        elif res['outcome']=='draw':
+            title='🤝 تعادل'; color=COLOR_ORANGE if "COLOR_ORANGE" in globals() else discord.Color.orange(); icon='🟡'
+        else:
+            title='💀 خسرت'; color=COLOR_RED if "COLOR_RED" in globals() else discord.Color.red(); icon='🔴'
+        embed = nm_v8_clean_command_embed(ctx, f"🎰 NM Casino • {nm_v8_casino_name(game)}", title, color)
+        embed.add_field(name="🎲 الرهان", value=f"**{res['bet']:,}** {coin}", inline=True)
+        embed.add_field(name="{0} النتيجة".format(icon), value=f"**{res['outcome']}**", inline=True)
+        embed.add_field(name="💵 صافي الحركة", value=f"**{delta:+,}** {coin}", inline=True)
+        if res.get('detail'):
+            embed.add_field(name="🧩 تفاصيل اللعبة", value=str(res.get('detail'))[:900], inline=False)
+        embed.add_field(name="قبل اللعب", value=f"**{before:,}** {coin}", inline=True)
+        embed.add_field(name="بعد اللعب", value=f"**{after:,}** {coin}", inline=True)
+        embed.add_field(name="Audit", value="مسجلة في Money Tracker كـ `casino_bet` و `casino_payout`.", inline=False)
+        await ctx.reply(embed=embed)
 
     @bot.command(name='حظ', aliases=['luck'])
     async def v8_luck_cmd(ctx, amount: str): await casino_reply(ctx, 'luck', amount)
@@ -22266,7 +22437,7 @@ def nm_v8_install_commands():
 
     @bot.command(name='عقارات')
     async def v8_properties_cmd(ctx):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "shop", "عقارات"): return
         rows=NMCore.properties(ctx.guild.id, only_available=True, limit=10)
         if not rows:
             await ctx.reply('ما فيه عقارات متاحة.'); return
@@ -22275,7 +22446,7 @@ def nm_v8_install_commands():
 
     @bot.command(name='شراء_عقار')
     async def v8_buy_property_cmd(ctx, property_id: int):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "shop", "شراء_عقار"): return
         res=NMCore.buy_property(ctx.guild.id, ctx.author.id, property_id, ctx.author.display_name)
         if not res.get('ok'):
             await ctx.reply(f"❌ {res.get('error')}"); return
@@ -22283,7 +22454,7 @@ def nm_v8_install_commands():
 
     @bot.command(name='ايجار')
     async def v8_rent_cmd(ctx):
-        if not ctx.guild: return
+        if not await nm_v8_guard(ctx, "shop", "ايجار"): return
         res=NMCore.collect_rent(ctx.guild.id, ctx.author.id, ctx.author.display_name)
         if not res.get('ok'):
             await ctx.reply(f"❌ {res.get('error')}"); return
@@ -22333,6 +22504,36 @@ def get_top_levels(limit=10):
     except Exception: return []
 
 def dashboard_level_rows(limit=10): return get_top_levels(limit)
+
+
+def nm_v8_style_toggle_status():
+    gid = NMCore.gid()
+    rows = []
+    for system_name, label in [
+        ("economy", "Economy System"),
+        ("gambling", "Casino / Gambling"),
+        ("shop", "Shop / Real Estate"),
+        ("levels", "Level System"),
+        ("protection", "Protection System"),
+    ]:
+        state = "ON ✅" if nm_v8_is_system_open(system_name) else "OFF 🔒"
+        rows.append(f"<tr><td><code>{system_name}</code></td><td>{label}</td><td>{state}</td></tr>")
+    body = f"""
+    <div class='card'><h3>🎨 V8 Style + Toggle Guard</h3>
+    <p class='muted'>أوامر V8 الآن تفحص System Toggles داخل الأمر نفسه، عشان ما يقدر أي bridge قديم يتجاوز الداشبورد.</p>
+    <table class='table'><tr><th>System</th><th>Name</th><th>Status</th></tr>{''.join(rows)}</table>
+    </div>
+    """
+    try:
+        return render_dashboard_page("V8 Style + Toggle Guard", body)
+    except Exception:
+        return body
+
+try:
+    nm_v8_bind_route('/dashboard/v8-style-toggle-status', nm_v8_style_toggle_status, ('GET',))
+except Exception:
+    pass
+
 
 try:
     NMCore.init()
