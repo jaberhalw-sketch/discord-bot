@@ -6,7 +6,7 @@ from nmcore.ui import page
 from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel
 from nmcore.services import real_estate
 from nmcore.services.warnings import summary as warn_summary
-from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update
+from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
 
 DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR_BIT = 0x8
@@ -405,6 +405,13 @@ DASHBOARD_BASE_URL</pre>
 
         g = gid(bot)
         uid = request.args.get("user_id", "").strip()
+        source = request.args.get("source", "").strip()
+        limit_raw = request.args.get("limit", "250").strip()
+
+        try:
+            limit = max(25, min(int(limit_raw or 250), 1000))
+        except Exception:
+            limit = 250
 
         q = "SELECT * FROM money_ledger WHERE guild_id=?"
         params = [g]
@@ -413,22 +420,54 @@ DASHBOARD_BASE_URL</pre>
             q += " AND user_id=?"
             params.append(int(uid))
 
-        q += " ORDER BY id DESC LIMIT 250"
+        if source:
+            q += " AND source_type LIKE ?"
+            params.append(f"{source}%")
+
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
 
         conn = db()
         cur = conn.cursor()
+
         cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("""SELECT source_type, COUNT(*) c,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took
+        FROM money_ledger WHERE guild_id=? GROUP BY source_type ORDER BY c DESC LIMIT 20""", (g,))
+        source_rows = cur.fetchall()
+
         conn.close()
 
+        chips = "".join(
+            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/money-tracker?guild_id={g}&source={esc(r['source_type'])}'>{esc(r['source_type'])} ({int(r['c'])})</a>"
+            for r in source_rows
+        )
+
         trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{r['user_id']}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{r['user_id']}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td></tr>"
             for r in rows
         )
 
-        form = f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID' value='{esc(uid)}'><button>Filter</button></form></div>"
+        form = f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
+            <input name=source placeholder='source_type مثل casino / salary' value='{esc(source)}'>
+            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+        """
 
-        return page("Money Tracker", guild_selector_html(g) + form + f"<div class='card'><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{trs}</table></div>", g)
+        body = guild_selector_html(g) + form + f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No ledger yet.</span>'}</div>"
+        body += f"<div class='card'><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th></tr>{trs}</table></div>"
+
+        return page("Money Tracker", body, g)
 
     @app.route("/dashboard/casino")
     def casino_page():
@@ -439,23 +478,74 @@ DASHBOARD_BASE_URL</pre>
         g = gid(bot)
         conn = db()
         cur = conn.cursor()
-        cur.execute("""
-            SELECT source_label, COUNT(*) c,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid
-            FROM money_ledger
-            WHERE guild_id=? AND source_type LIKE 'casino_%'
-            GROUP BY source_label
-        """, (g,))
-        rows = cur.fetchall()
+
+        cur.execute("""SELECT source_label, COUNT(*) c,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid
+        FROM money_ledger WHERE guild_id=? AND source_type LIKE 'casino_%'
+        GROUP BY source_label ORDER BY c DESC""", (g,))
+        game_rows = cur.fetchall()
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(amount),0) net,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
+        COUNT(*) rows
+        FROM money_ledger
+        WHERE guild_id=? AND source_type LIKE 'casino_%'
+        GROUP BY user_id
+        ORDER BY net ASC
+        LIMIT 10""", (g,))
+        biggest_losers = cur.fetchall()
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(amount),0) net,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
+        COUNT(*) rows
+        FROM money_ledger
+        WHERE guild_id=? AND source_type LIKE 'casino_%'
+        GROUP BY user_id
+        ORDER BY net DESC
+        LIMIT 10""", (g,))
+        biggest_winners = cur.fetchall()
+
+        cur.execute("""SELECT
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=? AND source_type LIKE 'casino_%'""", (g,))
+        total = cur.fetchone()
+
         conn.close()
 
-        trs = "".join(
-            f"<tr><td>{esc(r['source_label'])}</td><td>{r['c']}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td></tr>"
-            for r in rows
+        game_trs = "".join(
+            f"<tr><td>{esc(r['source_label'])}</td><td>{int(r['c']):,}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took'] or 0)-int(r['paid'] or 0):,}</td></tr>"
+            for r in game_rows
         )
 
-        return page("Casino", guild_selector_html(g) + f"<div class='card'><p>No max bet. User can only bet available balance. Bet is deducted first.</p><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th></tr>{trs}</table></div>", g)
+        loser_trs = "".join(
+            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            for r in biggest_losers
+        )
+
+        winner_trs = "".join(
+            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            for r in biggest_winners
+        )
+
+        body = guild_selector_html(g) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Casino Rows</div><div class='stat'>{int(total['rows'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Casino Took</div><div class='stat'>{int(total['took'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Casino Paid</div><div class='stat'>{int(total['paid'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Casino Net</div><div class='stat'>{int(total['took'] or 0)-int(total['paid'] or 0):,}</div></div>
+        </div>
+        <div class='card'><h3>By Game</h3><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>Net For Casino</th></tr>{game_trs}</table></div>
+        <div class='card'><h3>Biggest Losers</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{loser_trs}</table></div>
+        <div class='card'><h3>Biggest Winners</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{winner_trs}</table></div>
+        """
+        return page("Casino", body, g)
 
     @app.route("/dashboard/levels")
     def levels_page():
@@ -501,18 +591,70 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+        uid = request.args.get("user_id", "").strip()
+        status = request.args.get("status", "active").strip()
+
         conn = db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM warnings WHERE guild_id=? ORDER BY id DESC LIMIT 150", (g,))
+
+        q = "SELECT * FROM warnings WHERE guild_id=?"
+        params = [g]
+
+        if uid.isdigit():
+            q += " AND user_id=?"
+            params.append(int(uid))
+
+        if status in {"active", "cleared"}:
+            q += " AND status=?"
+            params.append(status)
+
+        q += " ORDER BY id DESC LIMIT 200"
+        cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("""SELECT user_id, user_name,
+        COUNT(*) total,
+        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active_count,
+        MAX(id) last_id
+        FROM warnings WHERE guild_id=?
+        GROUP BY user_id, user_name
+        ORDER BY active_count DESC, total DESC
+        LIMIT 100""", (g,))
+        grouped = cur.fetchall()
+
         conn.close()
 
+        grouped_trs = "".join(
+            f"<tr><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{int(r['active_count'] or 0):,}</td><td>{int(r['total'] or 0):,}</td><td><a href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
+            for r in grouped
+        )
+
         trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{r['user_id']}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td></tr>"
+            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td><td>{esc(r['moderator_name'])}</td></tr>"
             for r in rows
         )
 
-        return page("Warnings", guild_selector_html(g) + f"<div class='card'><table><tr><th>ID</th><th>User</th><th>Reason</th><th>Status</th></tr>{trs}</table></div>", g)
+        form = f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
+            <select name=status>
+              <option value='active' {'selected' if status == 'active' else ''}>Active</option>
+              <option value='cleared' {'selected' if status == 'cleared' else ''}>Cleared</option>
+              <option value='all' {'selected' if status == 'all' else ''}>All</option>
+            </select>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+        """
+
+        body = guild_selector_html(g) + form
+        body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th></tr>{grouped_trs}</table></div>"
+        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th></tr>{trs}</table></div>"
+
+        return page("Warnings", body, g)
 
     @app.route("/dashboard/protection", methods=["GET", "POST"])
     def protection_page():
@@ -523,6 +665,10 @@ DASHBOARD_BASE_URL</pre>
         g = gid(bot)
 
         if request.method == "POST":
+            if request.form.get("action") == "reset_bad_words":
+                prot_update(g, {"bad_words": get_default_bad_words()})
+                return redirect(f"/dashboard/protection?guild_id={g}")
+
             data = {
                 "enabled": 1 if request.form.get("enabled") else 0,
                 "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
@@ -534,7 +680,40 @@ DASHBOARD_BASE_URL</pre>
             return redirect(f"/dashboard/protection?guild_id={g}")
 
         s = prot_get(g)
+        bad_words_raw = str(s.get("bad_words") or "")
+        bad_count = len([w for w in bad_words_raw.split(",") if w.strip()])
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""SELECT * FROM log_events
+        WHERE guild_id=? AND event_type IN ('protection_warning','protection_link')
+        ORDER BY id DESC LIMIT 50""", (g,))
+        events = cur.fetchall()
+
+        cur.execute("""SELECT * FROM warnings
+        WHERE guild_id=? AND moderator_name LIKE '%NM System%'
+        ORDER BY id DESC LIMIT 50""", (g,))
+        auto_warnings = cur.fetchall()
+        conn.close()
+
+        event_trs = "".join(
+            f"<tr><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['channel_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
+            for r in events
+        )
+
+        warn_trs = "".join(
+            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td></tr>"
+            for r in auto_warnings
+        )
+
         body = guild_selector_html(g) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Protection</div><div class='stat'>{'ON' if s.get('enabled') else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>Bad Words</div><div class='stat'>{bad_count:,}</div></div>
+          <div class='card'><div class='muted'>Delete Messages</div><div class='stat'>{'ON' if s.get('delete_messages') else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>Auto Warnings</div><div class='stat'>{len(auto_warnings):,}</div></div>
+        </div>
+
         <div class='card'>
           <form method=post>
             <input type=hidden name=guild_id value='{g}'>
@@ -544,10 +723,14 @@ DASHBOARD_BASE_URL</pre>
             <label><input type=checkbox name=links_enabled {'checked' if s.get('links_enabled') else ''}> Links</label><br>
             <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label><br><br>
 
-            <textarea name=bad_words style='width:100%;height:120px'>{esc(s.get('bad_words'))}</textarea><br><br>
+            <textarea name=bad_words style='width:100%;height:180px'>{esc(bad_words_raw)}</textarea><br><br>
             <button>Save</button>
+            <button name='action' value='reset_bad_words' style='background:#334155;margin-left:8px'>Reset Default Bad Words</button>
           </form>
         </div>
+
+        <div class='card'><h3>Recent Protection Events</h3><table><tr><th>Type</th><th>User</th><th>Channel</th><th>Title</th><th>Details</th></tr>{event_trs}</table></div>
+        <div class='card'><h3>Recent Auto Warnings</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th></tr>{warn_trs}</table></div>
         """
         return page("Protection", body, g)
 
@@ -615,12 +798,22 @@ DASHBOARD_BASE_URL</pre>
         gs = get_guild_settings(g)
         toggles = all_toggles(g)
 
+        commands_channel_id = int(gs.get("commands_channel_id") or 0)
+        gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
+        logs_channel_id = int(gs.get("logs_channel_id") or 0)
+
         checks = "".join(
             f"<label><input type=checkbox name='toggle_{k}' {'checked' if v else ''}> {k}</label><br>"
             for k, v in toggles.items()
         )
 
         body = guild_selector_html(g) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Commands Room</div><div class='stat'>{f'<#{commands_channel_id}>' if commands_channel_id else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>Gambling Room</div><div class='stat'>{f'<#{gambling_channel_id}>' if gambling_channel_id else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>Logs Room</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
+        </div>
+
         <div class='card'>
           <form method=post>
             <input type=hidden name=guild_id value='{g}'>
@@ -631,13 +824,15 @@ DASHBOARD_BASE_URL</pre>
             <input name=coin_name value='{esc(get_coin_name(g))}'><br><br>
 
             Commands Channel ID<br>
-            <input name=commands_channel_id value='{int(gs.get('commands_channel_id') or 0)}'><br>
+            <input name=commands_channel_id value='{commands_channel_id}'><br>
+            <div class='muted'>If set, economy/levels/real-estate/utility commands only work there.</div><br>
 
             Gambling Channel ID<br>
-            <input name=gambling_channel_id value='{int(gs.get('gambling_channel_id') or 0)}'><br>
+            <input name=gambling_channel_id value='{gambling_channel_id}'><br>
+            <div class='muted'>If set, casino commands only work there.</div><br>
 
             Logs Channel ID<br>
-            <input name=logs_channel_id value='{int(gs.get('logs_channel_id') or 0)}'><br><br>
+            <input name=logs_channel_id value='{logs_channel_id}'><br><br>
 
             <h3>System Toggles</h3>
             {checks}
@@ -732,6 +927,9 @@ DASHBOARD_BASE_URL</pre>
           <p>Bot Guilds Count: <code>{len(bot_ids)}</code></p>
           <p>Current Guild Connected: {'✅' if current_connected else '❌'}</p>
           <p>Current Guild: <b>{esc(current_name)}</b> <code>{esc(g)}</code></p>
+          <p>Commands Room: <code>{esc(get_guild_settings(g).get('commands_channel_id') if g else 0)}</code></p>
+          <p>Gambling Room: <code>{esc(get_guild_settings(g).get('gambling_channel_id') if g else 0)}</code></p>
+          <p>Logs Room: <code>{esc(get_guild_settings(g).get('logs_channel_id') if g else 0)}</code></p>
           <p>DB: <code>{esc(DB_FILE)}</code></p>
           <p>Discord Login: ✅</p>
           <p>Redirect URI: <code>{esc(redirect_uri())}</code></p>
