@@ -1,3 +1,4 @@
+import os
 import discord
 from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
 from nmcore.services.levels import message_xp
@@ -7,6 +8,32 @@ from nmcore.services import warnings as warnsvc
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
+
+
+DEFAULT_DEV_OWNER_IDS = {"881722045031915521"}
+
+
+def dev_mode_enabled() -> bool:
+    return os.getenv("NM_DEV_MODE", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+def dev_owner_ids() -> set[int]:
+    raw = os.getenv("NM_OWNER_IDS", "").strip()
+    parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()] if raw else []
+    ids = set()
+
+    for p in parts:
+        if p.isdigit():
+            ids.add(int(p))
+
+    if not ids:
+        ids = {int(x) for x in DEFAULT_DEV_OWNER_IDS if x.isdigit()}
+
+    return ids
+
+
+def is_dev_owner(user_id:int) -> bool:
+    return int(user_id or 0) in dev_owner_ids()
 
 
 def setup_bot(bot):
@@ -25,6 +52,15 @@ def setup_bot(bot):
             return True
 
         ensure_guild(ctx.guild.id, ctx.guild.name)
+
+        if dev_mode_enabled() and not is_dev_owner(ctx.author.id):
+            await ctx.reply(embed=embed(
+                "🚧 البوت قيد التطوير",
+                "حاليًا أوامر NM System مقفلة للتجربة والتطوير. بتشتغل للجميع بعد ما يجهز النظام.",
+                "warn",
+                ctx.author
+            ))
+            return False
 
         sys = command_system(ctx.command.name)
 
