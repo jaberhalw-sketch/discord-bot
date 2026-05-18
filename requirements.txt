@@ -1,4 +1,0 @@
-discord.py==2.4.0
-flask
-openai
-psycopg[binary]>=3.2.0
