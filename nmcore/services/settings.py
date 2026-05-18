@@ -92,3 +92,24 @@ def update_channel(guild_id:int, key:str, value:int):
 
 def command_system(command_name:str)->str:
     return COMMAND_SYSTEM.get(str(command_name or "").lower(), COMMAND_SYSTEM.get(str(command_name or ""), "utility"))
+
+def get_command_channel_id(guild_id:int)->int:
+    gs = get_guild_settings(guild_id)
+    return int(gs.get("commands_channel_id") or 0)
+
+def get_gambling_channel_id(guild_id:int)->int:
+    gs = get_guild_settings(guild_id)
+    return int(gs.get("gambling_channel_id") or 0)
+
+def get_logs_channel_id(guild_id:int)->int:
+    gs = get_guild_settings(guild_id)
+    return int(gs.get("logs_channel_id") or 0)
+
+def channel_restriction_for_system(guild_id:int, system_key:str)->int:
+    system_key = str(system_key or "")
+    if system_key == "gambling":
+        return get_gambling_channel_id(guild_id)
+    if system_key in {"economy", "levels", "real_estate", "shop", "giveaway", "utility"}:
+        return get_command_channel_id(guild_id)
+    return 0
+
