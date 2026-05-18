@@ -1,0 +1,16 @@
+import time, json
+from nmcore.db import db
+from nmcore.config import LIVE_ACTIVITY_LIMIT
+
+def record(guild_id:int, actor_id:int, actor_name:str, activity_type:str, title:str, details:str="", amount:int=0):
+    conn=db(); cur=conn.cursor()
+    cur.execute("""INSERT INTO live_activity (guild_id,actor_id,actor_name,activity_type,title,details,amount,created_at)
+    VALUES (?,?,?,?,?,?,?,?)""", (int(guild_id),int(actor_id or 0),str(actor_name or "")[:120],str(activity_type),str(title)[:200],str(details)[:1200],int(amount or 0),int(time.time())))
+    cur.execute("""DELETE FROM live_activity WHERE id NOT IN (SELECT id FROM live_activity ORDER BY id DESC LIMIT ?)""", (LIVE_ACTIVITY_LIMIT,))
+    conn.commit(); conn.close()
+
+def log_event(guild_id:int, event_type:str, user_id:int=0, user_name:str="", channel_id:int=0, channel_name:str="", title:str="", details:str="", metadata=None):
+    conn=db(); cur=conn.cursor()
+    cur.execute("""INSERT INTO log_events (guild_id,event_type,user_id,user_name,channel_id,channel_name,title,details,metadata_json,created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)""", (int(guild_id),str(event_type),int(user_id or 0),str(user_name)[:120],int(channel_id or 0),str(channel_name)[:120],str(title)[:200],str(details)[:2000],json.dumps(metadata or {},ensure_ascii=False),int(time.time())))
+    conn.commit(); conn.close()
