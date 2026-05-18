@@ -8,6 +8,7 @@ from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin
 from nmcore.ui import embed
 
+
 def setup_bot(bot):
     economy.setup(bot)
     casino.setup(bot)
@@ -51,6 +52,7 @@ def setup_bot(bot):
 
                 bad_word = ""
                 bad = False
+
                 if bool(s.get("bad_words_enabled")):
                     bad_word = matched_bad_word(message.content, words)
                     bad = bool(bad_word) or contains_bad(message.content, words)
@@ -66,6 +68,7 @@ def setup_bot(bot):
 
                     if bad:
                         reason = "استخدام كلمة ممنوعة في السيرفر"
+
                         warnsvc.add_warning(
                             message.guild.id,
                             message.author.id,
@@ -91,8 +94,7 @@ def setup_bot(bot):
                         try:
                             e = embed(
                                 "🛡️ رسالة ممنوعة",
-                                f"{message.author.mention}
-تم حذف الرسالة وإعطاؤك **تحذير** بسبب استخدام كلام ممنوع.",
+                                f"{message.author.mention}\nتم حذف الرسالة وإعطاؤك **تحذير** بسبب استخدام كلام ممنوع.",
                                 "bad",
                                 message.author
                             )
@@ -101,6 +103,7 @@ def setup_bot(bot):
                             await message.channel.send(embed=e, delete_after=8)
                         except Exception:
                             pass
+
                     else:
                         log_event(
                             message.guild.id,
@@ -117,8 +120,7 @@ def setup_bot(bot):
                             await message.channel.send(
                                 embed=embed(
                                     "🔗 رابط ممنوع",
-                                    f"{message.author.mention}
-تم حذف الرابط حسب إعدادات الحماية.",
+                                    f"{message.author.mention}\nتم حذف الرابط حسب إعدادات الحماية.",
                                     "warn",
                                     message.author
                                 ),
@@ -128,6 +130,7 @@ def setup_bot(bot):
                             pass
 
                     return
+
         except Exception as e:
             try:
                 log_event(
