@@ -140,6 +140,13 @@ def setup(bot):
 
     @bot.command(name="تحويل", aliases=["transfer"])
     async def transfer(ctx, member:discord.Member, amount:int):
+        if amount <= 0:
+            await ctx.reply(embed=error("مبلغ غير صحيح", "اكتب مبلغ أكبر من 0.", ctx.author))
+            return
+        if member.id == ctx.author.id:
+            await ctx.reply(embed=error("تحويل مرفوض", "ما تقدر تحول لنفسك.", ctx.author))
+            return
+
         res = economy.transfer(
             ctx.guild.id,
             ctx.author.id,
@@ -152,7 +159,12 @@ def setup(bot):
         )
 
         if not res["ok"]:
-            await ctx.reply(embed=error("فشل التحويل", "رصيدك ما يكفي.", ctx.author))
+            msg = "رصيدك ما يكفي."
+            if res.get("error") == "invalid_amount":
+                msg = "المبلغ غير صحيح."
+            elif res.get("error") == "same_user":
+                msg = "ما تقدر تحول لنفسك."
+            await ctx.reply(embed=error("فشل التحويل", msg, ctx.author))
             return
 
         e = success("تحويل ناجح", f"{ctx.author.mention} ➜ {member.mention}", ctx.author)
@@ -177,6 +189,10 @@ def setup(bot):
     @bot.command(name="اعطاءفلوس")
     @commands.has_permissions(administrator=True)
     async def give_money(ctx, member:discord.Member, amount:int):
+        if amount <= 0:
+            await ctx.reply(embed=error("مبلغ غير صحيح", "اكتب مبلغ أكبر من 0.", ctx.author))
+            return
+
         tx = economy.credit(
             ctx.guild.id,
             member.id,
@@ -189,6 +205,10 @@ def setup(bot):
             channel_id=ctx.channel.id,
             message_id=ctx.message.id
         )
+        if not tx.get("ok"):
+            await ctx.reply(embed=error("فشل العملية", "المبلغ غير صحيح أو كبير جدًا.", ctx.author))
+            return
+
         e = success("تم إعطاء فلوس", f"المستلم: {member.mention}", ctx.author)
         e.add_field(name="المبلغ", value=coin(ctx.guild.id, amount), inline=True)
         e.add_field(name="رصيده الآن", value=coin(ctx.guild.id, tx["after"]), inline=True)
@@ -197,6 +217,10 @@ def setup(bot):
     @bot.command(name="سحبفلوس")
     @commands.has_permissions(administrator=True)
     async def take_money(ctx, member:discord.Member, amount:int):
+        if amount <= 0:
+            await ctx.reply(embed=error("مبلغ غير صحيح", "اكتب مبلغ أكبر من 0.", ctx.author))
+            return
+
         tx = economy.debit(
             ctx.guild.id,
             member.id,
