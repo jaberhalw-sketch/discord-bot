@@ -2,13 +2,13 @@ import discord
 from discord.ext import commands
 from nmcore.services import warnings as warnsvc
 from nmcore.services.activity import log_event
-from nmcore.services.settings import get_logs_channel_id
+from nmcore.services.log_channels import get_log_channel
 from nmcore.ui import embed, success, error
 
 
 async def send_mod_log(ctx, title, description, color="warn"):
     try:
-        ch_id = get_logs_channel_id(ctx.guild.id)
+        ch_id = get_log_channel(ctx.guild.id, "warnings")
         if not ch_id:
             return
 
