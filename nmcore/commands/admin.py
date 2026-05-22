@@ -1,17 +1,8 @@
 import discord
 from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
 from nmcore.services.activity import log_event
+from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel
 from nmcore.ui import embed, success, error
-
-
-LOG_CHANNELS = [
-    ("nm-logs", "اللوق الرئيسي للنظام"),
-    ("protection-logs", "لوقات الحماية والكلام الممنوع"),
-    ("economy-logs", "لوقات الاقتصاد والتحويلات"),
-    ("casino-logs", "لوقات القمار والكازينو"),
-    ("warnings-logs", "لوقات التحذيرات والمخالفات"),
-    ("join-leave-logs", "لوقات الدخول والخروج"),
-]
 
 
 async def find_or_create_category(guild, name="NM LOGS"):
@@ -126,23 +117,29 @@ def setup(bot):
             return
 
         me = ctx.guild.me
+        missing = []
+
         if not me.guild_permissions.manage_channels:
-            await ctx.reply(embed=error(
-                "صلاحية ناقصة",
-                "البوت يحتاج صلاحية **Manage Channels** عشان ينشئ رومات اللوقات.",
+            missing.append("Manage Channels")
+        if not me.guild_permissions.view_audit_log:
+            missing.append("View Audit Log")
+        if not me.guild_permissions.embed_links:
+            missing.append("Embed Links")
+
+        if missing:
+            await ctx.reply(embed=embed(
+                "⚠️ صلاحيات ناقصة",
+                "يفضل تعطي البوت:\n" + "\n".join(f"- {m}" for m in missing) + "\n\nيقدر يكمل إذا عنده Manage Channels، لكن بعض التفاصيل مثل سبب الطرد تحتاج View Audit Log.",
+                "warn",
                 ctx.author
             ))
-            return
 
-        if not me.guild_permissions.manage_roles:
-            # Not required, but useful warning because category permissions may be limited.
-            warn_note = "ملاحظة: البوت ما عنده Manage Roles، فممكن ما يضبط صلاحيات الرومات بالكامل."
-        else:
-            warn_note = ""
+            if not me.guild_permissions.manage_channels:
+                return
 
         status = await ctx.reply(embed=embed(
             "🛠️ جاري تجهيز اللوقات",
-            "بنشئ Category ورومات اللوقات إذا مو موجودة...",
+            "بنشئ Category ورومات اللوقات المنظمة إذا مو موجودة...",
             "warn",
             ctx.author
         ))
@@ -153,16 +150,17 @@ def setup(bot):
             existing = []
             channel_map = {}
 
-            for name, topic in LOG_CHANNELS:
+            for key, (name, topic) in LOG_CHANNELS.items():
                 ch, was_created = await find_or_create_text_channel(ctx.guild, category, name, topic)
-                channel_map[name] = ch
+                channel_map[key] = ch
+                set_log_channel(ctx.guild.id, key, ch.id)
 
                 if was_created:
-                    created.append(ch.mention)
+                    created.append(f"{ch.mention} `({key})`")
                 else:
-                    existing.append(ch.mention)
+                    existing.append(f"{ch.mention} `({key})`")
 
-            main_log_channel = channel_map.get("nm-logs")
+            main_log_channel = channel_map.get("general")
             if main_log_channel:
                 update_channel(ctx.guild.id, "logs_channel_id", main_log_channel.id)
 
@@ -173,7 +171,7 @@ def setup(bot):
                 ctx.author.display_name,
                 ctx.channel.id,
                 ctx.channel.name,
-                "Logs setup completed",
+                "Advanced logs setup completed",
                 f"Category={category.id}, MainLog={main_log_channel.id if main_log_channel else 0}"
             )
 
@@ -185,12 +183,12 @@ def setup(bot):
 
             e.add_field(
                 name="تم إنشاؤها",
-                value="\n".join(created) if created else "ما فيه جديد، كلها موجودة.",
+                value="\n".join(created[:15]) if created else "ما فيه جديد، كلها موجودة.",
                 inline=False
             )
             e.add_field(
                 name="كانت موجودة",
-                value="\n".join(existing) if existing else "ولا روم كان موجود قبل.",
+                value="\n".join(existing[:15]) if existing else "ولا روم كان موجود قبل.",
                 inline=False
             )
             e.add_field(
@@ -199,9 +197,6 @@ def setup(bot):
                 inline=False
             )
 
-            if warn_note:
-                e.add_field(name="تنبيه", value=warn_note, inline=False)
-
             try:
                 await status.edit(embed=e)
             except Exception:
@@ -209,8 +204,8 @@ def setup(bot):
 
             if main_log_channel:
                 await main_log_channel.send(embed=embed(
-                    "✅ NM Logs Ready",
-                    f"تم تجهيز اللوقات بواسطة {ctx.author.mention}.\nأي لوقات مهمة بتظهر هنا.",
+                    "✅ NM Advanced Logs Ready",
+                    f"تم تجهيز اللوقات بواسطة {ctx.author.mention}.\nكل نوع لوق صار له روم مرتب.",
                     "ok",
                     ctx.author
                 ))
