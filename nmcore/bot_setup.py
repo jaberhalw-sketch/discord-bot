@@ -1,6 +1,6 @@
 import os
 import discord
-from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
+from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system, get_logs_channel_id
 from nmcore.services.levels import message_xp
 from nmcore.services.protection import get_settings, contains_bad, has_link, matched_bad_word
 from nmcore.services.activity import log_event
@@ -34,6 +34,21 @@ def dev_owner_ids() -> set[int]:
 
 def is_dev_owner(user_id:int) -> bool:
     return int(user_id or 0) in dev_owner_ids()
+
+
+async def send_guild_log(bot, guild, title, description="", color="info"):
+    try:
+        log_channel_id = get_logs_channel_id(guild.id)
+        if not log_channel_id:
+            return
+
+        ch = guild.get_channel(int(log_channel_id))
+        if not ch:
+            return
+
+        await ch.send(embed=embed(title, description, color))
+    except Exception:
+        pass
 
 
 def setup_bot(bot):
@@ -140,6 +155,14 @@ def setup_bot(bot):
                             {"matched": bad_word}
                         )
 
+                        await send_guild_log(
+                            bot,
+                            message.guild,
+                            "🛡️ Protection Warning",
+                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nAction: deleted message + warning\nMatched: `{bad_word or 'hidden'}`",
+                            "bad"
+                        )
+
                         try:
                             e = embed(
                                 "🛡️ رسالة ممنوعة",
@@ -163,6 +186,14 @@ def setup_bot(bot):
                             message.channel.name,
                             "Link blocked",
                             message.content[:500]
+                        )
+
+                        await send_guild_log(
+                            bot,
+                            message.guild,
+                            "🔗 Link Blocked",
+                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}",
+                            "warn"
                         )
 
                         try:
@@ -214,7 +245,21 @@ def setup_bot(bot):
     async def on_member_join(member):
         ensure_guild(member.guild.id, member.guild.name)
         log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
+        await send_guild_log(
+            bot,
+            member.guild,
+            "📥 Member Joined",
+            f"{member.mention} (`{member.id}`)",
+            "ok"
+        )
 
     @bot.event
     async def on_member_remove(member):
         log_event(member.guild.id, "member_leave", member.id, member.display_name, title="Member left")
+        await send_guild_log(
+            bot,
+            member.guild,
+            "📤 Member Left",
+            f"{member.display_name} (`{member.id}`)",
+            "warn"
+        )
