@@ -1,10 +1,11 @@
 import os
 import discord
-from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system, get_logs_channel_id
+from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
 from nmcore.services.levels import message_xp
 from nmcore.services.protection import get_settings, contains_bad, has_link, matched_bad_word
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
+from nmcore.services.log_channels import get_log_channel
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
@@ -36,19 +37,64 @@ def is_dev_owner(user_id:int) -> bool:
     return int(user_id or 0) in dev_owner_ids()
 
 
-async def send_guild_log(bot, guild, title, description="", color="info"):
+def fmt_dt(dt):
     try:
-        log_channel_id = get_logs_channel_id(guild.id)
-        if not log_channel_id:
+        return f"<t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)"
+    except Exception:
+        return "Unknown"
+
+
+def role_list(member):
+    try:
+        roles = [r.mention for r in member.roles if r.name != "@everyone"]
+        return "\n".join(roles[:30]) if roles else "No roles"
+    except Exception:
+        return "Unknown"
+
+
+async def send_log(bot, guild, log_key, title, description="", color="info", member=None):
+    try:
+        ch_id = get_log_channel(guild.id, log_key)
+        if not ch_id:
             return
 
-        ch = guild.get_channel(int(log_channel_id))
+        ch = guild.get_channel(int(ch_id))
         if not ch:
             return
 
-        await ch.send(embed=embed(title, description, color))
+        await ch.send(embed=embed(title, description, color, member))
     except Exception:
         pass
+
+
+async def audit_reason(guild, action, target_id):
+    try:
+        async for entry in guild.audit_logs(limit=8, action=action):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(target_id):
+                return entry.user, entry.reason or "No reason"
+    except Exception:
+        pass
+    return None, "Unknown / No audit permission"
+
+
+async def detect_leave_type(member):
+    # Ban check first
+    try:
+        async for entry in member.guild.audit_logs(limit=8, action=discord.AuditLogAction.ban):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(member.id):
+                return "ban", entry.user, entry.reason or "No reason"
+    except Exception:
+        pass
+
+    # Kick check
+    try:
+        async for entry in member.guild.audit_logs(limit=8, action=discord.AuditLogAction.kick):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(member.id):
+                return "kick", entry.user, entry.reason or "No reason"
+    except Exception:
+        pass
+
+    return "left", None, "Left by themselves"
 
 
 def setup_bot(bot):
@@ -99,6 +145,20 @@ def setup_bot(bot):
             return False
 
         return True
+
+    @bot.event
+    async def on_command_completion(ctx):
+        if ctx.guild and ctx.command:
+            log_event(ctx.guild.id, "command_used", ctx.author.id, ctx.author.display_name, ctx.channel.id, ctx.channel.name, ctx.command.name, ctx.message.content[:500])
+            await send_log(
+                bot,
+                ctx.guild,
+                "commands",
+                "⌨️ Command Used",
+                f"User: {ctx.author.mention} (`{ctx.author.id}`)\nChannel: {ctx.channel.mention}\nCommand: `{ctx.command.name}`\nContent: `{ctx.message.content[:800]}`",
+                "info",
+                ctx.author
+            )
 
     @bot.event
     async def on_message(message):
@@ -155,12 +215,14 @@ def setup_bot(bot):
                             {"matched": bad_word}
                         )
 
-                        await send_guild_log(
+                        await send_log(
                             bot,
                             message.guild,
+                            "protection",
                             "🛡️ Protection Warning",
-                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nAction: deleted message + warning\nMatched: `{bad_word or 'hidden'}`",
-                            "bad"
+                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nAction: deleted message + warning\nMatched: `{bad_word or 'hidden'}`\nMessage: `{message.content[:800]}`",
+                            "bad",
+                            message.author
                         )
 
                         try:
@@ -188,12 +250,14 @@ def setup_bot(bot):
                             message.content[:500]
                         )
 
-                        await send_guild_log(
+                        await send_log(
                             bot,
                             message.guild,
+                            "protection",
                             "🔗 Link Blocked",
-                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}",
-                            "warn"
+                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nMessage: `{message.content[:800]}`",
+                            "warn",
+                            message.author
                         )
 
                         try:
@@ -242,24 +306,157 @@ def setup_bot(bot):
         await bot.process_commands(message)
 
     @bot.event
+    async def on_message_delete(message):
+        if not message.guild or message.author.bot:
+            return
+
+        attachments = "\n".join(a.url for a in getattr(message, "attachments", [])[:5]) or "None"
+        content = message.content or "[No text]"
+
+        log_event(message.guild.id, "message_delete", message.author.id, message.author.display_name, message.channel.id, message.channel.name, "Message deleted", content[:1000])
+        await send_log(
+            bot,
+            message.guild,
+            "messages",
+            "🗑️ Message Deleted",
+            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nContent: `{content[:900]}`\nAttachments: {attachments}",
+            "warn",
+            message.author
+        )
+
+    @bot.event
+    async def on_message_edit(before, after):
+        if not before.guild or before.author.bot:
+            return
+        if before.content == after.content:
+            return
+
+        log_event(before.guild.id, "message_edit", before.author.id, before.author.display_name, before.channel.id, before.channel.name, "Message edited", f"Before: {before.content[:500]} | After: {after.content[:500]}")
+        await send_log(
+            bot,
+            before.guild,
+            "messages",
+            "✏️ Message Edited",
+            f"User: {before.author.mention} (`{before.author.id}`)\nChannel: {before.channel.mention}\nBefore: `{before.content[:700]}`\nAfter: `{after.content[:700]}`",
+            "info",
+            before.author
+        )
+
+    @bot.event
     async def on_member_join(member):
         ensure_guild(member.guild.id, member.guild.name)
         log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
-        await send_guild_log(
+
+        await send_log(
             bot,
             member.guild,
+            "join_leave",
             "📥 Member Joined",
-            f"{member.mention} (`{member.id}`)",
-            "ok"
+            f"User: {member.mention} (`{member.id}`)\nAccount Created: {fmt_dt(member.created_at)}\nBot: `{member.bot}`",
+            "ok",
+            member
         )
 
     @bot.event
     async def on_member_remove(member):
-        log_event(member.guild.id, "member_leave", member.id, member.display_name, title="Member left")
-        await send_guild_log(
-            bot,
-            member.guild,
-            "📤 Member Left",
-            f"{member.display_name} (`{member.id}`)",
-            "warn"
+        leave_type, moderator, reason = await detect_leave_type(member)
+        title = "📤 Member Left"
+        color = "warn"
+
+        if leave_type == "kick":
+            title = "👢 Member Kicked"
+            color = "bad"
+        elif leave_type == "ban":
+            title = "🔨 Member Banned"
+            color = "bad"
+
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "None"
+
+        details = (
+            f"User: **{member}** (`{member.id}`)\n"
+            f"Type: `{leave_type}`\n"
+            f"Moderator: {mod_text}\n"
+            f"Reason: `{reason}`\n"
+            f"Account Created: {fmt_dt(member.created_at)}\n"
+            f"Joined Server: {fmt_dt(member.joined_at) if member.joined_at else 'Unknown'}\n"
+            f"Roles Before Leaving:\n{role_list(member)}"
         )
+
+        log_event(member.guild.id, f"member_{leave_type}", member.id, member.display_name, title=title, details=details[:1900])
+        await send_log(bot, member.guild, "join_leave", title, details, color, member)
+
+    @bot.event
+    async def on_member_ban(guild, user):
+        moderator, reason = await audit_reason(guild, discord.AuditLogAction.ban, user.id)
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
+
+        log_event(guild.id, "member_ban", user.id, str(user), title="Member banned", details=f"By={mod_text}, Reason={reason}")
+        await send_log(
+            bot,
+            guild,
+            "join_leave",
+            "🔨 Member Banned",
+            f"User: **{user}** (`{user.id}`)\nModerator: {mod_text}\nReason: `{reason}`\nAccount Created: {fmt_dt(user.created_at)}",
+            "bad"
+        )
+
+    @bot.event
+    async def on_member_unban(guild, user):
+        moderator, reason = await audit_reason(guild, discord.AuditLogAction.unban, user.id)
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
+
+        log_event(guild.id, "member_unban", user.id, str(user), title="Member unbanned", details=f"By={mod_text}, Reason={reason}")
+        await send_log(
+            bot,
+            guild,
+            "join_leave",
+            "🔓 Member Unbanned",
+            f"User: **{user}** (`{user.id}`)\nModerator: {mod_text}\nReason: `{reason}`",
+            "ok"
+        )
+
+    @bot.event
+    async def on_member_update(before, after):
+        if before.roles != after.roles:
+            before_ids = {r.id for r in before.roles}
+            after_ids = {r.id for r in after.roles}
+
+            added = [r.mention for r in after.roles if r.id not in before_ids and r.name != "@everyone"]
+            removed = [r.mention for r in before.roles if r.id not in after_ids and r.name != "@everyone"]
+
+            details = f"User: {after.mention} (`{after.id}`)\nAdded: {', '.join(added) if added else 'None'}\nRemoved: {', '.join(removed) if removed else 'None'}"
+            log_event(after.guild.id, "member_roles_update", after.id, after.display_name, title="Roles changed", details=details)
+            await send_log(bot, after.guild, "roles", "🎭 Roles Updated", details, "info", after)
+
+        if before.nick != after.nick:
+            details = f"User: {after.mention} (`{after.id}`)\nBefore: `{before.nick}`\nAfter: `{after.nick}`"
+            log_event(after.guild.id, "member_nick_update", after.id, after.display_name, title="Nickname changed", details=details)
+            await send_log(bot, after.guild, "roles", "🏷️ Nickname Updated", details, "info", after)
+
+    @bot.event
+    async def on_guild_channel_create(channel):
+        log_event(channel.guild.id, "channel_create", channel.id, channel.name, channel.id, channel.name, "Channel created", str(channel))
+        await send_log(bot, channel.guild, "server", "➕ Channel Created", f"Channel: {channel.mention if hasattr(channel, 'mention') else channel.name}\nID: `{channel.id}`\nType: `{channel.type}`", "ok")
+
+    @bot.event
+    async def on_guild_channel_delete(channel):
+        log_event(channel.guild.id, "channel_delete", channel.id, channel.name, 0, channel.name, "Channel deleted", str(channel))
+        await send_log(bot, channel.guild, "server", "➖ Channel Deleted", f"Name: **{channel.name}**\nID: `{channel.id}`\nType: `{channel.type}`", "bad")
+
+    @bot.event
+    async def on_voice_state_update(member, before, after):
+        if before.channel == after.channel:
+            return
+
+        if before.channel and after.channel:
+            title = "🔀 Voice Moved"
+            details = f"User: {member.mention} (`{member.id}`)\nFrom: **{before.channel.name}**\nTo: **{after.channel.name}**"
+        elif after.channel:
+            title = "🔊 Voice Joined"
+            details = f"User: {member.mention} (`{member.id}`)\nChannel: **{after.channel.name}**"
+        else:
+            title = "🔇 Voice Left"
+            details = f"User: {member.mention} (`{member.id}`)\nChannel: **{before.channel.name}**"
+
+        log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
+        await send_log(bot, member.guild, "voice", title, details, "info", member)
