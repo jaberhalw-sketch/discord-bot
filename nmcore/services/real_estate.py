@@ -3,6 +3,8 @@ from nmcore.db import db
 from nmcore.services.economy import debit, credit
 from nmcore.services.activity import record
 
+RENT_COOLDOWN_SECONDS = 3 * 60 * 60
+
 PROPERTY_TYPES={
     "room":{"name":"Small Room","count":20,"price":25000,"rent":4000},
     "apartment":{"name":"Apartment","count":10,"price":100000,"rent":8000},
