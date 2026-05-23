@@ -1,13 +1,15 @@
 import os
+import asyncio
 import discord
 from discord.ext import commands
-from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
+from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system, is_dev_mode_enabled
 from nmcore.services.levels import message_xp
 from nmcore.services.protection import get_settings, check_message, is_ignored_channel, is_whitelisted_member
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
 from nmcore.services.log_channels import get_log_channel
 from nmcore.services import antiraid
+from nmcore.services import guides
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
@@ -183,7 +185,29 @@ async def handle_antiraid_action(bot, guild, action_type, executor, target_text,
 
 
 
+
+_GUIDE_LOOP_STARTED = False
+
+async def guide_background_loop(bot):
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await guides.send_all_due_guides(bot, force=False)
+        except Exception:
+            pass
+        await asyncio.sleep(10 * 60)
+
+
+
 def setup_bot(bot):
+    global _GUIDE_LOOP_STARTED
+    if not _GUIDE_LOOP_STARTED:
+        _GUIDE_LOOP_STARTED = True
+        try:
+            bot.loop.create_task(guide_background_loop(bot))
+        except Exception:
+            pass
+
     economy.setup(bot)
     casino.setup(bot)
     levels.setup(bot)
@@ -200,7 +224,7 @@ def setup_bot(bot):
 
         ensure_guild(ctx.guild.id, ctx.guild.name)
 
-        if dev_mode_enabled() and not is_dev_owner(ctx.author.id):
+        if is_dev_mode_enabled(ctx.guild.id) and not is_dev_owner(ctx.author.id):
             await ctx.reply(embed=embed(
                 "🚧 البوت قيد التطوير",
                 "حاليًا أوامر NM System مقفلة للتجربة والتطوير. بتشتغل للجميع بعد ما يجهز النظام.",
