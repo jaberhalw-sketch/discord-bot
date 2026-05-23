@@ -40,6 +40,7 @@ def page(title, body, guild_id=0):
             ("🧪 Full Check",f"/dashboard/full-check{q}"),
             ("📘 Command Center",f"/dashboard/commands{q}"),
             ("🧩 Setup Status",f"/dashboard/setup{q}"),
+            ("🪄 Setup Wizard",f"/dashboard/setup-wizard{q}"),
             ("🩺 Health",f"/dashboard/health{q}"),
         ]),
         ("Money / Economy", [
@@ -48,6 +49,7 @@ def page(title, body, guild_id=0):
             ("📝 Post Rewards",f"/dashboard/post-rewards{q}"),
             ("🚀 Boosts",f"/dashboard/boosts{q}"),
             ("🎰 Casino",f"/dashboard/casino{q}"),
+            ("🎰 Casino Controls",f"/dashboard/casino-controls{q}"),
             ("🛒 Real Estate Shop",f"/dashboard/shop{q}"),
             ("🏘️ Real Estate Admin",f"/dashboard/real-estate{q}"),
         ]),
@@ -55,6 +57,7 @@ def page(title, body, guild_id=0):
             ("📊 Levels",f"/dashboard/levels{q}"),
             ("🎁 Giveaways",f"/dashboard/giveaways{q}"),
             ("👤 User Lookup",f"/dashboard/user{q}"),
+            ("🎭 Game Roles",f"/dashboard/game-roles{q}"),
         ]),
         ("Safety / Moderation", [
             ("⚠️ Warnings",f"/dashboard/warnings{q}"),
