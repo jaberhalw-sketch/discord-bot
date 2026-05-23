@@ -13,6 +13,8 @@ from nmcore.services import guides
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways, lfg, game_roles
 from nmcore.ui import embed
+from nmcore.services import boost_rewards
+from nmcore.services import post_rewards
 
 
 DEFAULT_DEV_OWNER_IDS = {"881722045031915521"}
@@ -389,6 +391,19 @@ def setup_bot(bot):
 
         ensure_guild(message.guild.id, message.guild.name)
 
+        # Track Discord server boosts and post rewards before other processing.
+        try:
+            msg_type = str(getattr(message, "type", "")).lower()
+            if "premium" in msg_type or "boost" in msg_type:
+                boost_rewards.record_boost_message(message)
+        except Exception:
+            pass
+
+        try:
+            post_rewards.reward_message(message)
+        except Exception:
+            pass
+
         try:
             s = get_settings(message.guild.id)
 
@@ -718,4 +733,3 @@ def setup_bot(bot):
 
         log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
         await send_log(bot, member.guild, "voice", title, details, "info", member)
-
