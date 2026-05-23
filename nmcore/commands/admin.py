@@ -8,6 +8,7 @@ from nmcore.services.diagnostics import system_status
 from nmcore.services import antiraid
 from nmcore.services import security
 from nmcore.services import readiness
+from nmcore.services import reports
 from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
@@ -103,7 +104,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -192,6 +193,94 @@ def setup(bot):
 
 
 
+
+
+
+    @bot.command(name="تقرير_النظام", aliases=["system_report"])
+    async def system_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        ov = reports.system_overview(ctx.guild.id)
+
+        e = embed(
+            "📊 تقرير النظام",
+            f"DB: `{ov['db_file']}`\nSize: `{ov['db_size']}`\nCoin: **{ov['coin_name']}**",
+            "info",
+            ctx.author
+        )
+        e.add_field(name="Logs", value=f"{ov['logs_mapped']}/{ov['logs_total']}", inline=True)
+        e.add_field(name="Anti-Raid", value="ON" if ov["antiraid_enabled"] else "OFF", inline=True)
+        e.add_field(name="Punish", value=ov["antiraid_punish"], inline=True)
+        e.add_field(name="Commands Room", value=f"<#{ov['commands_channel_id']}>" if ov["commands_channel_id"] else "OFF", inline=True)
+        e.add_field(name="Gambling Room", value=f"<#{ov['gambling_channel_id']}>" if ov["gambling_channel_id"] else "OFF", inline=True)
+
+        toggles = "\n".join([f"{yes_no(v)} `{k}`" for k, v in ov["toggles"].items()])
+        e.add_field(name="Systems", value=toggles[:1000] if toggles else "No toggles", inline=False)
+
+        await ctx.reply(embed=e)
+
+    @bot.command(name="تقرير_الاقتصاد", aliases=["economy_report"])
+    async def economy_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = reports.money_summary(ctx.guild.id)
+
+        e = embed("💰 تقرير الاقتصاد", "ملخص سريع للاقتصاد والـ ledger.", "money", ctx.author)
+        e.add_field(name="Users", value=f"{s['balances']:,}", inline=True)
+        e.add_field(name="Total Balance", value=f"{s['total_balance']:,}", inline=True)
+        e.add_field(name="Ledger Rows", value=f"{s['ledger_rows']:,}", inline=True)
+        e.add_field(name="Money In", value=f"{s['money_in']:,}", inline=True)
+        e.add_field(name="Money Out", value=f"{s['money_out']:,}", inline=True)
+        e.add_field(name="Net", value=f"{s['net']:,}", inline=True)
+        e.add_field(name="Salary Rows", value=f"{s['salary_rows']:,}", inline=True)
+        e.add_field(name="Transfer Rows", value=f"{s['transfer_rows']:,}", inline=True)
+        e.add_field(name="Admin Rows", value=f"{s['admin_rows']:,}", inline=True)
+
+        await ctx.reply(embed=e)
+
+    @bot.command(name="تقرير_الكازينو", aliases=["casino_report"])
+    async def casino_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = reports.casino_summary(ctx.guild.id)
+        lines = []
+
+        for g in s["games"]:
+            took = int(g.get("took") or 0)
+            paid = int(g.get("paid") or 0)
+            lines.append(f"`{g.get('source_label') or 'unknown'}` rows={int(g.get('c') or 0):,} house={took-paid:,}")
+
+        e = embed("🎰 تقرير الكازينو", "\n".join(lines) if lines else "ما فيه بيانات كازينو.", "purple", ctx.author)
+        e.add_field(name="Rows", value=f"{s['rows']:,}", inline=True)
+        e.add_field(name="Players", value=f"{s['players']:,}", inline=True)
+        e.add_field(name="Casino Took", value=f"{s['casino_took']:,}", inline=True)
+        e.add_field(name="Casino Paid", value=f"{s['casino_paid']:,}", inline=True)
+        e.add_field(name="House Net", value=f"{s['house_net']:,}", inline=True)
+
+        await ctx.reply(embed=e)
+
+    @bot.command(name="تقرير_الحماية", aliases=["protection_report"])
+    async def protection_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = reports.protection_summary(ctx.guild.id)
+        lines = [f"`{r.get('event_type')}` — {int(r.get('c') or 0):,}" for r in s["recent_types"]]
+
+        e = embed("🛡️ تقرير الحماية", "\n".join(lines) if lines else "ما فيه أحداث حماية للحين.", "warn", ctx.author)
+        e.add_field(name="Active Warnings", value=f"{s['warnings_active']:,}", inline=True)
+        e.add_field(name="Total Warnings", value=f"{s['warnings_total']:,}", inline=True)
+        e.add_field(name="Protection Events", value=f"{s['protection_events']:,}", inline=True)
+        e.add_field(name="Anti-Raid Events", value=f"{s['antiraid_events']:,}", inline=True)
+
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="جاهزية_البوت", aliases=["bot_ready", "readiness"])
