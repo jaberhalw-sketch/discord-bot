@@ -1323,6 +1323,74 @@ DASHBOARD_BASE_URL</pre>
 
         return page("Warnings", body, g)
 
+    @app.route("/dashboard/commands")
+    def commands_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'>
+            <h3>Admin Reports</h3>
+            <p><code>!تقرير_النظام</code></p>
+            <p><code>!تقرير_الاقتصاد</code></p>
+            <p><code>!تقرير_الكازينو</code></p>
+            <p><code>!تقرير_الحماية</code></p>
+            <p><code>!تقرير_الأمان</code></p>
+            <p><code>!جاهزية_البوت</code></p>
+          </div>
+
+          <div class='card'>
+            <h3>Setup / Logs</h3>
+            <p><code>!تجهيز_اللوقات</code></p>
+            <p><code>!اختبار_اللوقات</code></p>
+            <p><code>!فحص_الصلاحيات</code></p>
+            <p><code>!حالة_الإعداد</code></p>
+            <p><code>!حالة_الحماية</code></p>
+          </div>
+
+          <div class='card'>
+            <h3>Economy</h3>
+            <p><code>!رصيدي</code></p>
+            <p><code>!راتب</code></p>
+            <p><code>!تحويل @user amount</code></p>
+            <p><code>!الغني</code></p>
+            <p><code>!اعطاءفلوس @user amount</code></p>
+            <p><code>!سحبفلوس @user amount</code></p>
+          </div>
+
+          <div class='card'>
+            <h3>Casino</h3>
+            <p><code>!حظ amount</code></p>
+            <p><code>!دبل amount</code></p>
+            <p><code>!سلوت amount</code></p>
+            <p><code>!وجه amount</code></p>
+            <p><code>!بلاكجاك amount</code></p>
+          </div>
+
+          <div class='card'>
+            <h3>Warnings</h3>
+            <p><code>!تحذير @user reason</code></p>
+            <p><code>!تحذيرات @user</code></p>
+            <p><code>!مسح_تحذير ID</code></p>
+            <p><code>!مسح_تحذيرات @user</code></p>
+          </div>
+
+          <div class='card'>
+            <h3>Other Systems</h3>
+            <p><code>!لفلي</code> / <code>!ترتيب</code></p>
+            <p><code>!عقارات</code> / <code>!شراء_عقار ID</code> / <code>!ايجار</code></p>
+            <p><code>!متجر</code> / <code>!شراء item_key</code> / <code>!صندوق 1000</code></p>
+            <p><code>!قيف</code> / <code>!دخول_قيف ID</code></p>
+          </div>
+        </div>
+        """
+        return page("Command Center", body, g)
+
+
+
     @app.route("/dashboard/security")
     def security_page():
         d = require_login()
