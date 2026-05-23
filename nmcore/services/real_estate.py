@@ -4,11 +4,11 @@ from nmcore.services.economy import debit, credit
 from nmcore.services.activity import record
 
 PROPERTY_TYPES={
-    "room":{"name":"Small Room","count":20,"price":25000,"rent":1000},
-    "apartment":{"name":"Apartment","count":10,"price":100000,"rent":4000},
-    "office":{"name":"Office","count":5,"price":300000,"rent":18000},
-    "tower":{"name":"Tower","count":2,"price":1000000,"rent":75000},
-    "palace":{"name":"Royal Palace","count":1,"price":3500000,"rent":250000},
+    "room":{"name":"Small Room","count":20,"price":25000,"rent":4000},
+    "apartment":{"name":"Apartment","count":10,"price":100000,"rent":8000},
+    "office":{"name":"Office","count":6,"price":250000,"rent":15000},
+    "tower":{"name":"Tower","count":3,"price":750000,"rent":35000},
+    "palace":{"name":"Palace","count":1,"price":2000000,"rent":100000},
 }
 
 def seed(guild_id:int):
@@ -19,8 +19,11 @@ def seed(guild_id:int):
             (guild_id,type_key,unit_number,display_name,owner_id,owner_name,level,price,rent,created_at)
             VALUES (?,?,?,?,0,'',1,?,?,?)""", (int(guild_id),key,unit,f"{info['name']} #{unit}",info["price"],info["rent"],now))
 
-    # Keep apartment rent synced with the new economy setting.
-    cur.execute("UPDATE properties SET rent=? WHERE guild_id=? AND type_key='apartment'", (4000, int(guild_id)))
+    # Keep all property rents synced with the new economy setting.
+    # This also migrates old properties that were created with low rent such as Small Room = 1,000.
+    for key, info in PROPERTY_TYPES.items():
+        cur.execute("UPDATE properties SET rent=? WHERE guild_id=? AND type_key=?", (int(info["rent"]), int(guild_id), key))
+
     conn.commit(); conn.close()
 
 def rows(guild_id:int, only_available=False):
@@ -157,3 +160,67 @@ def assign_property(guild_id:int, property_id:int, owner_id:int, owner_name:str,
              actor_id=int(actor_id or 0), amount=0, level_before=int(p["level"]), level_after=int(p["level"]),
              price_before=int(p["price"]), price_after=int(p["price"]), reason=reason, money_tx_id="")
     return {"ok":True,"name":p["display_name"],"owner_id":int(owner_id),"owner_name":str(owner_name or owner_id)}
+
+
+def rent_status(guild_id:int, user_id:int):
+    """
+    Returns a clear rent status for the user's properties:
+    - ready properties
+    - total claimable amount
+    - seconds until next rent period
+    """
+    props = my_rows(guild_id, user_id)
+    now = int(time.time())
+
+    if not props:
+        return {
+            "has_properties": False,
+            "ready_count": 0,
+            "total_amount": 0,
+            "next_seconds": None,
+            "properties_count": 0,
+        }
+
+    ready_count = 0
+    total_amount = 0
+    next_seconds = None
+
+    for p in props:
+        last = int(p["last_rent_claim"] or 0)
+
+        # If old dashboard assignment never started timer, start it safely now.
+        if last <= 0:
+            last = now
+
+        elapsed = max(0, now - last)
+        periods = elapsed // RENT_COOLDOWN_SECONDS
+
+        if periods > 0:
+            ready_count += 1
+            total_amount += int(p["rent"]) * int(p["level"]) * int(periods)
+        else:
+            remaining = RENT_COOLDOWN_SECONDS - elapsed
+            if next_seconds is None or remaining < next_seconds:
+                next_seconds = remaining
+
+    return {
+        "has_properties": True,
+        "ready_count": ready_count,
+        "total_amount": total_amount,
+        "next_seconds": next_seconds,
+        "properties_count": len(props),
+    }
+
+
+def format_duration(seconds:int):
+    seconds = max(0, int(seconds or 0))
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+
+    if hours and minutes:
+        return f"{hours} ساعة و {minutes} دقيقة"
+    if hours:
+        return f"{hours} ساعة"
+    if minutes:
+        return f"{minutes} دقيقة"
+    return "أقل من دقيقة"
