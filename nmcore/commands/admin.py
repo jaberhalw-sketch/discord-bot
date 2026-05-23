@@ -1,7 +1,8 @@
 import discord
 from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
 from nmcore.services.activity import log_event
-from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel
+from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
+from nmcore.services.diagnostics import system_status
 from nmcore.ui import embed, success, error
 
 
@@ -43,6 +44,26 @@ async def find_or_create_text_channel(guild, category, name, topic):
     return ch, True
 
 
+async def send_to_log(ctx, log_key, title, description, color="info"):
+    try:
+        ch_id = get_log_channel(ctx.guild.id, log_key)
+        if not ch_id:
+            return False
+
+        ch = ctx.guild.get_channel(int(ch_id))
+        if not ch:
+            return False
+
+        await ch.send(embed=embed(title, description, color, ctx.author))
+        return True
+    except Exception:
+        return False
+
+
+def yes_no(v):
+    return "✅" if v else "❌"
+
+
 def setup(bot):
     @bot.command(name="بنق")
     async def ping(ctx):
@@ -76,7 +97,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات`
+`!تجهيز_اللوقات` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -222,3 +243,99 @@ def setup(bot):
                 f"`{type(e).__name__}: {e}`",
                 ctx.author
             ))
+
+    @bot.command(name="حالة_النظام", aliases=["system_status", "status"])
+    async def system_status_cmd(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = system_status(ctx.guild)
+        mem = s["memory"]
+        logs = s["logs"]
+        counts = mem["counts"]
+
+        e = embed("🩺 حالة NM System", "فحص سريع للذاكرة واللوقات والأنظمة.", "info", ctx.author)
+
+        e.add_field(
+            name="Memory",
+            value=(
+                f"Persistent Path: {yes_no(mem['persistent_path'])}\n"
+                f"DB Size: `{mem['db_size_text']}`\n"
+                f"DB File: `{mem['db_file']}`"
+            ),
+            inline=False
+        )
+
+        e.add_field(
+            name="Records",
+            value=(
+                f"Balances: `{counts.get('balances', 0)}`\n"
+                f"Ledger: `{counts.get('money_ledger', 0)}`\n"
+                f"Warnings: `{counts.get('warnings', 0)}`\n"
+                f"Logs: `{counts.get('log_events', 0)}`\n"
+                f"Live: `{counts.get('live_activity', 0)}`"
+            ),
+            inline=True
+        )
+
+        e.add_field(
+            name="Log Rooms",
+            value=f"`{logs['mapped']}/{logs['total']}` mapped",
+            inline=True
+        )
+
+        toggles = s["toggles"]
+        e.add_field(
+            name="Systems",
+            value="\n".join([f"{yes_no(v)} `{k}`" for k, v in toggles.items()])[:1000],
+            inline=False
+        )
+
+        await ctx.reply(embed=e)
+
+    @bot.command(name="فحص_الصلاحيات", aliases=["check_perms", "perms"])
+    async def check_permissions(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = system_status(ctx.guild)
+        perms = s["permissions"]
+
+        lines = [f"{yes_no(v)} `{k}`" for k, v in perms.items()]
+        await ctx.reply(embed=embed(
+            "🔐 فحص صلاحيات البوت",
+            "\n".join(lines),
+            "ok" if all(perms.values()) else "warn",
+            ctx.author
+        ))
+
+    @bot.command(name="اختبار_اللوقات", aliases=["test_logs"])
+    async def test_logs(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        sent = []
+        failed = []
+
+        for key, (name, topic) in LOG_CHANNELS.items():
+            ok = await send_to_log(
+                ctx,
+                key,
+                f"🧪 Test Log: {key}",
+                f"تم اختبار روم `{name}` بواسطة {ctx.author.mention}.",
+                "info"
+            )
+
+            if ok:
+                sent.append(key)
+            else:
+                failed.append(key)
+
+        e = embed("🧪 اختبار اللوقات", "تم إرسال رسائل اختبار للرومات المربوطة.", "info", ctx.author)
+        e.add_field(name="نجح", value=", ".join(sent) if sent else "None", inline=False)
+        e.add_field(name="فشل", value=", ".join(failed) if failed else "None", inline=False)
+
+        await ctx.reply(embed=e)
