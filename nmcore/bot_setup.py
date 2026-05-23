@@ -7,6 +7,7 @@ from nmcore.services.protection import get_settings, check_message, is_ignored_c
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
 from nmcore.services.log_channels import get_log_channel
+from nmcore.services import antiraid
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
@@ -96,6 +97,90 @@ async def detect_leave_type(member):
         pass
 
     return "left", None, "Left by themselves"
+
+
+
+async def get_latest_audit(guild, action, target_id=None):
+    try:
+        async for entry in guild.audit_logs(limit=6, action=action):
+            if target_id is None:
+                return entry
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(target_id):
+                return entry
+    except Exception:
+        return None
+    return None
+
+
+async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason=""):
+    try:
+        settings = antiraid.get_settings(guild.id)
+
+        if not antiraid.feature_enabled(settings, action_type):
+            return
+
+        if not executor or executor.bot:
+            return
+
+        member = guild.get_member(int(executor.id))
+        if antiraid.is_trusted(settings, member):
+            return
+
+        state = antiraid.record_action(guild.id, executor.id, action_type, settings)
+
+        log_event(
+            guild.id,
+            f"antiraid_{action_type}",
+            executor.id,
+            str(executor),
+            0,
+            "",
+            f"Anti-Raid watched: {action_type}",
+            f"Target={target_text}, Count={state['count']}/{state['threshold']}, Reason={reason}"
+        )
+
+        await send_log(
+            bot,
+            guild,
+            "server",
+            f"🛡️ Anti-Raid: {action_type}",
+            f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
+            f"Target: {target_text}\n"
+            f"Count: `{state['count']}/{state['threshold']}` in `{state['window']}s`\n"
+            f"Reason: `{reason or '-'}`",
+            "warn"
+        )
+
+        if state.get("triggered"):
+            punishment = await antiraid.punish_member(member, settings)
+
+            log_event(
+                guild.id,
+                f"antiraid_triggered_{action_type}",
+                executor.id,
+                str(executor),
+                0,
+                "",
+                f"Anti-Raid triggered: {action_type}",
+                f"Target={target_text}, Punishment={punishment}"
+            )
+
+            await send_log(
+                bot,
+                guild,
+                "server",
+                f"🚨 Anti-Raid Triggered: {action_type}",
+                f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
+                f"Target: {target_text}\n"
+                f"Punishment: `{punishment}`",
+                "bad"
+            )
+    except Exception as e:
+        try:
+            log_event(guild.id, "antiraid_error", 0, "", 0, "", "Anti-Raid error", f"{type(e).__name__}: {e}")
+        except Exception:
+            pass
+
 
 
 def setup_bot(bot):
@@ -276,10 +361,9 @@ def setup_bot(bot):
                             message.content[:1000]
                         )
 
-                    event_type = f"protection_{kind}"
                     log_event(
                         message.guild.id,
-                        event_type,
+                        f"protection_{kind}",
                         message.author.id,
                         message.author.display_name,
                         message.channel.id,
@@ -405,6 +489,8 @@ def setup_bot(bot):
     @bot.event
     async def on_member_remove(member):
         leave_type, moderator, reason = await detect_leave_type(member)
+        if leave_type in {"kick", "ban"} and moderator:
+            await handle_antiraid_action(bot, member.guild, leave_type, moderator, f"Member `{member}` (`{member.id}`)", reason)
         title = "📤 Member Left"
         color = "warn"
 
@@ -433,6 +519,8 @@ def setup_bot(bot):
     @bot.event
     async def on_member_ban(guild, user):
         moderator, reason = await audit_reason(guild, discord.AuditLogAction.ban, user.id)
+        if moderator:
+            await handle_antiraid_action(bot, guild, "ban", moderator, f"User `{user}` (`{user.id}`)", reason)
         mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
 
         log_event(guild.id, "member_ban", user.id, str(user), title="Member banned", details=f"By={mod_text}, Reason={reason}")
@@ -470,6 +558,11 @@ def setup_bot(bot):
             removed = [r.mention for r in before.roles if r.id not in after_ids and r.name != "@everyone"]
 
             details = f"User: {after.mention} (`{after.id}`)\nAdded: {', '.join(added) if added else 'None'}\nRemoved: {', '.join(removed) if removed else 'None'}"
+            action = getattr(discord.AuditLogAction, "member_role_update", None)
+            if action:
+                entry = await get_latest_audit(after.guild, action, after.id)
+                if entry:
+                    await handle_antiraid_action(bot, after.guild, "member_role_update", entry.user, f"Member `{after}` (`{after.id}`)", entry.reason or "")
             log_event(after.guild.id, "member_roles_update", after.id, after.display_name, title="Roles changed", details=details)
             await send_log(bot, after.guild, "roles", "🎭 Roles Updated", details, "info", after)
 
@@ -478,15 +571,49 @@ def setup_bot(bot):
             log_event(after.guild.id, "member_nick_update", after.id, after.display_name, title="Nickname changed", details=details)
             await send_log(bot, after.guild, "roles", "🏷️ Nickname Updated", details, "info", after)
 
+
+    @bot.event
+    async def on_guild_role_delete(role):
+        entry = await get_latest_audit(role.guild, discord.AuditLogAction.role_delete, role.id)
+        if entry:
+            await handle_antiraid_action(bot, role.guild, "role_delete", entry.user, f"Role `{role.name}` (`{role.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_role_update(before, after):
+        entry = await get_latest_audit(after.guild, discord.AuditLogAction.role_update, after.id)
+        if entry:
+            await handle_antiraid_action(bot, after.guild, "role_update", entry.user, f"Role `{after.name}` (`{after.id}`)", entry.reason or "")
+
     @bot.event
     async def on_guild_channel_create(channel):
         log_event(channel.guild.id, "channel_create", channel.id, channel.name, channel.id, channel.name, "Channel created", str(channel))
         await send_log(bot, channel.guild, "server", "➕ Channel Created", f"Channel: {channel.mention if hasattr(channel, 'mention') else channel.name}\nID: `{channel.id}`\nType: `{channel.type}`", "ok")
 
+        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_create, channel.id)
+        if entry:
+            await handle_antiraid_action(bot, channel.guild, "channel_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+
     @bot.event
     async def on_guild_channel_delete(channel):
         log_event(channel.guild.id, "channel_delete", channel.id, channel.name, 0, channel.name, "Channel deleted", str(channel))
         await send_log(bot, channel.guild, "server", "➖ Channel Deleted", f"Name: **{channel.name}**\nID: `{channel.id}`\nType: `{channel.type}`", "bad")
+
+        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
+        if entry:
+            await handle_antiraid_action(bot, channel.guild, "channel_delete", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_channel_update(before, after):
+        entry = await get_latest_audit(after.guild, discord.AuditLogAction.channel_update, after.id)
+        if entry:
+            await handle_antiraid_action(bot, after.guild, "channel_update", entry.user, f"Channel `{after.name}` (`{after.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_webhooks_update(channel):
+        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.webhook_create, None)
+        if entry:
+            await handle_antiraid_action(bot, channel.guild, "webhook_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+
 
     @bot.event
     async def on_voice_state_update(member, before, after):
@@ -505,4 +632,3 @@ def setup_bot(bot):
 
         log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
         await send_log(bot, member.guild, "voice", title, details, "info", member)
-
