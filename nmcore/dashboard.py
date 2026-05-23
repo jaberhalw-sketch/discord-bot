@@ -9,6 +9,7 @@ from nmcore.services import economy as economy_service
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
+from nmcore.services.diagnostics import system_status
 from nmcore.services.warnings import summary as warn_summary
 from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
 from nmcore.services.activity import log_event, record
@@ -911,7 +912,9 @@ DASHBOARD_BASE_URL</pre>
                 "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
                 "links_enabled": 1 if request.form.get("links_enabled") else 0,
                 "delete_messages": 1 if request.form.get("delete_messages") else 0,
-                "bad_words": request.form.get("bad_words", "")
+                "bad_words": request.form.get("bad_words", ""),
+                "ignored_channels": request.form.get("ignored_channels", ""),
+                "whitelist_roles": request.form.get("whitelist_roles", "")
             }
             prot_update(g, data)
             return redirect(f"/dashboard/protection?guild_id={g}")
@@ -961,6 +964,13 @@ DASHBOARD_BASE_URL</pre>
             <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label><br><br>
 
             <textarea name=bad_words style='width:100%;height:180px'>{esc(bad_words_raw)}</textarea><br><br>
+
+            Ignored Channel IDs<br>
+            <textarea name=ignored_channels placeholder='Channel IDs separated by comma' style='width:100%;height:70px'>{esc(s.get('ignored_channels') or '')}</textarea><br><br>
+
+            Whitelist Role IDs<br>
+            <textarea name=whitelist_roles placeholder='Role IDs separated by comma' style='width:100%;height:70px'>{esc(s.get('whitelist_roles') or '')}</textarea><br><br>
+
             <button>Save</button>
             <button name='action' value='reset_bad_words' style='background:#334155;margin-left:8px'>Reset Default Bad Words</button>
           </form>
@@ -1495,6 +1505,71 @@ DASHBOARD_BASE_URL</pre>
         <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th></tr>{prop_trs}</table></div>
         """
         return page("User Lookup", body, g)
+
+    @app.route("/dashboard/setup")
+    def setup_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        guild_obj = None
+        try:
+            for bg in bot.guilds:
+                if int(bg.id) == int(g):
+                    guild_obj = bg
+                    break
+        except Exception:
+            guild_obj = None
+
+        if not guild_obj:
+            return page("Setup Status", server_pill_html(g, bot) + "<div class='card'><h3 class='bad'>Bot is not connected to this guild.</h3></div>", g)
+
+        s = system_status(guild_obj)
+        mem = s["memory"]
+        logs = s["logs"]
+        gs = s["guild_settings"]
+        perms = s["permissions"]
+
+        def yn(v):
+            return "✅" if v else "❌"
+
+        rows = [
+            ("Persistent memory path", yn(mem["persistent_path"]), f"<code>{esc(mem['db_file'])}</code>"),
+            ("Database size", "ℹ️", f"<code>{esc(mem['db_size_text'])}</code>"),
+            ("Organized log rooms", yn(logs["mapped"] == logs["total"]), f"<code>{logs['mapped']}/{logs['total']}</code>"),
+            ("Commands channel", yn(bool(gs.get("commands_channel_id"))), f"<code>{esc(gs.get('commands_channel_id') or 0)}</code>"),
+            ("Gambling channel", yn(bool(gs.get("gambling_channel_id"))), f"<code>{esc(gs.get('gambling_channel_id') or 0)}</code>"),
+            ("View Audit Log", yn(perms.get("view_audit_log")), ""),
+            ("Manage Channels", yn(perms.get("manage_channels")), ""),
+            ("Manage Messages", yn(perms.get("manage_messages")), ""),
+            ("Embed Links", yn(perms.get("embed_links")), ""),
+        ]
+
+        trs = "".join(f"<tr><td>{name}</td><td>{status}</td><td>{detail}</td></tr>" for name, status, detail in rows)
+
+        log_map = all_log_channels(g)
+        log_trs = ""
+        for key, (name, topic) in LOG_CHANNELS.items():
+            cid = int(log_map.get(key) or 0)
+            log_trs += f"<tr><td><code>{esc(key)}</code></td><td>{esc(name)}</td><td>{f'<#{cid}>' if cid else '<span class=bad>Not set</span>'}</td></tr>"
+
+        body = server_pill_html(g, bot)
+        body += f"""
+        <div class='card'>
+          <h3>Setup Checklist</h3>
+          <table><tr><th>Check</th><th>Status</th><th>Details</th></tr>{trs}</table>
+          <br>
+          <p class='muted'>From Discord run: <code>!تجهيز_اللوقات</code>, <code>!فحص_الصلاحيات</code>, <code>!اختبار_اللوقات</code></p>
+        </div>
+        <div class='card'>
+          <h3>Log Rooms</h3>
+          <table><tr><th>Key</th><th>Name</th><th>Channel</th></tr>{log_trs}</table>
+        </div>
+        """
+        return page("Setup Status", body, g)
+
 
     @app.route("/dashboard/health")
     def health():
