@@ -34,13 +34,13 @@ class CasinoView(discord.ui.View):
 
     async def play_game(self, interaction, game):
         if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("هذا الكازينو لصاحب الأمر فقط.", ephemeral=True)
+            await interaction.response.send_message(embed=embed("🚫 غير مسموح", "هذا الكازينو لصاحب الأمر فقط.", "bad", interaction.user), ephemeral=True)
             return
 
         res = play(interaction.guild.id, interaction.user.id, interaction.user.display_name, game, self.amount, interaction.channel.id, 0)
 
         if not res["ok"]:
-            await interaction.response.send_message(res["error"], ephemeral=True)
+            await interaction.response.send_message(embed=embed("🎰 فشل اللعب", res["error"], "bad", interaction.user), ephemeral=True)
             return
 
         color = "ok" if res["outcome"] == "win" else "warn" if res["outcome"] == "draw" else "bad"
