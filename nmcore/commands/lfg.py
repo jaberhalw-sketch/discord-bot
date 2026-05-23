@@ -2,28 +2,10 @@ import re
 import discord
 from nmcore.ui import embed
 from nmcore.services.activity import log_event
-from nmcore.services.settings import get_lfg_channel_id
+from nmcore.services.settings import get_lfg_settings
 
 
 GAME_CATEGORY_NAME = "🎮 LFG Rooms"
-
-
-def get_lfg_channel(guild):
-    try:
-        channel_id = get_lfg_channel_id(guild.id)
-        if not channel_id:
-            return None
-        return guild.get_channel(int(channel_id))
-    except Exception:
-        return None
-
-
-def in_lfg_channel(ctx):
-    try:
-        return int(ctx.channel.id) == int(LFG_CHANNEL_ID)
-    except Exception:
-        return False
-
 
 
 def parse_lfg_args(args):
@@ -62,6 +44,20 @@ def parse_lfg_args(args):
     return game[:60], count, note[:180]
 
 
+def get_lfg_channel(guild):
+    try:
+        s = get_lfg_settings(guild.id)
+        cid = int(s.get("lfg_channel_id") or 0)
+        return guild.get_channel(cid) if cid else None
+    except Exception:
+        return None
+
+
+def in_lfg_channel(ctx):
+    ch = get_lfg_channel(ctx.guild)
+    return bool(ch and int(ctx.channel.id) == int(ch.id))
+
+
 def member_lines(view):
     if not view.members:
         return "لا يوجد أحد للحين."
@@ -77,13 +73,18 @@ def lfg_status_text(view):
 
 
 async def get_or_create_lfg_category(guild):
+    s = get_lfg_settings(guild.id)
+    category_id = int(s.get("lfg_category_id") or 0)
+    if category_id:
+        ch = guild.get_channel(category_id)
+        if isinstance(ch, discord.CategoryChannel):
+            return ch
+
     for ch in guild.categories:
         if ch.name == GAME_CATEGORY_NAME:
             return ch
 
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False)
-    }
+    overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=False)}
     return await guild.create_category(GAME_CATEGORY_NAME, overwrites=overwrites, reason="NM System LFG category")
 
 
@@ -108,13 +109,7 @@ async def create_private_voice_for_lfg(interaction, view):
     safe_game = re.sub(r"[^A-Za-z0-9ء-ي _-]", "", view.game).strip()[:30] or "game"
     name = f"🎮 {safe_game} {len(view.members)}-{view.target_count}"
 
-    voice = await guild.create_voice_channel(
-        name=name,
-        category=category,
-        overwrites=overwrites,
-        reason=f"LFG completed for {view.game}"
-    )
-
+    voice = await guild.create_voice_channel(name=name, category=category, overwrites=overwrites, reason=f"LFG completed for {view.game}")
     view.voice_channel_id = int(voice.id)
 
     for uid in view.members:
@@ -125,20 +120,7 @@ async def create_private_voice_for_lfg(interaction, view):
         except Exception:
             pass
 
-    try:
-        log_event(
-            guild.id,
-            "lfg_voice_created",
-            view.owner_id,
-            str(view.owner_id),
-            voice.id,
-            voice.name,
-            "LFG voice created",
-            f"Game={view.game}, Count={len(view.members)}/{view.target_count}"
-        )
-    except Exception:
-        pass
-
+    log_event(guild.id, "lfg_voice_created", view.owner_id, str(view.owner_id), voice.id, voice.name, "LFG voice created", f"Game={view.game}, Count={len(view.members)}/{view.target_count}")
     return voice
 
 
@@ -160,10 +142,8 @@ class LFGView(discord.ui.View):
         e.add_field(name="📝 ملاحظة", value=self.note or "لا يوجد", inline=False)
         e.add_field(name="👥 اللي بيدخلون", value=member_lines(self), inline=False)
         e.add_field(name="📌 الحالة", value=lfg_status_text(self), inline=False)
-
         if self.voice_channel_id:
             e.add_field(name="🔊 روم الفويس", value=f"<#{self.voice_channel_id}>", inline=False)
-
         e.set_footer(text="NM System | Looking For Game")
         return e
 
@@ -179,15 +159,12 @@ class LFGView(discord.ui.View):
         if self.cancelled:
             await interaction.response.send_message(embed=embed("❌ التجمع ملغي", "هذا التجمع تم إلغاؤه.", "bad", interaction.user), ephemeral=True)
             return
-
         if self.voice_channel_id:
             await interaction.response.send_message(embed=embed("✅ التجمع مكتمل", f"الروم: <#{self.voice_channel_id}>", "ok", interaction.user), ephemeral=True)
             return
-
         if interaction.user.id in self.members:
             await interaction.response.send_message(embed=embed("موجود", "أنت داخل التجمع بالفعل.", "warn", interaction.user), ephemeral=True)
             return
-
         if len(self.members) >= self.target_count:
             await interaction.response.send_message(embed=embed("مكتمل", "التجمع اكتمل خلاص.", "warn", interaction.user), ephemeral=True)
             return
@@ -210,7 +187,6 @@ class LFGView(discord.ui.View):
         if interaction.user.id not in self.members:
             await interaction.response.send_message(embed=embed("مو داخل", "أنت مو داخل التجمع.", "warn", interaction.user), ephemeral=True)
             return
-
         self.members.remove(int(interaction.user.id))
         self.refresh_buttons()
         await interaction.response.edit_message(embed=self.build_embed(interaction.user), view=self)
@@ -220,10 +196,8 @@ class LFGView(discord.ui.View):
         if interaction.user.id != self.owner_id and not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message(embed=embed("🚫 غير مسموح", "الإلغاء لصاحب التجمع أو الإدارة فقط.", "bad", interaction.user), ephemeral=True)
             return
-
         self.cancelled = True
         self.refresh_buttons()
-
         if self.voice_channel_id:
             ch = interaction.guild.get_channel(int(self.voice_channel_id))
             try:
@@ -231,20 +205,13 @@ class LFGView(discord.ui.View):
                     await ch.delete(reason="LFG cancelled")
             except Exception:
                 pass
-
         await interaction.response.edit_message(embed=self.build_embed(interaction.user), view=self)
 
 
 def lfg_help_embed(member=None):
-    e = embed(
-        "🎮 Looking For Game",
-        "نظام التجمعات للعب. تكتب أمر، الناس تضغط يدخل، وإذا اكتمل العدد يفتح البوت روم فويس خاص للمسجلين.",
-        "info",
-        member
-    )
+    e = embed("🎮 Looking For Game", "نظام التجمعات للعب. تكتب أمر، الناس تضغط يدخل، وإذا اكتمل العدد يفتح البوت روم فويس خاص للمسجلين.", "info", member)
     e.add_field(name="طريقة الاستخدام", value="`!لعب 5 Valorant نبي قيم سريع`\n`!لعب Valorant 5 نبي قيم سريع`\n`!لعب fort 4`", inline=False)
     e.add_field(name="الأزرار", value="🎮 يدخل\n📜 يطلع\n❌ إلغاء التجمع", inline=False)
-    e.add_field(name="عند اكتمال العدد", value="يفتح روم فويس خاص، الكل يشوف الروم لكن المسجلين فقط يقدرون يدخلون.", inline=False)
     return e
 
 
@@ -252,60 +219,26 @@ def setup(bot):
     @bot.command(name="شرح_لعب", aliases=["شرح_lfg", "lfg_help"])
     async def lfg_help(ctx):
         ch = get_lfg_channel(ctx.guild)
-
         if not ch:
-            await ctx.reply(embed=embed(
-                "❌ روم LFG غير محدد",
-                "حدد روم Looking For Game من الداشبورد: Settings → LFG Channel ID.",
-                "bad",
-                ctx.author
-            ))
+            await ctx.reply(embed=embed("❌ روم LFG غير محدد", "حدد روم Looking For Game من الداشبورد: LFG Dashboard.", "bad", ctx.author))
             return
-
         msg = await ch.send(embed=lfg_help_embed(ctx.author))
-
         if int(ctx.channel.id) != int(ch.id):
-            await ctx.reply(embed=embed(
-                "✅ تم إرسال شرح اللعب",
-                f"تم إرسال شرح Looking For Game في روم {ch.mention}\n[اضغط هنا للرسالة]({msg.jump_url})",
-                "ok",
-                ctx.author
-            ))
+            await ctx.reply(embed=embed("✅ تم إرسال شرح اللعب", f"تم إرسال الشرح في {ch.mention}\n[اضغط هنا]({msg.jump_url})", "ok", ctx.author))
 
     @bot.command(name="لعب", aliases=["lfg", "قيم"])
     async def lfg(ctx, *args):
         ch = get_lfg_channel(ctx.guild)
-
         if ch and not in_lfg_channel(ctx):
-            await ctx.reply(embed=embed(
-                "🎮 استخدم روم Looking For Game",
-                f"أوامر التجمعات تشتغل في {ch.mention} فقط.\nاكتب هناك: `!لعب fort 4`",
-                "warn",
-                ctx.author
-            ))
+            await ctx.reply(embed=embed("🎮 استخدم روم Looking For Game", f"أوامر التجمعات تشتغل في {ch.mention} فقط.", "warn", ctx.author))
             return
 
         game, count, note = parse_lfg_args(args)
-
         if not game or not count:
             await ctx.reply(embed=lfg_help_embed(ctx.author))
             return
 
         view = LFGView(ctx.author.id, game, count, note)
         view.members.append(int(ctx.author.id))
-
         await ctx.reply(embed=view.build_embed(ctx.author), view=view)
-
-        try:
-            log_event(
-                ctx.guild.id,
-                "lfg_created",
-                ctx.author.id,
-                ctx.author.display_name,
-                ctx.channel.id,
-                ctx.channel.name,
-                "LFG created",
-                f"Game={game}, Count={count}, Note={note}"
-            )
-        except Exception:
-            pass
+        log_event(ctx.guild.id, "lfg_created", ctx.author.id, ctx.author.display_name, ctx.channel.id, ctx.channel.name, "LFG created", f"Game={game}, Count={count}, Note={note}")
