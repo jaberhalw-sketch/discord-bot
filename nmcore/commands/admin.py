@@ -1,8 +1,9 @@
 import discord
+from nmcore.config import DASHBOARD_BASE_URL, DB_FILE
 from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
 from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
-from nmcore.services.diagnostics import system_status
+from nmcore.services.diagnostics import system_status, memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
 
@@ -97,7 +98,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات`
+`!تجهيز_اللوقات` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -130,6 +131,60 @@ def setup(bot):
             return
         set_coin_name(ctx.guild.id, name)
         await ctx.reply(embed=success("تم تغيير اسم العملة", f"الاسم الجديد: **{name}**", ctx.author))
+
+
+    @bot.command(name="داشبورد", aliases=["dashboard", "لوحة"])
+    async def dashboard_link(ctx):
+        base = (DASHBOARD_BASE_URL or "").rstrip("/")
+        if not base:
+            await ctx.reply(embed=error("رابط الداشبورد غير مضبوط", "تأكد من متغير DASHBOARD_BASE_URL في Railway.", ctx.author))
+            return
+
+        g = ctx.guild.id
+        text = (
+            f"**Dashboard:** {base}/dashboard?guild_id={g}\n"
+            f"**Settings:** {base}/dashboard/settings?guild_id={g}\n"
+            f"**Logs:** {base}/dashboard/logs?guild_id={g}\n"
+            f"**Money Tracker:** {base}/dashboard/money-tracker?guild_id={g}"
+        )
+        await ctx.reply(embed=embed("🌐 روابط الداشبورد", text, "info", ctx.author))
+
+    @bot.command(name="حالة_الإعداد", aliases=["setup_status", "setup"])
+    async def setup_status(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = system_status(ctx.guild)
+        mem = s["memory"]
+        logs = s["logs"]
+        gs = s["guild_settings"]
+        perms = s["permissions"]
+
+        checks = []
+        checks.append(f"{yes_no(mem['persistent_path'])} Memory path `/data`")
+        checks.append(f"{yes_no(logs['mapped'] == logs['total'])} Organized log rooms `{logs['mapped']}/{logs['total']}`")
+        checks.append(f"{yes_no(bool(gs.get('commands_channel_id')))} Commands channel set")
+        checks.append(f"{yes_no(bool(gs.get('gambling_channel_id')))} Gambling channel set")
+        checks.append(f"{yes_no(perms.get('view_audit_log'))} View Audit Log")
+        checks.append(f"{yes_no(perms.get('manage_channels'))} Manage Channels")
+        checks.append(f"{yes_no(perms.get('manage_messages'))} Manage Messages")
+        checks.append(f"{yes_no(perms.get('embed_links'))} Embed Links")
+
+        base = (DASHBOARD_BASE_URL or "").rstrip("/")
+        dash_link = f"{base}/dashboard/settings?guild_id={ctx.guild.id}" if base else "DASHBOARD_BASE_URL not set"
+
+        e = embed(
+            "🧩 حالة إعداد NM System",
+            "\n".join(checks),
+            "ok" if all(("✅" in c) for c in checks) else "warn",
+            ctx.author
+        )
+        e.add_field(name="Dashboard Settings", value=dash_link, inline=False)
+        e.add_field(name="DB", value=f"`{mem['db_file']}`\nSize: `{mem['db_size_text']}`", inline=False)
+
+        await ctx.reply(embed=e)
+
 
     @bot.command(name="تجهيز_اللوقات", aliases=["setup_logs", "لوقات"])
     async def setup_logs(ctx):
