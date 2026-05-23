@@ -263,3 +263,112 @@ def summary(guild_id:int, limit:int=100):
 
     conn.close()
     return {"totals": totals, "boosters": boosters, "recent": recent}
+
+
+
+def sync_guild_boosters(guild):
+    """
+    Best-effort full sync for active boosters.
+
+    Sources:
+    1. guild.premium_subscribers, if available from discord.py.
+    2. member.premium_since from the member cache.
+    3. The managed Server Booster role, if Discord exposes it in role tags.
+
+    Notes:
+    - This finds ACTIVE boosters.
+    - Exact historical number of boosts cannot be recovered from Server Settings/API.
+      Exact boost_count is counted from boost system messages after tracking is installed.
+    """
+    ensure_tables()
+
+    guild_id = int(guild.id)
+    now = int(time.time())
+    active_ids = set()
+    scanned = 0
+
+    # 1) Official cached list if available.
+    try:
+        for member in getattr(guild, "premium_subscribers", []) or []:
+            if member:
+                active_ids.add(int(member.id))
+                _upsert_booster(
+                    guild_id,
+                    member.id,
+                    member.display_name,
+                    active=True,
+                    premium_since=int(member.premium_since.timestamp()) if getattr(member, "premium_since", None) else 0,
+                    add_count=0,
+                    add_reward=0
+                )
+                scanned += 1
+    except Exception:
+        pass
+
+    # 2) Any cached member with premium_since.
+    try:
+        for member in getattr(guild, "members", []) or []:
+            if getattr(member, "premium_since", None):
+                active_ids.add(int(member.id))
+                _upsert_booster(
+                    guild_id,
+                    member.id,
+                    member.display_name,
+                    active=True,
+                    premium_since=int(member.premium_since.timestamp()),
+                    add_count=0,
+                    add_reward=0
+                )
+                scanned += 1
+    except Exception:
+        pass
+
+    # 3) Managed booster role fallback.
+    booster_role = None
+    try:
+        for role in getattr(guild, "roles", []) or []:
+            tags = getattr(role, "tags", None)
+            if tags and getattr(tags, "premium_subscriber", False):
+                booster_role = role
+                break
+            # fallback by common name, only if managed role tags are unavailable
+            if str(getattr(role, "name", "")).lower() in {"server booster", "nitro booster"}:
+                booster_role = role
+    except Exception:
+        booster_role = None
+
+    if booster_role:
+        try:
+            for member in getattr(booster_role, "members", []) or []:
+                active_ids.add(int(member.id))
+                _upsert_booster(
+                    guild_id,
+                    member.id,
+                    member.display_name,
+                    active=True,
+                    premium_since=int(member.premium_since.timestamp()) if getattr(member, "premium_since", None) else 0,
+                    add_count=0,
+                    add_reward=0
+                )
+                scanned += 1
+        except Exception:
+            pass
+
+    # Mark previously known boosters inactive if they are no longer active.
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM boosters WHERE guild_id=?", (guild_id,))
+    known = [int(r["user_id"]) for r in cur.fetchall()]
+    for uid in known:
+        if uid not in active_ids:
+            cur.execute("UPDATE boosters SET active=0, updated_at=? WHERE guild_id=? AND user_id=?", (now, guild_id, uid))
+    conn.commit()
+    conn.close()
+
+    log_event(guild_id, "boosters_synced", 0, "NM System", 0, "", "Boosters synced", f"Active={len(active_ids)}, Scanned={scanned}")
+    return {"active_count": len(active_ids), "scanned": scanned, "booster_role_id": int(getattr(booster_role, "id", 0) or 0)}
+
+
+# Backward-compatible alias.
+def sync_guild(guild):
+    return sync_guild_boosters(guild)
