@@ -6,7 +6,8 @@ from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
 from nmcore.services import antiraid
-from nmcore.services import security, memory_status, log_mapping_status
+from nmcore.services import security
+from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
 
