@@ -30,6 +30,8 @@ def error(title, desc="", member=None):
 
 def page(title, body, guild_id=0):
     q=f"?guild_id={int(guild_id)}" if guild_id else ""
+    refresh_titles = {"Live Activity": 8, "Logs": 15, "Warnings": 20, "Money Tracker": 20}
+    refresh_meta = f"<meta http-equiv='refresh' content='{refresh_titles.get(str(title), 0)}'>" if str(title) in refresh_titles else ""
 
     nav_groups=[
         ("Main", [
@@ -75,6 +77,7 @@ def page(title, body, guild_id=0):
             links += f"<a class='nav-link{active}' href='{h}'>{escape(t)}</a>"
 
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title>
+{refresh_meta}
 <style>
 :root{{
   --bg:#060915;--panel:#0b1020;--panel2:#11182b;--card:#0f172a;--card2:#101827;--line:#243044;
@@ -106,6 +109,7 @@ h1{{margin:0;font-size:31px;letter-spacing:-.055em}}
 .muted{{color:var(--muted)}}
 .pill{{display:inline-flex;align-items:center;gap:6px;border:1px solid #334155;background:#0b1220;border-radius:999px;padding:7px 11px;color:#cbd5e1;font-size:12px}}
 .ok{{color:var(--ok)}}.bad{{color:var(--bad)}}.warn{{color:var(--warn)}}.info{{color:var(--blue)}}
+.pill.ok{{border-color:rgba(74,222,128,.35);color:var(--ok)}}.pill.bad{{border-color:rgba(251,113,133,.35);color:var(--bad)}}.pill.warn{{border-color:rgba(251,191,36,.35);color:var(--warn)}}.pill.info{{border-color:rgba(96,165,250,.35);color:var(--blue)}}
 table{{width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border-radius:16px}}
 th{{color:#cbd5e1;background:#090f1d;font-size:12px;text-transform:uppercase;letter-spacing:.06em}}
 td,th{{border-bottom:1px solid rgba(148,163,184,.12);padding:11px;text-align:left;vertical-align:top}}
