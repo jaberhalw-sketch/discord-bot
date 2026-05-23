@@ -17,7 +17,7 @@ COMMAND_SYSTEM = {
     "تحذير":"protection","تحذيرات":"protection","مسح_تحذيرات":"protection",
     "متجر":"shop","شراء":"shop","صندوق":"shop",
     "سحب":"giveaway","فعالية":"giveaway",
-    "مساعدة":"utility","بنق":"utility","اعداد":"admin","لوحة":"admin","قفل":"admin","فتح":"admin","مسح":"admin"
+    "مساعدة":"utility","بنق":"utility","شرح_الاقتصاد":"utility","شرح_القمار":"utility","شرح_البوت":"utility","ارسال_الشروحات":"admin","اعداد":"admin","لوحة":"admin","قفل":"admin","فتح":"admin","مسح":"admin"
 }
 
 def ensure_guild(guild_id:int, guild_name:str=""):
@@ -30,6 +30,11 @@ def ensure_guild(guild_id:int, guild_name:str=""):
     if guild_name:
         cur.execute("UPDATE guild_settings SET guild_name=?, updated_at=? WHERE guild_id=?",
                     (str(guild_name)[:180], now, gid))
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN dev_mode_enabled INTEGER DEFAULT 0")
+    except Exception:
+        pass
     for k,v in SYSTEM_DEFAULTS.items():
         cur.execute("""INSERT OR IGNORE INTO system_toggles (guild_id,system_key,enabled,updated_at)
         VALUES (?,?,?,?)""", (gid,k,1 if v else 0,now))
@@ -93,6 +98,7 @@ def update_channel(guild_id:int, key:str, value:int):
 def command_system(command_name:str)->str:
     return COMMAND_SYSTEM.get(str(command_name or "").lower(), COMMAND_SYSTEM.get(str(command_name or ""), "utility"))
 
+
 def get_command_channel_id(guild_id:int)->int:
     gs = get_guild_settings(guild_id)
     return int(gs.get("commands_channel_id") or 0)
@@ -113,3 +119,25 @@ def channel_restriction_for_system(guild_id:int, system_key:str)->int:
         return get_command_channel_id(guild_id)
     return 0
 
+
+def is_dev_mode_enabled(guild_id:int)->bool:
+    ensure_guild(guild_id)
+    conn=db(); cur=conn.cursor()
+    try:
+        cur.execute("SELECT dev_mode_enabled FROM guild_settings WHERE guild_id=?", (int(guild_id),))
+        row=cur.fetchone()
+        conn.close()
+        return bool(row and int(row["dev_mode_enabled"] or 0))
+    except Exception:
+        conn.close()
+        return False
+
+def set_dev_mode_enabled(guild_id:int, enabled:bool):
+    ensure_guild(guild_id)
+    conn=db(); cur=conn.cursor()
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN dev_mode_enabled INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    cur.execute("UPDATE guild_settings SET dev_mode_enabled=?, updated_at=? WHERE guild_id=?", (1 if enabled else 0,int(time.time()),int(guild_id)))
+    conn.commit(); conn.close()
