@@ -1,57 +1,96 @@
-import re, time
+import re
+import time
+from collections import defaultdict, deque
 from nmcore.db import db
 from nmcore.services.activity import log_event
 
-OLD_DEFAULT_BAD_WORDS = "قحبه,قحبة,كس,كسمك,fuck,shit,bitch"
-DEFAULT_BAD_WORDS = "قواد,خنيث,قحبه,قحبة,شرموط,شرموطه,شرموطة,سالب,كس,كس امك,كس اختك,كس اخوك,كس والديك,كسمك,كسمكم,كسمه,كسم,كسختك,كسامك,كساختك,كساخوك,كسابوك,كسس,كسي,كسى,كىس,كءس,طيزي,طيزك,طيز,انيكك,انيك,انيككك,انيك ابوك,انيك اختك,انيك اخوك,انيك امك,ازغب,جرار,معرس,اعرسك,ممحون,ممحونه,ممحونة,ممحونهه,محنه,محنة,العقه,العقة,قضي,زبي,زب,زبك,زبه,زبري,زنى,زاني,زانيه,زنوه,فقحة,فقحه,عيري,عيرك,عير,منيكه,منيوك,منيوكه,منيك,متناك,متناكه,مفتوحه,مقحب,مقحبه,ناك,نيك,مص,مصه,مصي,مصزبي,مص لين تغص,مص لين تنام,الحس,الحسيه,لحس,العق,خول,ديوث,عرص,عرصه,ياعرص,ياعرصه,قحب,قحبة*,قحبه في قحبه,يقحبه,ياقحبة,ياقحبه,بنت القحبه,يابن القحبه,يابن القحب,يابن القحاب,يابن الستين قحبه,يابن الشرموطه,يابن الشراميط,يابن المتناك,يابن المتناكه,يابن المتانيك,يابن الحرام,يبن الحرام,ابن حرام,ابن قحب,ابن قحبه,ابن الزاني,ابن الزانيه,يابن الزانيه,يا خول,يخول,يابن الخول,يابن الديوث,يابن الديوثه,ياشرموط,ياشرموطه,يازانيه,يزبي,يا ابن زبي,ياكسمك,ياكسختك,يكسمك,يامتناك,يامتناكه,يامهان,يامهانه,مهان,مهانه,جلخ,جلخت,اجلخ,اجلخ عليك,اركب عليه,اركبه,اركبي عليه,اركب على زبي,اركب علي زبي,اركب على الغالي,اركب علي الغالي,تعال اركب على زبي,على زبي,عض الغالي,تبي تتناك,تبي تمص,سكس,سكىس,سىكىس,سىكس,كلزب,كل زق يبن الشرمطه,نظام مقحبه,fuck,fucking,fucked,fucker,motherfucker,shit,bullshit,bitch,bitches,asshole,dick,cock,pussy,cunt,slut,whore,sex,suck my dick,smd,stfu,kys,3leh,3r9,3r9h,5alk,5altk,87bh,a5ok,a5tk,abok,aft7k,agl5,ajl5,al3a'le,al3'aly,al87bh,amk,anek,anekk,arkb,arkb 3leh,arkbe,arkbh,arkby,bzne,bzny,g7bh,ghbh,jtle5,ks,ks a5tk,ks-mk,ks5tk,kse,ksmk,ksy,lanek,m3r9,m7nh,m87bh,m9,mfto7,mfto7h,mhan,mhanh,mm7on,mm7onh,mnyok,mtnak,mtnakh,sharmo6h,shrame6,shrm6h,shrmo6h,shrmoth,sks,tjl5,tm9,tm9en,y87bh,ya87bh,yabn,ybn,zane,zaneh,zany,zanyh,zbe,zbo,zby,zpe,zpo,kos,kosk,kosmk,kosomk,kos omk,kos amk,zob,zeb,zebi,zebak,ayri,ayrk,eeri,3air,neek,nek,anik,aneek,aneekk,sharmoot,sharmoota,sharmouta,qahba,gahba,8ahba,9ahba,khaneeth,khaneth,5aneeth,teez,teezak,teezy,6eez,mamhon,mamhoon"
 
-def get_default_bad_words():
-    return DEFAULT_BAD_WORDS
+_message_times = defaultdict(deque)
+_duplicate_messages = defaultdict(deque)
 
-def get_settings(guild_id:int)->dict:
+
+DEFAULTS = {
+    "enabled": 1,
+    "bad_words_enabled": 1,
+    "links_enabled": 1,
+    "spam_enabled": 1,
+    "mass_mention_enabled": 1,
+    "delete_messages": 1,
+    "timeout_enabled": 0,
+    "bad_words": "قواد,خنيث,قحبه,قحبة,شرموط,شرموطه,شرموطة,سالب,كس,كس امك,كس اختك,كس اخوك,كس والديك,كسمك,كسمكم,كسمه,كسم,كسختك,كسامك,كساختك,كساخوك,كسابوك,كسس,كسي,كسى,كىس,كءس,طيزي,طيزك,طيز,انيكك,انيك,انيككك,انيك ابوك,انيك اختك,انيك اخوك,انيك امك,ازغب,جرار,معرس,اعرسك,ممحون,ممحونه,ممحونة,ممحونهه,محنه,محنة,العقه,العقة,قضي,زبي,زب,زبك,زبه,زبري,زنى,زاني,زانيه,زنوه,فقحة,فقحه,عيري,عيرك,عير,منيكه,منيوك,منيوكه,منيك,متناك,متناكه,مفتوحه,مقحب,مقحبه,ناك,نيك,مص,مصه,مصي,مصزبي,مص لين تغص,مص لين تنام,الحس,الحسيه,لحس,العق,خول,ديوث,عرص,عرصه,ياعرص,ياعرصه,قحب,قحبة*,قحبه في قحبه,يقحبه,ياقحبة,ياقحبه,بنت القحبه,يابن القحبه,يابن القحب,يابن القحاب,يابن الستين قحبه,يابن الشرموطه,يابن الشراميط,يابن المتناك,يابن المتناكه,يابن المتانيك,يابن الحرام,يبن الحرام,ابن حرام,ابن قحب,ابن قحبه,ابن الزاني,ابن الزانيه,يابن الزانيه,يا خول,يخول,يابن الخول,يابن الديوث,يابن الديوثه,ياشرموط,ياشرموطه,يازانيه,يزبي,يا ابن زبي,ياكسمك,ياكسختك,يكسمك,يامتناك,يامتناكه,يامهان,يامهانه,مهان,مهانه,جلخ,جلخت,اجلخ,اجلخ عليك,اركب عليه,اركبه,اركبي عليه,اركب على زبي,اركب علي زبي,اركب على الغالي,اركب علي الغالي,تعال اركب على زبي,على زبي,عض الغالي,تبي تتناك,تبي تمص,سكس,سكىس,سىكىس,سىكس,كلزب,كل زق يبن الشرمطه,نظام مقحبه,fuck,fucking,fucked,fucker,motherfucker,shit,bullshit,bitch,bitches,asshole,dick,cock,pussy,cunt,slut,whore,sex,suck my dick,smd,stfu,kys,3leh,3r9,3r9h,5alk,5altk,87bh,a5ok,a5tk,abok,aft7k,agl5,ajl5,al3a'le,al3'aly,al87bh,amk,anek,anekk,arkb,arkb 3leh,arkbe,arkbh,arkby,bzne,bzny,g7bh,ghbh,jtle5,ks,ks a5tk,ks-mk,ks5tk,kse,ksmk,ksy,lanek,m3r9,m7nh,m87bh,m9,mfto7,mfto7h,mhan,mhanh,mm7on,mm7onh,mnyok,mtnak,mtnakh,sharmo6h,shrame6,shrm6h,shrmo6h,shrmoth,sks,tjl5,tm9,tm9en,y87bh,ya87bh,yabn,ybn,zane,zaneh,zany,zanyh,zbe,zbo,zby,zpe,zpo,kos,kosk,kosmk,kosomk,kos omk,kos amk,zob,zeb,zebi,zebak,ayri,ayrk,eeri,3air,neek,nek,anik,aneek,aneekk,sharmoot,sharmoota,sharmouta,qahba,gahba,8ahba,9ahba,khaneeth,khaneth,5aneeth,teez,teezak,teezy,6eez,mamhon,mamhoon"
+    "ignored_channels": "",
+    "whitelist_roles": "",
+    "spam_threshold": 5,
+    "spam_window": 8,
+    "mention_threshold": 5,
+    "caps_enabled": 0,
+    "caps_percent": 80,
+    "caps_min_length": 12,
+    "duplicate_enabled": 1,
+    "duplicate_threshold": 3,
+    "duplicate_window": 15,
+    "invite_block_enabled": 1,
+    "link_whitelist": "",
+    "max_newlines_enabled": 0,
+    "max_newlines": 10,
+}
+
+
+def ensure_schema():
+    conn = db()
+    cur = conn.cursor()
+
+    columns = {
+        "spam_threshold": "INTEGER DEFAULT 5",
+        "spam_window": "INTEGER DEFAULT 8",
+        "mention_threshold": "INTEGER DEFAULT 5",
+        "caps_enabled": "INTEGER DEFAULT 0",
+        "caps_percent": "INTEGER DEFAULT 80",
+        "caps_min_length": "INTEGER DEFAULT 12",
+        "duplicate_enabled": "INTEGER DEFAULT 1",
+        "duplicate_threshold": "INTEGER DEFAULT 3",
+        "duplicate_window": "INTEGER DEFAULT 15",
+        "invite_block_enabled": "INTEGER DEFAULT 1",
+        "link_whitelist": "TEXT DEFAULT ''",
+        "max_newlines_enabled": "INTEGER DEFAULT 0",
+        "max_newlines": "INTEGER DEFAULT 10",
+    }
+
+    for name, sql in columns.items():
+        try:
+            cur.execute(f"ALTER TABLE protection_settings ADD COLUMN {name} {sql}")
+        except Exception:
+            pass
+
+    conn.commit()
+    conn.close()
+
+
+def get_settings(guild_id:int) -> dict:
+    ensure_schema()
+
     conn = db()
     cur = conn.cursor()
     cur.execute("INSERT OR IGNORE INTO protection_settings (guild_id,updated_at) VALUES (?,?)", (int(guild_id), int(time.time())))
     conn.commit()
-
     cur.execute("SELECT * FROM protection_settings WHERE guild_id=?", (int(guild_id),))
     row = cur.fetchone()
-
-    if row:
-        data = dict(row)
-        current = str(data.get("bad_words") or "").strip()
-
-        # Auto-upgrade empty or old V9 default list into the full protection list.
-        if not current or current == OLD_DEFAULT_BAD_WORDS:
-            cur.execute(
-                "UPDATE protection_settings SET bad_words=?, updated_at=? WHERE guild_id=?",
-                (DEFAULT_BAD_WORDS, int(time.time()), int(guild_id))
-            )
-            conn.commit()
-            data["bad_words"] = DEFAULT_BAD_WORDS
-
-        conn.close()
-        return data
-
     conn.close()
-    return {}
+
+    data = dict(row) if row else {}
+    for k, v in DEFAULTS.items():
+        data.setdefault(k, v)
+
+    return data
+
 
 def update_settings(guild_id:int, data:dict):
+    ensure_schema()
     old = get_settings(guild_id)
-    keys = [
-        "enabled",
-        "bad_words_enabled",
-        "links_enabled",
-        "spam_enabled",
-        "mass_mention_enabled",
-        "delete_messages",
-        "timeout_enabled",
-        "bad_words",
-        "ignored_channels",
-        "whitelist_roles"
-    ]
 
+    keys = list(DEFAULTS.keys())
     vals = {}
+
     for k in keys:
         if k in data:
             vals[k] = data[k]
@@ -67,49 +106,25 @@ def update_settings(guild_id:int, data:dict):
     conn.commit()
     conn.close()
 
+
+def get_default_bad_words():
+    return DEFAULTS["bad_words"]
+
+
 def normalize(text):
     text = str(text or "").lower()
-
     repl = {
-        "أ": "ا",
-        "إ": "ا",
-        "آ": "ا",
-        "ى": "ي",
-        "ة": "ه",
-        "ؤ": "و",
-        "ئ": "ي",
-        "ـ": "",
+        "أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه",
+        "ؤ": "و", "ئ": "ي", "ـ": ""
     }
 
     for a, b in repl.items():
         text = text.replace(a, b)
 
-    # Important: do NOT remove spaces or join words together.
-    # This prevents false positives like normal words containing banned substrings.
     text = re.sub(r"[^a-z0-9\u0600-\u06FF]+", " ", text)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
 
-def contains_bad(text, words):
-    msg = normalize(text)
-    tokens = set(msg.split())
-
-    for raw in words:
-        w = normalize(raw)
-        if not w:
-            continue
-
-        parts = w.split()
-
-        if len(parts) == 1:
-            if parts[0] in tokens:
-                return True
-        else:
-            pat = r"(?<![\w\u0600-\u06FF])" + r"\s+".join(re.escape(p) for p in parts) + r"(?![\w\u0600-\u06FF])"
-            if re.search(pat, msg):
-                return True
-
-    return False
 
 def matched_bad_word(text, words):
     msg = normalize(text)
@@ -117,6 +132,7 @@ def matched_bad_word(text, words):
 
     for raw in words:
         w = normalize(raw)
+
         if not w:
             continue
 
@@ -132,5 +148,216 @@ def matched_bad_word(text, words):
 
     return ""
 
-def has_link(text):
-    return bool(re.search(r"https?://|discord\.gg/|www\.", str(text or ""), re.I))
+
+def contains_bad(text, words):
+    return bool(matched_bad_word(text, words))
+
+
+def list_from_text(value):
+    return [x.strip() for x in str(value or "").replace("\n", ",").split(",") if x.strip()]
+
+
+def int_set_from_text(value):
+    return {int(x) for x in list_from_text(value) if str(x).isdigit()}
+
+
+def is_ignored_channel(settings, channel_id:int) -> bool:
+    return int(channel_id) in int_set_from_text(settings.get("ignored_channels"))
+
+
+def is_whitelisted_member(settings, member) -> bool:
+    role_ids = int_set_from_text(settings.get("whitelist_roles"))
+    if not role_ids:
+        return False
+    return any(int(getattr(r, "id", 0)) in role_ids for r in getattr(member, "roles", []))
+
+
+def link_allowed_by_whitelist(text, settings) -> bool:
+    whitelist = [w.lower() for w in list_from_text(settings.get("link_whitelist"))]
+    if not whitelist:
+        return False
+
+    lower = str(text or "").lower()
+    return any(w and w in lower for w in whitelist)
+
+
+def has_link(text, settings=None):
+    raw = str(text or "")
+    if settings and link_allowed_by_whitelist(raw, settings):
+        return False
+
+    if bool(re.search(r"https?://|www\.", raw, re.I)):
+        return True
+
+    if settings and int(settings.get("invite_block_enabled", 1) or 0):
+        if bool(re.search(r"(discord\.gg/|discord\.com/invite/|discordapp\.com/invite/)", raw, re.I)):
+            return True
+
+    return False
+
+
+def is_mass_mention(message, settings):
+    threshold = int(settings.get("mention_threshold", 5) or 5)
+    count = len(getattr(message, "mentions", []) or []) + len(getattr(message, "role_mentions", []) or [])
+
+    if "@everyone" in str(message.content) or "@here" in str(message.content):
+        count += threshold
+
+    return count >= threshold, count
+
+
+def is_caps_abuse(text, settings):
+    if not int(settings.get("caps_enabled", 0) or 0):
+        return False, 0
+
+    raw = str(text or "")
+    letters = [c for c in raw if c.isalpha()]
+
+    if len(letters) < int(settings.get("caps_min_length", 12) or 12):
+        return False, 0
+
+    upper = sum(1 for c in letters if c.isupper())
+    percent = int((upper / max(1, len(letters))) * 100)
+    return percent >= int(settings.get("caps_percent", 80) or 80), percent
+
+
+def is_newline_spam(text, settings):
+    if not int(settings.get("max_newlines_enabled", 0) or 0):
+        return False, 0
+
+    count = str(text or "").count("\n")
+    return count > int(settings.get("max_newlines", 10) or 10), count
+
+
+def is_rate_spam(guild_id, user_id, settings):
+    if not int(settings.get("spam_enabled", 1) or 0):
+        return False, 0
+
+    threshold = int(settings.get("spam_threshold", 5) or 5)
+    window = int(settings.get("spam_window", 8) or 8)
+    now = time.time()
+    key = (int(guild_id), int(user_id))
+    q = _message_times[key]
+
+    q.append(now)
+
+    while q and now - q[0] > window:
+        q.popleft()
+
+    return len(q) >= threshold, len(q)
+
+
+def is_duplicate_spam(guild_id, user_id, content, settings):
+    if not int(settings.get("duplicate_enabled", 1) or 0):
+        return False, 0
+
+    threshold = int(settings.get("duplicate_threshold", 3) or 3)
+    window = int(settings.get("duplicate_window", 15) or 15)
+    now = time.time()
+    key = (int(guild_id), int(user_id))
+    q = _duplicate_messages[key]
+
+    norm = normalize(content)
+    q.append((now, norm))
+
+    while q and now - q[0][0] > window:
+        q.popleft()
+
+    count = sum(1 for ts, txt in q if txt and txt == norm)
+    return count >= threshold, count
+
+
+def check_message(message, settings):
+    """
+    Returns:
+    {
+      "blocked": bool,
+      "warning": bool,
+      "kind": str,
+      "reason": str,
+      "matched": str,
+      "details": str
+    }
+    """
+    content = str(getattr(message, "content", "") or "")
+    words = [w.strip() for w in str(settings.get("bad_words") or "").split(",") if w.strip()]
+
+    if int(settings.get("bad_words_enabled", 1) or 0):
+        match = matched_bad_word(content, words)
+        if match:
+            return {
+                "blocked": True,
+                "warning": True,
+                "kind": "bad_word",
+                "reason": "استخدام كلمة ممنوعة في السيرفر",
+                "matched": match,
+                "details": f"Matched bad word: {match}",
+            }
+
+    if int(settings.get("links_enabled", 1) or 0) and has_link(content, settings):
+        return {
+            "blocked": True,
+            "warning": False,
+            "kind": "link",
+            "reason": "إرسال رابط ممنوع",
+            "matched": "",
+            "details": "Blocked link or invite",
+        }
+
+    if int(settings.get("mass_mention_enabled", 1) or 0):
+        bad, count = is_mass_mention(message, settings)
+        if bad:
+            return {
+                "blocked": True,
+                "warning": True,
+                "kind": "mass_mention",
+                "reason": "منشن جماعي أو منشنات كثيرة",
+                "matched": str(count),
+                "details": f"Mentions count: {count}",
+            }
+
+    bad, percent = is_caps_abuse(content, settings)
+    if bad:
+        return {
+            "blocked": True,
+            "warning": False,
+            "kind": "caps",
+            "reason": "استخدام حروف كبيرة بشكل مزعج",
+            "matched": f"{percent}%",
+            "details": f"Caps percent: {percent}%",
+        }
+
+    bad, newlines = is_newline_spam(content, settings)
+    if bad:
+        return {
+            "blocked": True,
+            "warning": False,
+            "kind": "newlines",
+            "reason": "رسالة طويلة بأسطر كثيرة",
+            "matched": str(newlines),
+            "details": f"Newlines: {newlines}",
+        }
+
+    bad, count = is_duplicate_spam(message.guild.id, message.author.id, content, settings)
+    if bad:
+        return {
+            "blocked": True,
+            "warning": True,
+            "kind": "duplicate_spam",
+            "reason": "تكرار نفس الرسالة أكثر من مرة",
+            "matched": str(count),
+            "details": f"Duplicate count: {count}",
+        }
+
+    bad, count = is_rate_spam(message.guild.id, message.author.id, settings)
+    if bad:
+        return {
+            "blocked": True,
+            "warning": True,
+            "kind": "spam",
+            "reason": "سبام رسائل بسرعة عالية",
+            "matched": str(count),
+            "details": f"Messages in window: {count}",
+        }
+
+    return {"blocked": False, "warning": False, "kind": "", "reason": "", "matched": "", "details": ""}
