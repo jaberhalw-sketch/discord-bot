@@ -184,3 +184,114 @@ def system_overview(guild_id:int):
         "commands_channel_id": int(settings.get("commands_channel_id") or 0),
         "gambling_channel_id": int(settings.get("gambling_channel_id") or 0),
     }
+
+
+def shop_summary(guild_id:int):
+    conn = db()
+    cur = conn.cursor()
+    out = {
+        "items": 0,
+        "enabled_items": 0,
+        "purchases": 0,
+        "sales_total": 0,
+        "top_items": [],
+        "top_buyers": [],
+        "recent": [],
+    }
+
+    try:
+        cur.execute("SELECT COUNT(*) c, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled FROM shop_items WHERE guild_id=?", (int(guild_id),))
+        r = cur.fetchone()
+        out["items"] = int(r["c"] or 0)
+        out["enabled_items"] = int(r["enabled"] or 0)
+    except Exception:
+        pass
+
+    try:
+        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(price),0) total FROM shop_purchases WHERE guild_id=?", (int(guild_id),))
+        r = cur.fetchone()
+        out["purchases"] = int(r["c"] or 0)
+        out["sales_total"] = int(r["total"] or 0)
+
+        cur.execute("""SELECT item_key, COUNT(*) c, COALESCE(SUM(price),0) total
+        FROM shop_purchases WHERE guild_id=?
+        GROUP BY item_key ORDER BY total DESC LIMIT 10""", (int(guild_id),))
+        out["top_items"] = [dict(x) for x in cur.fetchall()]
+
+        cur.execute("""SELECT user_id, user_name, COUNT(*) c, COALESCE(SUM(price),0) total
+        FROM shop_purchases WHERE guild_id=?
+        GROUP BY user_id, user_name ORDER BY total DESC LIMIT 10""", (int(guild_id),))
+        out["top_buyers"] = [dict(x) for x in cur.fetchall()]
+
+        cur.execute("""SELECT * FROM shop_purchases WHERE guild_id=? ORDER BY id DESC LIMIT 25""", (int(guild_id),))
+        out["recent"] = [dict(x) for x in cur.fetchall()]
+    except Exception:
+        pass
+
+    conn.close()
+    return out
+
+
+def profit_loss_summary(guild_id:int):
+    money = money_summary(guild_id)
+    casino = casino_summary(guild_id)
+    shop = shop_summary(guild_id)
+
+    # "Server profit" here means money sinks / house net that remove currency from users.
+    # Economy is virtual, so this is for admin tracking, not real money.
+    server_profit = int(casino.get("house_net", 0)) + int(shop.get("sales_total", 0))
+    server_payouts = int(money.get("money_in", 0))
+    user_spending = int(money.get("money_out", 0))
+
+    return {
+        "server_profit": server_profit,
+        "server_payouts": server_payouts,
+        "user_spending": user_spending,
+        "casino_house_net": int(casino.get("house_net", 0)),
+        "shop_sales": int(shop.get("sales_total", 0)),
+        "ledger_net": int(money.get("net", 0)),
+    }
+
+
+def user_finance_summary(guild_id:int, limit:int=15):
+    conn = db()
+    cur = conn.cursor()
+    out = {"top_spenders": [], "top_receivers": [], "top_net": [], "bottom_net": []}
+
+    try:
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
+        COALESCE(SUM(amount),0) net,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY spent DESC LIMIT ?""", (int(guild_id), int(limit)))
+        out["top_spenders"] = [dict(x) for x in cur.fetchall()]
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
+        COALESCE(SUM(amount),0) net,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY received DESC LIMIT ?""", (int(guild_id), int(limit)))
+        out["top_receivers"] = [dict(x) for x in cur.fetchall()]
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(amount),0) net,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY net DESC LIMIT ?""", (int(guild_id), int(limit)))
+        out["top_net"] = [dict(x) for x in cur.fetchall()]
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(amount),0) net,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY net ASC LIMIT ?""", (int(guild_id), int(limit)))
+        out["bottom_net"] = [dict(x) for x in cur.fetchall()]
+    except Exception:
+        pass
+
+    conn.close()
+    return out
