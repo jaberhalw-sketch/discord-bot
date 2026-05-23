@@ -486,6 +486,11 @@ def setup_bot(bot):
             member
         )
 
+        if member.bot:
+            entry = await get_latest_audit(member.guild, discord.AuditLogAction.bot_add, member.id)
+            if entry:
+                await handle_antiraid_action(bot, member.guild, "bot_add", entry.user, f"Bot `{member}` (`{member.id}`)", entry.reason or "")
+
     @bot.event
     async def on_member_remove(member):
         leave_type, moderator, reason = await detect_leave_type(member)
@@ -581,7 +586,17 @@ def setup_bot(bot):
     @bot.event
     async def on_guild_role_update(before, after):
         entry = await get_latest_audit(after.guild, discord.AuditLogAction.role_update, after.id)
+        added_perms = antiraid.dangerous_perms_added(before.permissions, after.permissions)
         if entry:
+            if added_perms:
+                await handle_antiraid_action(
+                    bot,
+                    after.guild,
+                    "dangerous_role_update",
+                    entry.user,
+                    f"Role `{after.name}` (`{after.id}`) added dangerous perms: {', '.join(added_perms)}",
+                    entry.reason or ""
+                )
             await handle_antiraid_action(bot, after.guild, "role_update", entry.user, f"Role `{after.name}` (`{after.id}`)", entry.reason or "")
 
     @bot.event
@@ -610,9 +625,15 @@ def setup_bot(bot):
 
     @bot.event
     async def on_webhooks_update(channel):
-        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.webhook_create, None)
-        if entry:
-            await handle_antiraid_action(bot, channel.guild, "webhook_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+        for action_type, audit_action in [
+            ("webhook_create", discord.AuditLogAction.webhook_create),
+            ("webhook_update", discord.AuditLogAction.webhook_update),
+            ("webhook_delete", discord.AuditLogAction.webhook_delete),
+        ]:
+            entry = await get_latest_audit(channel.guild, audit_action, None)
+            if entry:
+                await handle_antiraid_action(bot, channel.guild, action_type, entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+                break
 
 
     @bot.event
