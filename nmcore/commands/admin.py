@@ -105,7 +105,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!فحص_كامل` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!تقرير_الأرباح` `!تقرير_المشتريات` `!فحص_كامل` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -196,6 +196,42 @@ def setup(bot):
 
 
 
+
+
+
+    @bot.command(name="تقرير_الأرباح", aliases=["profit_report", "profits"])
+    async def profit_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        pnl = reports.profit_loss_summary(ctx.guild.id)
+        e = embed("📈 تقرير الأرباح والخسائر", "تتبع سريع لحركة الاقتصاد.", "ok", ctx.author)
+        e.add_field(name="Tracked Server Profit", value=f"{int(pnl['server_profit']):,}", inline=True)
+        e.add_field(name="Casino House Net", value=f"{int(pnl['casino_house_net']):,}", inline=True)
+        e.add_field(name="Shop Sales", value=f"{int(pnl['shop_sales']):,}", inline=True)
+        e.add_field(name="User Spending", value=f"{int(pnl['user_spending']):,}", inline=True)
+        e.add_field(name="Server Payouts", value=f"{int(pnl['server_payouts']):,}", inline=True)
+        e.add_field(name="Ledger Net", value=f"{int(pnl['ledger_net']):,}", inline=True)
+        await ctx.reply(embed=e)
+
+    @bot.command(name="تقرير_المشتريات", aliases=["purchase_report", "shop_report"])
+    async def purchase_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        shop = reports.shop_summary(ctx.guild.id)
+        lines = []
+        for item in shop["top_items"][:8]:
+            lines.append(f"`{item.get('item_key')}` — purchases={int(item.get('c') or 0):,} total={int(item.get('total') or 0):,}")
+
+        e = embed("🛒 تقرير المشتريات", "\n".join(lines) if lines else "ما فيه مشتريات للحين.", "purple", ctx.author)
+        e.add_field(name="Items", value=f"{shop['items']:,}", inline=True)
+        e.add_field(name="Enabled", value=f"{shop['enabled_items']:,}", inline=True)
+        e.add_field(name="Purchases", value=f"{shop['purchases']:,}", inline=True)
+        e.add_field(name="Sales Total", value=f"{shop['sales_total']:,}", inline=True)
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="فحص_كامل", aliases=["full_check", "check_all"])
