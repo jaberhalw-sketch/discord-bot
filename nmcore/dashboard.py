@@ -10,6 +10,7 @@ from nmcore.services import antiraid
 from nmcore.services import security
 from nmcore.services import full_check
 from nmcore.services import reports
+from nmcore.services import post_rewards
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -2079,6 +2080,17 @@ DASHBOARD_BASE_URL</pre>
         if request.method == "POST":
             action = request.form.get("action", "").strip()
 
+            if action == "save_post_rewards":
+                post_rewards.update_settings(
+                    g,
+                    enabled=bool(request.form.get("post_reward_enabled")),
+                    amount=int(request.form.get("post_reward_amount") or 5000),
+                    channel_ids=request.form.get("post_reward_channels", ""),
+                    min_length=int(request.form.get("post_reward_min_length") or 5),
+                    cooldown_seconds=int(request.form.get("post_reward_cooldown") or 0)
+                )
+                return redirect(f"/dashboard/settings?guild_id={g}")
+
             if action == "save_dev_mode":
                 set_dev_mode_enabled(g, bool(request.form.get("dev_mode_enabled")))
                 return redirect(f"/dashboard/settings?guild_id={g}")
@@ -2117,6 +2129,7 @@ DASHBOARD_BASE_URL</pre>
         gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
         logs_channel_id = int(gs.get("logs_channel_id") or 0)
         log_map = all_log_channels(g)
+        pr = post_rewards.get_settings(g)
 
         checks = "".join(
             f"<label><input type=checkbox name='toggle_{k}' {'checked' if v else ''}> {k}</label><br>"
@@ -2141,6 +2154,26 @@ DASHBOARD_BASE_URL</pre>
           <div class='card'><div class='muted'>Commands Room</div><div class='stat'>{f'<#{commands_channel_id}>' if commands_channel_id else 'OFF'}</div></div>
           <div class='card'><div class='muted'>Gambling Room</div><div class='stat'>{f'<#{gambling_channel_id}>' if gambling_channel_id else 'OFF'}</div></div>
           <div class='card'><div class='muted'>General Logs</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
+        </div>
+
+        <div class='card kpi-good'>
+          <h3>Post Reward / مكافأة البوست</h3>
+          <p class='muted'>يعطي العضو مبلغ تلقائيًا لكل بوست في الرومات المحددة.</p>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='save_post_rewards'>
+            <label><input type=checkbox name=post_reward_enabled {'checked' if int(pr.get('enabled') or 0) else ''}> Enabled</label><br><br>
+            Amount per post<br>
+            <input name=post_reward_amount type=number min=0 value='{int(pr.get('amount') or 5000)}'><br><br>
+            Channel IDs<br>
+            <textarea name=post_reward_channels style='width:100%;height:70px' placeholder='Channel IDs separated by comma'>{esc(pr.get('channel_ids') or '')}</textarea><br><br>
+            Minimum text length<br>
+            <input name=post_reward_min_length type=number min=0 value='{int(pr.get('min_length') or 5)}'><br><br>
+            Cooldown seconds per user<br>
+            <input name=post_reward_cooldown type=number min=0 value='{int(pr.get('cooldown_seconds') or 0)}'><br><br>
+            <button>Save Post Reward</button>
+          </form>
+          <p class='muted'><a href='/dashboard/post-rewards?guild_id={g}'>Open Post Rewards Report</a></p>
         </div>
 
         <div class='card kpi-warn'>
