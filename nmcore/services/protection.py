@@ -16,26 +16,20 @@ DEFAULTS = {
     "mass_mention_enabled": 1,
     "delete_messages": 1,
     "timeout_enabled": 0,
-    "bad_words": "قواد,خنيث,قحبه,قحبة,شرموط,شرموطه,شرموطة,سالب,كس,كس امك,كس اختك,كس اخوك,كس والديك,كسمك,كسمكم,كسمه,كسم,كسختك,كسامك,كساختك,كساخوك,كسابوك,كسس,كسي,كسى,كىس,كءس,طيزي,طيزك,طيز,انيكك,انيك,انيككك,انيك ابوك,انيك اختك,انيك اخوك,انيك امك,ازغب,جرار,معرس,اعرسك,ممحون,ممحونه,ممحونة,ممحونهه,محنه,محنة,العقه,العقة,قضي,زبي,زب,زبك,زبه,زبري,زنى,زاني,زانيه,زنوه,فقحة,فقحه,عيري,عيرك,عير,منيكه,منيوك,منيوكه,منيك,متناك,متناكه,مفتوحه,مقحب,مقحبه,ناك,نيك,مص,مصه,مصي,مصزبي,مص لين تغص,مص لين تنام,الحس,الحسيه,لحس,العق,خول,ديوث,عرص,عرصه,ياعرص,ياعرصه,قحب,قحبة*,قحبه في قحبه,يقحبه,ياقحبة,ياقحبه,بنت القحبه,يابن القحبه,يابن القحب,يابن القحاب,يابن الستين قحبه,يابن الشرموطه,يابن الشراميط,يابن المتناك,يابن المتناكه,يابن المتانيك,يابن الحرام,يبن الحرام,ابن حرام,ابن قحب,ابن قحبه,ابن الزاني,ابن الزانيه,يابن الزانيه,يا خول,يخول,يابن الخول,يابن الديوث,يابن الديوثه,ياشرموط,ياشرموطه,يازانيه,يزبي,يا ابن زبي,ياكسمك,ياكسختك,يكسمك,يامتناك,يامتناكه,يامهان,يامهانه,مهان,مهانه,جلخ,جلخت,اجلخ,اجلخ عليك,اركب عليه,اركبه,اركبي عليه,اركب على زبي,اركب علي زبي,اركب على الغالي,اركب علي الغالي,تعال اركب على زبي,على زبي,عض الغالي,تبي تتناك,تبي تمص,سكس,سكىس,سىكىس,سىكس,كلزب,كل زق يبن الشرمطه,نظام مقحبه,fuck,fucking,fucked,fucker,motherfucker,shit,bullshit,bitch,bitches,asshole,dick,cock,pussy,cunt,slut,whore,sex,suck my dick,smd,stfu,kys,3leh,3r9,3r9h,5alk,5altk,87bh,a5ok,a5tk,abok,aft7k,agl5,ajl5,al3a'le,al3'aly,al87bh,amk,anek,anekk,arkb,arkb 3leh,arkbe,arkbh,arkby,bzne,bzny,g7bh,ghbh,jtle5,ks,ks a5tk,ks-mk,ks5tk,kse,ksmk,ksy,lanek,m3r9,m7nh,m87bh,m9,mfto7,mfto7h,mhan,mhanh,mm7on,mm7onh,mnyok,mtnak,mtnakh,sharmo6h,shrame6,shrm6h,shrmo6h,shrmoth,sks,tjl5,tm9,tm9en,y87bh,ya87bh,yabn,ybn,zane,zaneh,zany,zanyh,zbe,zbo,zby,zpe,zpo,kos,kosk,kosmk,kosomk,kos omk,kos amk,zob,zeb,zebi,zebak,ayri,ayrk,eeri,3air,neek,nek,anik,aneek,aneekk,sharmoot,sharmoota,sharmouta,qahba,gahba,8ahba,9ahba,khaneeth,khaneth,5aneeth,teez,teezak,teezy,6eez,mamhon,mamhoon"
+    "bad_words": "قحبه,قحبة,كس,كسمك,fuck,shit,bitch",
     "ignored_channels": "",
     "whitelist_roles": "",
-
-    # Anti controls
     "spam_threshold": 6,
     "spam_window": 8,
     "mention_threshold": 6,
-
     "duplicate_enabled": 1,
     "duplicate_threshold": 4,
     "duplicate_window": 15,
-
     "invite_block_enabled": 1,
     "link_whitelist": "",
-
     "caps_enabled": 0,
     "caps_percent": 85,
     "caps_min_length": 18,
-
     "max_newlines_enabled": 0,
     "max_newlines": 12,
 }
@@ -95,10 +89,8 @@ def get_settings(guild_id: int) -> dict:
 def update_settings(guild_id: int, data: dict):
     ensure_schema()
 
-    allowed = list(DEFAULTS.keys())
     vals = {}
-
-    for k in allowed:
+    for k in DEFAULTS.keys():
         if k in data:
             vals[k] = data[k]
 
@@ -120,21 +112,12 @@ def get_default_bad_words():
 
 def normalize(text):
     text = str(text or "").lower()
-    repl = {
-        "أ": "ا",
-        "إ": "ا",
-        "آ": "ا",
-        "ى": "ي",
-        "ة": "ه",
-        "ؤ": "و",
-        "ئ": "ي",
-        "ـ": "",
-    }
+    repl = {"أ": "ا", "إ": "ا", "آ": "ا", "ى": "ي", "ة": "ه", "ؤ": "و", "ئ": "ي", "ـ": ""}
 
     for a, b in repl.items():
         text = text.replace(a, b)
 
-    # IMPORTANT: we do NOT remove spaces and join words.
+    # IMPORTANT: spaces are preserved. We never join words together.
     text = re.sub(r"[^a-z0-9\u0600-\u06FF]+", " ", text)
     text = re.sub(r"(.)\1{2,}", r"\1", text)
     return re.sub(r"\s+", " ", text).strip()
@@ -145,11 +128,7 @@ def list_from_text(value):
 
 
 def int_set_from_text(value):
-    out = set()
-    for x in list_from_text(value):
-        if str(x).isdigit():
-            out.add(int(x))
-    return out
+    return {int(x) for x in list_from_text(value) if str(x).isdigit()}
 
 
 def matched_bad_word(text, words):
@@ -164,13 +143,12 @@ def matched_bad_word(text, words):
 
         parts = w.split()
 
-        # Single bad words must match as standalone tokens only.
         if len(parts) == 1:
+            # Single bad word must be standalone.
             if parts[0] in tokens:
                 return raw
-
-        # Bad phrases must match as complete phrases only.
         else:
+            # Phrase must be complete phrase, not substring.
             pat = r"(?<![\w\u0600-\u06FF])" + r"\s+".join(re.escape(p) for p in parts) + r"(?![\w\u0600-\u06FF])"
             if re.search(pat, msg):
                 return raw
@@ -187,18 +165,16 @@ def is_ignored_channel(settings, channel_id: int) -> bool:
 
 
 def is_whitelisted_member(settings, member) -> bool:
-    roles = int_set_from_text(settings.get("whitelist_roles"))
-    if not roles:
+    role_ids = int_set_from_text(settings.get("whitelist_roles"))
+    if not role_ids:
         return False
-
-    return any(int(getattr(role, "id", 0)) in roles for role in getattr(member, "roles", []))
+    return any(int(getattr(role, "id", 0)) in role_ids for role in getattr(member, "roles", []))
 
 
 def link_allowed_by_whitelist(text, settings):
     whitelist = [x.lower() for x in list_from_text(settings.get("link_whitelist"))]
     if not whitelist:
         return False
-
     lower = str(text or "").lower()
     return any(domain and domain in lower for domain in whitelist)
 
@@ -263,7 +239,6 @@ def is_rate_spam(guild_id, user_id, settings):
     now = time.time()
     key = (int(guild_id), int(user_id))
     q = _message_times[key]
-
     q.append(now)
 
     while q and now - q[0] > window:
@@ -298,64 +273,28 @@ def is_duplicate_spam(guild_id, user_id, content, settings):
 
 def check_message(message, settings):
     content = str(getattr(message, "content", "") or "")
-
     words = [w.strip() for w in str(settings.get("bad_words") or "").split(",") if w.strip()]
 
     if int(settings.get("bad_words_enabled", 1) or 0):
         match = matched_bad_word(content, words)
         if match:
-            return {
-                "blocked": True,
-                "warning": True,
-                "kind": "bad_word",
-                "reason": "استخدام كلمة ممنوعة في السيرفر",
-                "matched": match,
-                "details": f"Matched bad word: {match}",
-            }
+            return {"blocked": True, "warning": True, "kind": "bad_word", "reason": "استخدام كلمة ممنوعة في السيرفر", "matched": match, "details": f"Matched bad word: {match}"}
 
     if int(settings.get("links_enabled", 1) or 0) and has_link(content, settings):
-        return {
-            "blocked": True,
-            "warning": False,
-            "kind": "link",
-            "reason": "إرسال رابط أو دعوة ممنوعة",
-            "matched": "",
-            "details": "Blocked link/invite",
-        }
+        return {"blocked": True, "warning": False, "kind": "link", "reason": "إرسال رابط أو دعوة ممنوعة", "matched": "", "details": "Blocked link/invite"}
 
     if int(settings.get("mass_mention_enabled", 1) or 0):
         bad, count = is_mass_mention(message, settings)
         if bad:
-            return {
-                "blocked": True,
-                "warning": True,
-                "kind": "mass_mention",
-                "reason": "منشنات كثيرة أو منشن everyone/here",
-                "matched": str(count),
-                "details": f"Mentions count: {count}",
-            }
+            return {"blocked": True, "warning": True, "kind": "mass_mention", "reason": "منشنات كثيرة أو منشن everyone/here", "matched": str(count), "details": f"Mentions count: {count}"}
 
     bad, percent = is_caps_abuse(content, settings)
     if bad:
-        return {
-            "blocked": True,
-            "warning": False,
-            "kind": "caps",
-            "reason": "استخدام كابس بشكل مزعج",
-            "matched": f"{percent}%",
-            "details": f"Caps percent: {percent}%",
-        }
+        return {"blocked": True, "warning": False, "kind": "caps", "reason": "استخدام كابس بشكل مزعج", "matched": f"{percent}%", "details": f"Caps percent: {percent}%"}
 
     bad, newlines = is_newline_spam(content, settings)
     if bad:
-        return {
-            "blocked": True,
-            "warning": False,
-            "kind": "newlines",
-            "reason": "رسالة فيها أسطر كثيرة جدًا",
-            "matched": str(newlines),
-            "details": f"Newlines: {newlines}",
-        }
+        return {"blocked": True, "warning": False, "kind": "newlines", "reason": "رسالة فيها أسطر كثيرة جدًا", "matched": str(newlines), "details": f"Newlines: {newlines}"}
 
     guild = getattr(message, "guild", None)
     author = getattr(message, "author", None)
@@ -363,31 +302,10 @@ def check_message(message, settings):
     if guild and author:
         bad, dup_count = is_duplicate_spam(guild.id, author.id, content, settings)
         if bad:
-            return {
-                "blocked": True,
-                "warning": True,
-                "kind": "duplicate_spam",
-                "reason": "تكرار نفس الرسالة أكثر من مرة",
-                "matched": str(dup_count),
-                "details": f"Duplicate count: {dup_count}",
-            }
+            return {"blocked": True, "warning": True, "kind": "duplicate_spam", "reason": "تكرار نفس الرسالة أكثر من مرة", "matched": str(dup_count), "details": f"Duplicate count: {dup_count}"}
 
         bad, rate_count = is_rate_spam(guild.id, author.id, settings)
         if bad:
-            return {
-                "blocked": True,
-                "warning": True,
-                "kind": "spam",
-                "reason": "سبام رسائل بسرعة عالية",
-                "matched": str(rate_count),
-                "details": f"Messages in window: {rate_count}",
-            }
+            return {"blocked": True, "warning": True, "kind": "spam", "reason": "سبام رسائل بسرعة عالية", "matched": str(rate_count), "details": f"Messages in window: {rate_count}"}
 
-    return {
-        "blocked": False,
-        "warning": False,
-        "kind": "",
-        "reason": "",
-        "matched": "",
-        "details": "",
-    }
+    return {"blocked": False, "warning": False, "kind": "", "reason": "", "matched": "", "details": ""}
