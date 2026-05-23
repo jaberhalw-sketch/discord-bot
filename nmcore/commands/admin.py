@@ -4,7 +4,8 @@ from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_n
 from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
-from nmcore.services import antiraid, memory_status, log_mapping_status
+from nmcore.services import antiraid
+from nmcore.services import security, memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
 
@@ -99,7 +100,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!حالة_الحماية` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -186,6 +187,33 @@ def setup(bot):
 
         await ctx.reply(embed=e)
 
+
+
+
+    @bot.command(name="تقرير_الأمان", aliases=["security_report", "risk"])
+    async def security_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        report = security.risk_report(ctx.guild)
+
+        issues = report["issues"][:8]
+        issue_text = "\n".join(f"- {x}" for x in issues) if issues else "ما فيه مشاكل كبيرة واضحة."
+
+        e = embed(
+            "🛡️ Security Report",
+            f"Score: **{report['score']}/100**\nRisk: **{report['label']}**\n\n{issue_text}",
+            "ok" if report["score"] >= 85 else "warn" if report["score"] >= 65 else "bad",
+            ctx.author
+        )
+
+        e.add_field(name="Active Warnings", value=str(report["counts"]["active_warnings"]), inline=True)
+        e.add_field(name="Anti-Raid Events", value=str(report["counts"]["antiraid_events"]), inline=True)
+        e.add_field(name="Protection Events", value=str(report["counts"]["protection_events"]), inline=True)
+        e.add_field(name="Dangerous Roles", value=str(len(report["roles"])), inline=True)
+
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="حالة_الحماية", aliases=["protection_status", "antiraid_status"])
