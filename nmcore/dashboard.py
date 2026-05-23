@@ -126,71 +126,6 @@ def filter_manageable_to_bot_guilds(manageable, bot=None):
     return [g for g in manageable if str(g.get("id", "")).isdigit() and int(g["id"]) in ids]
 
 
-def refresh_session_manageable_guilds(bot=None, force=False):
-    """
-    Refresh the logged-in user's guild permissions from Discord.
-    This prevents a user who lost Administrator permission from keeping dashboard access
-    through an old browser session.
-    """
-    token = session.get("discord_access_token")
-    if not token:
-        return
-
-    now = int(time.time())
-    last = int(session.get("guilds_refreshed_at") or 0)
-
-    if not force and now - last < 60:
-        return
-
-    try:
-        guilds = discord_api_get("/users/@me/guilds", token)
-        manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
-        session["discord_guilds"] = manageable
-        session["guilds_refreshed_at"] = now
-
-        current = session.get("guild_id")
-        allowed = {int(g["id"]) for g in manageable if str(g.get("id", "")).isdigit()}
-
-        if current and int(current) not in allowed:
-            session.pop("guild_id", None)
-
-        session.modified = True
-    except Exception:
-        # If Discord API temporarily fails, do not crash the dashboard.
-        pass
-
-
-def has_dashboard_access(bot=None, guild_id=0):
-    """
-    Dashboard access = current OAuth user has Owner/Administrator in that guild
-    AND the bot is in that guild.
-    """
-    try:
-        gid_int = int(guild_id or 0)
-    except Exception:
-        return False
-
-    if not gid_int:
-        return False
-
-    # First require OAuth guild list permission.
-    allowed = {
-        int(g["id"])
-        for g in session.get("discord_guilds", [])
-        if str(g.get("id", "")).isdigit()
-    }
-
-    if gid_int not in allowed:
-        return False
-
-    # Also require the bot to be in this guild when we can verify bot guilds.
-    ids = bot_guild_ids(bot)
-    if ids and gid_int not in ids:
-        return False
-
-    return True
-
-
 def dashboard_access_denied_html():
     denied = session.pop("access_denied_gid", 0)
     if not denied:
@@ -236,8 +171,6 @@ def require_login():
 
 
 def gid(bot=None):
-    refresh_session_manageable_guilds(bot)
-
     allowed = allowed_guild_ids()
 
     raw = (
@@ -252,21 +185,20 @@ def gid(bot=None):
     except Exception:
         selected = 0
 
-    if selected and selected in allowed and has_dashboard_access(bot, selected):
+    if selected and selected in allowed:
         session["guild_id"] = selected
         return selected
 
-    if selected:
+    if selected and selected not in allowed:
         session["access_denied_gid"] = selected
         session.pop("guild_id", None)
         return 0
 
-    for candidate in sorted(allowed):
-        if has_dashboard_access(bot, candidate):
-            session["guild_id"] = candidate
-            return candidate
+    if allowed:
+        first = sorted(allowed)[0]
+        session["guild_id"] = first
+        return first
 
-    session.pop("guild_id", None)
     return 0
 
 
@@ -1106,7 +1038,7 @@ DASHBOARD_BASE_URL</pre>
                     if action == "set_owner":
                         cur.execute(
                             "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
-                            (owner_id, owner_name[:120], g, property_id)
+                            (owner_id, owner_name[:120], int(time.time()), g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
                         (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
@@ -2349,7 +2281,7 @@ DASHBOARD_BASE_URL</pre>
                     if action == "set_owner":
                         cur.execute(
                             "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
-                            (owner_id, owner_name[:120], g, property_id)
+                            (owner_id, owner_name[:120], int(time.time()), g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
                         (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
