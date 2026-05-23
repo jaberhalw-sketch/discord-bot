@@ -7,6 +7,7 @@ from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name,
 from nmcore.services import real_estate
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
+from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.warnings import summary as warn_summary
 from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
 
@@ -788,7 +789,17 @@ DASHBOARD_BASE_URL</pre>
         cur.execute("""SELECT event_type, COUNT(*) c FROM log_events
         WHERE guild_id=? GROUP BY event_type ORDER BY c DESC LIMIT 30""", (g,))
         types = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) c FROM log_events WHERE guild_id=?", (g,))
+        total_logs = int(cur.fetchone()["c"] or 0)
+
         conn.close()
+
+        log_map = all_log_channels(g)
+        log_channel_rows = ""
+        for key, (name, topic) in LOG_CHANNELS.items():
+            cid = int(log_map.get(key) or 0)
+            log_channel_rows += f"<tr><td><code>{esc(key)}</code></td><td>{esc(name)}</td><td>{f'<#{cid}>' if cid else '<span class=muted>Not set</span>'}</td><td><code>{cid}</code></td></tr>"
 
         chips = "".join(
             f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/logs?guild_id={g}&event_type={esc(r['event_type'])}'>{esc(r['event_type'])} ({int(r['c'])})</a>"
@@ -813,7 +824,10 @@ DASHBOARD_BASE_URL</pre>
             for r in rows
         )
 
-        body = server_pill_html(g, bot) + form
+        body = server_pill_html(g, bot)
+        body += f"<div class='grid'><div class='card'><div class='muted'>Total DB Logs</div><div class='stat'>{total_logs:,}</div></div><div class='card'><div class='muted'>Mapped Log Rooms</div><div class='stat'>{sum(1 for x in log_map.values() if int(x or 0)):,}/{len(LOG_CHANNELS)}</div></div></div>"
+        body += f"<div class='card'><h3>Discord Log Rooms Mapping</h3><table><tr><th>Key</th><th>Room Name</th><th>Current</th><th>ID</th></tr>{log_channel_rows}</table><br><a class='btn' href='/dashboard/settings?guild_id={g}'>Edit Mapping</a></div>"
+        body += form
         body += f"<div class='card'><h3>Event Types</h3>{chips or '<span class=muted>No logs yet.</span>'}</div>"
         body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>User</th><th>Name</th><th>Channel</th><th>Title</th><th>Details</th></tr>{trs}</table></div>"
         return page("Logs", body, g)
@@ -870,6 +884,23 @@ DASHBOARD_BASE_URL</pre>
         g = gid(bot)
 
         if request.method == "POST":
+            action = request.form.get("action", "").strip()
+
+            if action == "save_log_channels":
+                for key in LOG_CHANNELS.keys():
+                    raw = request.form.get(f"log_{key}", "0")
+                    try:
+                        channel_id = int(raw or 0)
+                    except Exception:
+                        channel_id = 0
+                    set_log_channel(g, key, channel_id)
+
+                general_id = int(request.form.get("log_general") or 0)
+                if general_id:
+                    update_channel(g, "logs_channel_id", general_id)
+
+                return redirect(f"/dashboard/settings?guild_id={g}")
+
             if "coin_name" in request.form:
                 set_coin_name(g, request.form.get("coin_name"))
 
@@ -888,17 +919,31 @@ DASHBOARD_BASE_URL</pre>
         commands_channel_id = int(gs.get("commands_channel_id") or 0)
         gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
         logs_channel_id = int(gs.get("logs_channel_id") or 0)
+        log_map = all_log_channels(g)
 
         checks = "".join(
             f"<label><input type=checkbox name='toggle_{k}' {'checked' if v else ''}> {k}</label><br>"
             for k, v in toggles.items()
         )
 
+        log_rows = ""
+        for key, (name, topic) in LOG_CHANNELS.items():
+            current = int(log_map.get(key) or 0)
+            mention = f"<#{current}>" if current else "<span class='muted'>Not set</span>"
+            log_rows += f"""
+            <tr>
+              <td><code>{esc(key)}</code></td>
+              <td>{esc(name)}</td>
+              <td>{mention}</td>
+              <td><input name='log_{esc(key)}' value='{current}' style='width:210px'></td>
+            </tr>
+            """
+
         body = server_pill_html(g, bot) + f"""
         <div class='grid'>
           <div class='card'><div class='muted'>Commands Room</div><div class='stat'>{f'<#{commands_channel_id}>' if commands_channel_id else 'OFF'}</div></div>
           <div class='card'><div class='muted'>Gambling Room</div><div class='stat'>{f'<#{gambling_channel_id}>' if gambling_channel_id else 'OFF'}</div></div>
-          <div class='card'><div class='muted'>Logs Room</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>General Logs</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
         </div>
 
         <div class='card'>
@@ -918,13 +963,28 @@ DASHBOARD_BASE_URL</pre>
             <input name=gambling_channel_id value='{gambling_channel_id}'><br>
             <div class='muted'>If set, casino commands only work there.</div><br>
 
-            Logs Channel ID<br>
+            Old General Logs Channel ID<br>
             <input name=logs_channel_id value='{logs_channel_id}'><br><br>
 
             <h3>System Toggles</h3>
             {checks}
             <br>
             <button>Save</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Organized Discord Log Channels</h3>
+          <p class='muted'>Run <code>!تجهيز_اللوقات</code> to auto-create and map these rooms. You can also edit IDs manually here.</p>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='save_log_channels'>
+            <table>
+              <tr><th>Key</th><th>Channel Name</th><th>Current</th><th>Channel ID</th></tr>
+              {log_rows}
+            </table>
+            <br>
+            <button>Save Log Channels</button>
           </form>
         </div>
         """
@@ -1199,6 +1259,7 @@ DASHBOARD_BASE_URL</pre>
           <p>Commands Room: <code>{esc(get_guild_settings(g).get('commands_channel_id') if g else 0)}</code></p>
           <p>Gambling Room: <code>{esc(get_guild_settings(g).get('gambling_channel_id') if g else 0)}</code></p>
           <p>Logs Room: <code>{esc(get_guild_settings(g).get('logs_channel_id') if g else 0)}</code></p>
+          <p>Organized Log Rooms: <code>{sum(1 for x in all_log_channels(g).values() if int(x or 0)) if g else 0}/{len(LOG_CHANNELS)}</code></p>
           <p>DB: <code>{esc(DB_FILE)}</code></p>
           <p>Discord Login: ✅</p>
           <p>Redirect URI: <code>{esc(redirect_uri())}</code></p>
