@@ -37,10 +37,13 @@ def page(title, body, guild_id=0):
             ("📈 Analytics",f"/dashboard/analytics{q}"),
             ("🧪 Full Check",f"/dashboard/full-check{q}"),
             ("📘 Command Center",f"/dashboard/commands{q}"),
+            ("🧩 Setup Status",f"/dashboard/setup{q}"),
+            ("🩺 Health",f"/dashboard/health{q}"),
         ]),
-        ("Money", [
+        ("Money / Economy", [
             ("💰 Economy",f"/dashboard/economy{q}"),
             ("🧾 Money Tracker",f"/dashboard/money-tracker{q}"),
+            ("📝 Post Rewards",f"/dashboard/post-rewards{q}"),
             ("🎰 Casino",f"/dashboard/casino{q}"),
             ("🛒 Shop",f"/dashboard/shop{q}"),
             ("🏘️ Real Estate",f"/dashboard/real-estate{q}"),
@@ -50,17 +53,16 @@ def page(title, body, guild_id=0):
             ("🎁 Giveaways",f"/dashboard/giveaways{q}"),
             ("👤 User Lookup",f"/dashboard/user{q}"),
         ]),
-        ("Safety", [
+        ("Safety / Moderation", [
             ("⚠️ Warnings",f"/dashboard/warnings{q}"),
             ("🛡️ Protection",f"/dashboard/protection{q}"),
             ("🧨 Security",f"/dashboard/security{q}"),
             ("📜 Logs",f"/dashboard/logs{q}"),
-            ("🟢 Live",f"/dashboard/live{q}"),
+            ("🟢 Live Activity",f"/dashboard/live{q}"),
         ]),
-        ("System", [
-            ("🧩 Setup",f"/dashboard/setup{q}"),
+        ("Configuration", [
             ("⚙️ Settings",f"/dashboard/settings{q}"),
-            ("🩺 Health",f"/dashboard/health{q}"),
+            ("🚪 Logout",f"/logout"),
         ]),
     ]
 
@@ -68,7 +70,8 @@ def page(title, body, guild_id=0):
     for group, items in nav_groups:
         links += f"<div class='nav-group'>{escape(group)}</div>"
         for t,h in items:
-            links += f"<a href='{h}'>{escape(t)}</a>"
+            active = " active" if title.lower() in t.lower() or (title.lower()=="money tracker" and "money-tracker" in h) else ""
+            links += f"<a class='nav-link{active}' href='{h}'>{escape(t)}</a>"
 
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title>
 <style>
@@ -83,12 +86,13 @@ body{{margin:0;background:
   radial-gradient(circle at top right,rgba(34,211,238,.12),transparent 28%),
   var(--bg);color:var(--text);font-family:Inter,Arial,sans-serif}}
 .wrap{{display:flex;min-height:100vh}}
-.side{{width:285px;background:rgba(15,23,42,.92);padding:18px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid var(--line);backdrop-filter:blur(10px)}}
+.side{{width:305px;background:rgba(15,23,42,.94);padding:18px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid var(--line);backdrop-filter:blur(10px)}}
 .brand{{font-size:23px;font-weight:950;margin-bottom:6px;letter-spacing:.2px}}
 .brand-sub{{font-size:12px;color:var(--muted);margin-bottom:18px}}
 .nav-group{{color:#64748b;text-transform:uppercase;font-size:11px;font-weight:900;letter-spacing:.12em;margin:18px 0 7px}}
 .side a{{display:flex;align-items:center;gap:8px;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:14px;margin:4px 0;border:1px solid transparent}}
 .side a:hover{{background:#1e293b;color:#fff;border-color:#334155;transform:translateX(2px)}}
+.side a.active{{background:linear-gradient(135deg,rgba(139,92,246,.28),rgba(34,211,238,.12));color:#fff;border-color:#475569}}
 .main{{flex:1;padding:28px;min-width:0}}
 .topbar{{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:20px}}
 h1{{margin:0;font-size:30px;letter-spacing:-.03em}}
