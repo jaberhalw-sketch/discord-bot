@@ -259,6 +259,12 @@ def setup_bot(bot):
 
         ensure_guild(ctx.guild.id, ctx.guild.name)
 
+        # Bot owner bypass:
+        # Owner can use every command in any room even if dev mode, system toggles,
+        # or channel restrictions would block normal users.
+        if is_dev_owner(ctx.author.id):
+            return True
+
         if is_dev_mode_enabled(ctx.guild.id) and not is_dev_owner(ctx.author.id):
             await ctx.reply(embed=embed(
                 "🚧 البوت قيد التطوير",
@@ -712,4 +718,3 @@ def setup_bot(bot):
 
         log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
         await send_log(bot, member.guild, "voice", title, details, "info", member)
-
