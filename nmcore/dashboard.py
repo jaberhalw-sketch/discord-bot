@@ -14,6 +14,7 @@ from nmcore.services import post_rewards
 from nmcore.services import boost_rewards
 from nmcore.services import game_roles as game_roles_service
 from nmcore.services import casino as casino_service
+from nmcore.services import profile as profile_service
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -3191,65 +3192,52 @@ DASHBOARD_BASE_URL</pre>
         uid = request.args.get("user_id", "").strip()
 
         if not uid.isdigit():
-            return page("User Lookup", server_pill_html(g, bot) + f"<div class='card'><h3>User Lookup</h3><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
+            return page("User Lookup", server_pill_html(g, bot) + f"""
+            <div class='card'>
+              <h3>Advanced User Profile</h3>
+              <form>
+                <input type=hidden name=guild_id value='{g}'>
+                <input name=user_id placeholder='User ID'>
+                <button>Search</button>
+              </form>
+            </div>
+            """, g)
 
         uid = int(uid)
         info = member_info(bot, g, uid)
+        p = profile_service.get_user_profile(g, uid)
+        risk = profile_service.risk_score(p)
+        title = profile_service.profile_title(p)
 
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, uid))
-        bal = cur.fetchone()
+        def n(v):
+            return f"{int(v or 0):,}"
 
-        cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (g, uid))
-        lvl = cur.fetchone()
-
-        cur.execute("""SELECT
-        COUNT(*) rows,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, uid))
-        money = cur.fetchone()
-
-        cur.execute("""SELECT source_type, COUNT(*) c,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? AND user_id=?
-        GROUP BY source_type ORDER BY c DESC LIMIT 25""", (g, uid))
-        sources = cur.fetchall()
-
-        cur.execute("SELECT * FROM money_ledger WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
-        ledger = cur.fetchall()
-
-        cur.execute("SELECT * FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
-        warns = cur.fetchall()
-
-        cur.execute("SELECT * FROM properties WHERE guild_id=? AND owner_id=? ORDER BY id LIMIT 50", (g, uid))
-        props = cur.fetchall()
-
-        conn.close()
+        achievement_cards = "".join(
+            f"<div class='card'><div style='font-size:28px'>{esc(a['emoji'])}</div><h3>{esc(a['title'])}</h3><p class='muted'>{esc(a['desc'])}</p></div>"
+            for a in p.get("achievements", [])
+        ) or "<div class='card'><h3>No achievements yet</h3><p class='muted'>الإنجازات تظهر تلقائيًا حسب نشاط العضو.</p></div>"
 
         source_trs = "".join(
-            f"<tr><td>{status_badge(r['source_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td></tr>"
-            for r in sources
+            f"<tr><td>{status_badge(r['source_type'])}</td><td>{n(r['rows'])}</td><td>{n(r['gained'])}</td><td>{n(r['spent'])}</td><td>{n(r['net'])}</td></tr>"
+            for r in p["money_sources"]
         ) or "<tr><td colspan='5'>No source data.</td></tr>"
 
         ledger_trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{status_badge(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
-            for r in ledger
+            f"<tr><td><code>{esc(str(r['tx_id'])[:10])}</code></td><td>{n(r['amount'])}</td><td>{n(r['balance_before'])}</td><td>{n(r['balance_after'])}</td><td>{status_badge(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+            for r in p["recent_money"]
         ) or "<tr><td colspan='6'>No money history.</td></tr>"
 
         warn_trs = "".join(
             f"<tr><td><code>{r['id']}</code></td><td>{esc(r['reason'])}</td><td>{status_badge(r['status'])}</td><td>{user_chip(bot,g,r['moderator_id'],r['moderator_name'])}</td></tr>"
-            for r in warns
+            for r in p["recent_warnings"]
         ) or "<tr><td colspan='4'>No warnings.</td></tr>"
 
         prop_trs = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{int(r['rent']):,}</td></tr>"
-            for r in props
-        ) or "<tr><td colspan='4'>No properties.</td></tr>"
+            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{n(r['rent'])}</td><td>{n(r['price'])}</td></tr>"
+            for r in p["properties"]
+        ) or "<tr><td colspan='5'>No properties.</td></tr>"
+
+        risk_reasons = "<br>".join(esc(x) for x in risk["reasons"])
 
         body = server_pill_html(g, bot) + f"""
         <div class='card'>
@@ -3257,7 +3245,7 @@ DASHBOARD_BASE_URL</pre>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id value='{uid}' placeholder='User ID'>
             <button>Search</button>
-            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}&user_id={uid}'>Money Profile</a>
+            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}&user_id={uid}'>Money Tracker</a>
             <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}&user_id={uid}&status=all'>Warnings</a>
           </form>
         </div>
@@ -3266,21 +3254,34 @@ DASHBOARD_BASE_URL</pre>
           <div class='userline'>
             <img class='avatar-lg' src='{esc(info["avatar"])}'>
             <div>
-              <div class='muted'>User Profile</div>
-              <div style='font-size:26px;font-weight:950'>{esc(info["name"])}</div>
+              <div class='muted'>Advanced User Profile</div>
+              <div style='font-size:28px;font-weight:950'>{esc(info["name"])}</div>
               <code>{uid}</code>
+              <div style='margin-top:8px'><span class='pill'>{esc(title)}</span></div>
             </div>
+          </div>
+          <div class='card' style='margin:0;min-width:220px'>
+            <div class='muted'>Risk Score</div>
+            <div class='stat'>{risk['score']}/100</div>
+            <div class='muted'>{risk_reasons}</div>
           </div>
         </div>
 
         <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
-          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div><div class='muted'>XP {int(lvl['xp'] if lvl else 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Gained</div><div class='stat'>{int(money['gained'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Spent/Lost</div><div class='stat'>{int(money['spent'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(money['net'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Warnings</div><div class='stat'>{len(warns):,}</div></div>
-          <div class='card'><div class='muted'>Properties</div><div class='stat'>{len(props):,}</div></div>
+          <div class='card kpi-info'><div class='muted'>Balance</div><div class='stat'>{n(p['balance'])}</div></div>
+          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(p['level'])}</div><div class='muted'>XP {n(p['xp'])}</div></div>
+          <div class='card kpi-good'><div class='muted'>Gained</div><div class='stat'>{n(p['money'].get('gained'))}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Spent/Lost</div><div class='stat'>{n(p['money'].get('spent'))}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{n(p['money'].get('net'))}</div></div>
+          <div class='card'><div class='muted'>Achievements</div><div class='stat'>{len(p.get('achievements', []))}</div></div>
+        </div>
+
+        <div class='grid'>
+          <div class='card'><h3>🎰 Casino</h3><div class='stat'>{n(p['casino'].get('plays'))}</div><p class='muted'>Plays</p><p>Wagered: <b>{n(p['casino'].get('wagered'))}</b><br>Paid: <b>{n(p['casino'].get('paid'))}</b><br>Net: <b>{n(p['casino'].get('net'))}</b></p></div>
+          <div class='card'><h3>🏘️ Real Estate</h3><div class='stat'>{n(p['props_summary'].get('count'))}</div><p class='muted'>Properties</p><p>Rent Total: <b>{n(p['props_summary'].get('rent_total'))}</b><br>Value: <b>{n(p['props_summary'].get('property_value'))}</b></p></div>
+          <div class='card'><h3>🚀 Boosts</h3><div class='stat'>{n(p['booster_profile'].get('boost_count') or p['boosts'].get('c'))}</div><p class='muted'>Boost events</p><p>Rewards: <b>{n(p['booster_profile'].get('reward_total'))}</b><br>Active: <b>{'Yes' if int(p['booster_profile'].get('active') or 0) else 'No'}</b></p></div>
+          <div class='card'><h3>📝 Posts</h3><div class='stat'>{n(p['post_rewards'].get('posts'))}</div><p class='muted'>Rewarded posts</p><p>Total Paid: <b>{n(p['post_rewards'].get('total'))}</b></p></div>
+          <div class='card'><h3>⚠️ Warnings</h3><div class='stat'>{n(p['warnings'].get('active'))}</div><p class='muted'>Active</p><p>Total: <b>{n(p['warnings'].get('total'))}</b><br>Cleared: <b>{n(p['warnings'].get('cleared'))}</b></p></div>
         </div>
 
         <div class='card'>
@@ -3296,10 +3297,11 @@ DASHBOARD_BASE_URL</pre>
           </form>
         </div>
 
+        <div class='grid'>{achievement_cards}</div>
         <div class='card'><h3>Money Sources</h3><table><tr><th>Source</th><th>Rows</th><th>Gained</th><th>Spent</th><th>Net</th></tr>{source_trs}</table></div>
         <div class='card'><h3>Money History</h3><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{ledger_trs}</table></div>
         <div class='card'><h3>Warnings</h3><table><tr><th>ID</th><th>Reason</th><th>Status</th><th>By</th></tr>{warn_trs}</table></div>
-        <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th></tr>{prop_trs}</table></div>
+        <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th><th>Value</th></tr>{prop_trs}</table></div>
         """
         return page("User Lookup", body, g)
 
