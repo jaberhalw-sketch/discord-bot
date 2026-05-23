@@ -5,11 +5,13 @@ from nmcore.db import db, init_db
 from nmcore.ui import page
 from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel
 from nmcore.services import real_estate
+from nmcore.services import economy as economy_service
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.warnings import summary as warn_summary
 from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
+from nmcore.services.activity import log_event, record
 
 DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR_BIT = 0x8
@@ -134,6 +136,16 @@ def dashboard_access_denied_html():
 
 def dashboard_user():
     return session.get("discord_user") or {}
+
+
+def dashboard_actor():
+    u = dashboard_user()
+    try:
+        actor_id = int(u.get("id") or 0)
+    except Exception:
+        actor_id = 0
+    actor_name = u.get("global_name") or u.get("username") or "Dashboard"
+    return actor_id, actor_name
 
 
 def allowed_guild_ids():
@@ -394,17 +406,144 @@ DASHBOARD_BASE_URL</pre>
         """
         return page("Dashboard Overview", body, g)
 
-    @app.route("/dashboard/economy")
+    @app.route("/dashboard/economy", methods=["GET", "POST"])
     def economy_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                target_user_id = int(request.form.get("user_id") or 0)
+            except Exception:
+                target_user_id = 0
+
+            try:
+                amount = int(str(request.form.get("amount") or "0").replace(",", ""))
+            except Exception:
+                amount = 0
+
+            reason = request.form.get("reason", "").strip() or f"Dashboard {action}"
+
+            if action in {"give", "take", "set"} and target_user_id and amount >= 0:
+                if action == "give" and amount > 0:
+                    tx = economy_service.credit(
+                        g,
+                        target_user_id,
+                        amount,
+                        "dashboard_give",
+                        user_name=str(target_user_id),
+                        actor_id=actor_id,
+                        actor_name=actor_name,
+                        source_label="dashboard",
+                        reason=reason
+                    )
+                elif action == "take" and amount > 0:
+                    tx = economy_service.debit(
+                        g,
+                        target_user_id,
+                        amount,
+                        "dashboard_take",
+                        user_name=str(target_user_id),
+                        actor_id=actor_id,
+                        actor_name=actor_name,
+                        source_label="dashboard",
+                        reason=reason
+                    )
+                elif action == "set":
+                    tx = economy_service.set_balance(
+                        g,
+                        target_user_id,
+                        amount,
+                        "dashboard_set_balance",
+                        user_name=str(target_user_id),
+                        actor_id=actor_id,
+                        actor_name=actor_name,
+                        source_label="dashboard",
+                        reason=reason
+                    )
+                else:
+                    tx = {"ok": False, "error": "invalid_amount"}
+
+                log_event(
+                    g,
+                    f"dashboard_{action}_money",
+                    target_user_id,
+                    str(target_user_id),
+                    0,
+                    "",
+                    f"Dashboard {action} money",
+                    f"Actor={actor_id}, Amount={amount}, OK={tx.get('ok')}, Reason={reason}"
+                )
+
+                return redirect(f"/dashboard/economy?guild_id={g}")
+
+            if action in {"give_all", "take_all"} and amount > 0:
+                conn = db()
+                cur = conn.cursor()
+                cur.execute("SELECT user_id FROM balances WHERE guild_id=?", (g,))
+                users = [int(r["user_id"]) for r in cur.fetchall()]
+                conn.close()
+
+                ok_count = 0
+                fail_count = 0
+
+                for uid in users:
+                    if action == "give_all":
+                        tx = economy_service.credit(
+                            g,
+                            uid,
+                            amount,
+                            "dashboard_give_all",
+                            user_name=str(uid),
+                            actor_id=actor_id,
+                            actor_name=actor_name,
+                            source_label="dashboard",
+                            reason=reason
+                        )
+                    else:
+                        tx = economy_service.debit(
+                            g,
+                            uid,
+                            amount,
+                            "dashboard_take_all",
+                            user_name=str(uid),
+                            actor_id=actor_id,
+                            actor_name=actor_name,
+                            source_label="dashboard",
+                            reason=reason
+                        )
+
+                    if tx.get("ok"):
+                        ok_count += 1
+                    else:
+                        fail_count += 1
+
+                log_event(
+                    g,
+                    f"dashboard_{action}",
+                    actor_id,
+                    actor_name,
+                    0,
+                    "",
+                    f"Dashboard bulk money action",
+                    f"Action={action}, Amount={amount}, OK={ok_count}, Failed={fail_count}, Reason={reason}"
+                )
+
+                return redirect(f"/dashboard/economy?guild_id={g}")
+
         conn = db()
         cur = conn.cursor()
         cur.execute("SELECT user_id,balance,updated_at FROM balances WHERE guild_id=? ORDER BY balance DESC LIMIT 100", (g,))
         rows = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(balance),0) total FROM balances WHERE guild_id=?", (g,))
+        stats = cur.fetchone()
         conn.close()
 
         trs = "".join(
@@ -412,7 +551,44 @@ DASHBOARD_BASE_URL</pre>
             for r in rows
         )
 
-        return page("Economy", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table></div>", g)
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(stats['c'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Total Money</div><div class='stat'>{int(stats['total'] or 0):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Dashboard Money Control</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID'>
+            <input name=amount type=number min=0 placeholder='Amount'>
+            <input name=reason placeholder='Reason' style='min-width:260px'>
+            <button name=action value='give'>Give</button>
+            <button name=action value='take' style='background:#dc2626'>Take</button>
+            <button name=action value='set' style='background:#334155'>Set Balance</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Bulk Money Control</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=amount type=number min=1 placeholder='Amount'>
+            <input name=reason placeholder='Reason' style='min-width:260px'>
+            <button name=action value='give_all'>Give All</button>
+            <button name=action value='take_all' style='background:#dc2626'>Take All</button>
+          </form>
+          <p class='muted'>Bulk applies only to users already in the balances table.</p>
+        </div>
+
+        <div class='card'>
+          <h3>Top Balances</h3>
+          <table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table>
+        </div>
+        """
+
+        return page("Economy", body, g)
 
     @app.route("/dashboard/money-tracker")
     def money_tracker():
@@ -601,13 +777,42 @@ DASHBOARD_BASE_URL</pre>
 
         return page("Real Estate", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>ID</th><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", g)
 
-    @app.route("/dashboard/warnings")
+    @app.route("/dashboard/warnings", methods=["GET", "POST"])
     def warnings_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                user_id = int(request.form.get("user_id") or 0)
+            except Exception:
+                user_id = 0
+
+            reason = request.form.get("reason", "").strip() or "Dashboard action"
+
+            if action == "clear_user" and user_id:
+                from nmcore.services import warnings as warnsvc
+                count = warnsvc.clear_user(g, user_id, actor_id, actor_name, reason)
+
+                log_event(
+                    g,
+                    "dashboard_clear_warnings",
+                    user_id,
+                    str(user_id),
+                    0,
+                    "",
+                    "Dashboard cleared warnings",
+                    f"Actor={actor_id}, Count={count}, Reason={reason}"
+                )
+
+                return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
+
         uid = request.args.get("user_id", "").strip()
         status = request.args.get("status", "active").strip()
 
@@ -642,7 +847,22 @@ DASHBOARD_BASE_URL</pre>
         conn.close()
 
         grouped_trs = "".join(
-            f"<tr><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{int(r['active_count'] or 0):,}</td><td>{int(r['total'] or 0):,}</td><td><a href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
+            f"""<tr>
+              <td><code>{r['user_id']}</code></td>
+              <td>{esc(r['user_name'])}</td>
+              <td>{int(r['active_count'] or 0):,}</td>
+              <td>{int(r['total'] or 0):,}</td>
+              <td><a href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}'>View</a></td>
+              <td>
+                <form method='post' style='display:inline'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=action value='clear_user'>
+                  <input type=hidden name=user_id value='{r['user_id']}'>
+                  <input type=hidden name=reason value='Cleared from dashboard'>
+                  <button style='background:#334155'>Clear Active</button>
+                </form>
+              </td>
+            </tr>"""
             for r in grouped
         )
 
@@ -668,7 +888,7 @@ DASHBOARD_BASE_URL</pre>
         """
 
         body = server_pill_html(g, bot) + form
-        body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th></tr>{grouped_trs}</table></div>"
+        body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th><th>Action</th></tr>{grouped_trs}</table></div>"
         body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
@@ -1162,13 +1382,42 @@ DASHBOARD_BASE_URL</pre>
         """
         return page("Giveaways", body, g)
 
-    @app.route("/dashboard/user")
+    @app.route("/dashboard/user", methods=["GET", "POST"])
     def user_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                uid_int = int(request.form.get("user_id") or 0)
+            except Exception:
+                uid_int = 0
+
+            try:
+                amount = int(str(request.form.get("amount") or "0").replace(",", ""))
+            except Exception:
+                amount = 0
+
+            reason = request.form.get("reason", "").strip() or f"Dashboard user action {action}"
+
+            if uid_int and action in {"give", "take", "set"}:
+                if action == "give" and amount > 0:
+                    economy_service.credit(g, uid_int, amount, "dashboard_user_give", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
+                elif action == "take" and amount > 0:
+                    economy_service.debit(g, uid_int, amount, "dashboard_user_take", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
+                elif action == "set" and amount >= 0:
+                    economy_service.set_balance(g, uid_int, amount, "dashboard_user_set_balance", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
+
+                log_event(g, f"dashboard_user_{action}", uid_int, str(uid_int), 0, "", f"Dashboard user {action}", f"Actor={actor_id}, Amount={amount}, Reason={reason}")
+
+            return redirect(f"/dashboard/user?guild_id={g}&user_id={uid_int}")
+
         uid = request.args.get("user_id", "").strip()
 
         if not uid.isdigit():
@@ -1197,7 +1446,7 @@ DASHBOARD_BASE_URL</pre>
         conn.close()
 
         ledger_trs = "".join(
-            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{r['balance_before']:,}</td><td>{r['balance_after']:,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
             for r in ledger
         )
 
@@ -1226,6 +1475,19 @@ DASHBOARD_BASE_URL</pre>
           <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div></div>
           <div class='card'><div class='muted'>Warnings</div><div class='stat'>{len(warns):,}</div></div>
           <div class='card'><div class='muted'>Properties</div><div class='stat'>{len(props):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>User Money Control</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=user_id value='{uid}'>
+            <input name=amount type=number min=0 placeholder='Amount'>
+            <input name=reason placeholder='Reason' style='min-width:260px'>
+            <button name=action value='give'>Give</button>
+            <button name=action value='take' style='background:#dc2626'>Take</button>
+            <button name=action value='set' style='background:#334155'>Set Balance</button>
+          </form>
         </div>
 
         <div class='card'><h3>Money History</h3><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{ledger_trs}</table></div>
