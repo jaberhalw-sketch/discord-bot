@@ -52,7 +52,19 @@ class RealEstateShopView(discord.ui.View):
         e = embed("🏘️ متجر العقارات", "\n\n".join(lines), "purple", self.ctx.author)
         e.add_field(name="الصفحة", value=f"{self.page + 1}/{self.max_page() + 1}", inline=True)
         e.add_field(name="المتاح", value=str(len(self.rows)), inline=True)
+
+        try:
+            summary = real_estate.stock_summary(self.ctx.guild.id)
+            stock_lines = []
+            for s in summary:
+                stock_lines.append(f"`{s['type_key']}` المتاح **{int(s['available'] or 0)}/{int(s['total'] or 0)}**")
+            if stock_lines:
+                e.add_field(name="📦 الكمية المحدودة", value="\n".join(stock_lines[:8]), inline=False)
+        except Exception:
+            pass
+
         e.add_field(name="طريقة الشراء", value="اضغط زر **شراء** بالأسفل أو اكتب `!شراء ID`", inline=False)
+        e.add_field(name="الإيجار", value="كل العقارات صار لها إيجار أعلى، ويتجمع كل **3 ساعات**.", inline=False)
         return e
 
     def refresh_buttons(self):
@@ -75,19 +87,19 @@ class RealEstateShopView(discord.ui.View):
 
     async def buy_property(self, interaction, index):
         if interaction.user.id != self.ctx.author.id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("هذا المتجر مفتوح لصاحب الأمر فقط.", ephemeral=True)
+            await interaction.response.send_message(embed=embed("🚫 غير مسموح", "هذا المتجر مفتوح لصاحب الأمر فقط.", "bad", interaction.user), ephemeral=True)
             return
 
         current = self.current_rows()
         if index >= len(current):
-            await interaction.response.send_message("العقار غير موجود في هذه الصفحة.", ephemeral=True)
+            await interaction.response.send_message(embed=embed("🏘️ العقار غير موجود", "العقار غير موجود في هذه الصفحة.", "warn", interaction.user), ephemeral=True)
             return
 
         p = current[index]
         res = real_estate.buy(interaction.guild.id, interaction.user.id, interaction.user.display_name, int(p["id"]))
 
         if not res["ok"]:
-            await interaction.response.send_message(res["error"], ephemeral=True)
+            await interaction.response.send_message(embed=embed("🏘️ فشل شراء العقار", res["error"], "bad", interaction.user), ephemeral=True)
             return
 
         e = embed("✅ تم شراء العقار", f"العقار: **{res['name']}**", "ok", interaction.user)
