@@ -7,6 +7,17 @@ from nmcore.services.log_channels import get_log_channel
 from nmcore.ui import embed, coin, money_delta
 
 
+GAME_NAMES = {
+    "luck": "حظ",
+    "double": "دبل",
+    "slot": "سلوت",
+    "flip": "وجه",
+    "blackjack": "بلاك جاك",
+}
+
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+
 async def send_action_log(ctx, log_key, title, description, color="info"):
     try:
         ch_id = get_log_channel(ctx.guild.id, log_key)
@@ -20,23 +31,7 @@ async def send_action_log(ctx, log_key, title, description, color="info"):
         pass
 
 
-GAME_NAMES = {
-    "luck": "حظ",
-    "double": "دبل",
-    "slot": "سلوت",
-    "flip": "وجه",
-    "blackjack": "بلاك جاك",
-}
-
-
-CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
-
-
 def new_shoe(decks: int = 6):
-    """
-    Realistic blackjack shoe instead of random.choice every card.
-    This prevents weird easy patterns and makes the dealer/player odds more normal.
-    """
     shoe = []
     for _ in range(int(decks)):
         for rank in CARD_RANKS:
@@ -48,7 +43,6 @@ def new_shoe(decks: int = 6):
 def hand_value(cards):
     total = 0
     aces = 0
-
     for c in cards:
         if c == "A":
             aces += 1
@@ -68,7 +62,6 @@ def hand_value(cards):
 def is_soft_17(cards):
     total = 0
     aces = 0
-
     for c in cards:
         if c == "A":
             aces += 1
@@ -78,11 +71,12 @@ def is_soft_17(cards):
         else:
             total += int(c)
 
-    while total > 21 and aces:
+    soft_aces = aces
+    while total > 21 and soft_aces:
         total -= 10
-        aces -= 1
+        soft_aces -= 1
 
-    return total == 17 and aces > 0
+    return total == 17 and soft_aces > 0
 
 
 def is_blackjack(cards):
@@ -93,6 +87,35 @@ def fmt_hand(cards, hide_second=False):
     if hide_second and len(cards) > 1:
         return f"`{cards[0]}` `?`"
     return " ".join(f"`{c}`" for c in cards)
+
+
+def casino_lobby_embed(ctx, amount="100"):
+    bal = get_balance(ctx.guild.id, ctx.author.id)
+    e = embed(
+        "🎰 NM Casino",
+        "لوبي القمار المطوّر. اختر اللعبة من الأزرار، وكل عملية محفوظة في Money Tracker و Casino Dashboard.",
+        "purple",
+        ctx.author
+    )
+    e.add_field(name="💰 رصيدك", value=coin(ctx.guild.id, bal), inline=True)
+    e.add_field(name="🎯 الرهان", value=f"`{amount}`", inline=True)
+    e.add_field(
+        name="🎮 الألعاب",
+        value="🍀 **حظ** — سريع ومباشر\n"
+        "✌️ **دبل** — مخاطرة أعلى\n"
+        "🎰 **سلوت** — رموز وجوائز\n"
+        "🪙 **وجه** — Coin flip\n"
+        "🃏 **بلاك جاك** — Hit / Stand تفاعلي",
+        inline=False
+    )
+    e.add_field(
+        name="🛡️ قواعد مهمة",
+        value="الرهان ينخصم أولًا.\n"
+        "التعادل في بلاك جاك يرجع الرهان.\n"
+        "الألعاب موزونة عشان ما تكسر الاقتصاد.",
+        inline=False
+    )
+    return e
 
 
 class BlackjackGameView(discord.ui.View):
@@ -139,7 +162,7 @@ class BlackjackGameView(discord.ui.View):
             reason="Interactive blackjack bet",
             channel_id=self.ctx.channel.id,
             message_id=getattr(self.ctx.message, "id", 0),
-            metadata={"game": "blackjack", "mode": "interactive", "rules": "dealer_hits_soft_17"}
+            metadata={"game": "blackjack", "mode": "interactive", "rules": "tie_refund_dealer_hits_soft_17"}
         )
 
         if not tx.get("ok"):
@@ -149,8 +172,7 @@ class BlackjackGameView(discord.ui.View):
         self.player = [self.draw_card(), self.draw_card()]
         self.dealer = [self.draw_card(), self.draw_card()]
 
-        # Dealer peeks for blackjack. This prevents the player from getting free decisions
-        # when dealer already has blackjack.
+        # Both blackjack = draw/refund. Dealer blackjack alone = loss.
         if is_blackjack(self.player) or is_blackjack(self.dealer):
             if is_blackjack(self.player) and is_blackjack(self.dealer):
                 await self.finish("draw")
@@ -178,7 +200,7 @@ class BlackjackGameView(discord.ui.View):
             value=fmt_hand(self.dealer, hide_second=not reveal_dealer),
             inline=False
         )
-        e.add_field(name="Rules", value="Dealer peeks blackjack + hits soft 17. التعادل على 21 فقط يرجع الرهان، باقي التعادلات لصالح الديلر.", inline=False)
+        e.add_field(name="القواعد", value="الديلر يسحب على Soft 17. أي تعادل = رجوع الرهان.", inline=False)
         e.add_field(name="Bet TX", value=f"`{self.bet_tx[:12]}`", inline=True)
         return e
 
@@ -189,8 +211,6 @@ class BlackjackGameView(discord.ui.View):
         self.finished = True
 
         if outcome == "stand":
-            # Dealer draws until 17 and also hits soft 17.
-            # This makes dealer stronger and more realistic.
             while hand_value(self.dealer) < 17 or is_soft_17(self.dealer):
                 self.dealer.append(self.draw_card())
 
@@ -201,10 +221,9 @@ class BlackjackGameView(discord.ui.View):
                 outcome = "win"
             elif pv > dv:
                 outcome = "win"
-            elif pv == dv and pv == 21:
-                outcome = "draw"
             elif pv == dv:
-                outcome = "lose"
+                # FIX: Push always refunds bet.
+                outcome = "draw"
             else:
                 outcome = "lose"
 
@@ -213,8 +232,6 @@ class BlackjackGameView(discord.ui.View):
         payout = 0
 
         if outcome == "blackjack":
-            # Total payout 2x means the user profits +bet after their initial bet was deducted.
-            # We are not using 2.5x because it was too generous for this economy.
             payout = self.bet * 2
             title = "🃏 Blackjack! فوز"
             color = "ok"
@@ -226,7 +243,7 @@ class BlackjackGameView(discord.ui.View):
             detail = "فزت على الديلر."
         elif outcome == "draw":
             payout = self.bet
-            title = "🤝 تعادل في بلاك جاك"
+            title = "🤝 Push / تعادل"
             color = "warn"
             detail = "تعادل، رجعنا لك الرهان."
         else:
@@ -273,14 +290,10 @@ class BlackjackGameView(discord.ui.View):
             "casino",
             f"🃏 Blackjack {outcome.upper()}",
             f"User: {self.ctx.author.mention} (`{self.ctx.author.id}`)\n"
-            f"Bet: **{self.bet:,}**\n"
-            f"Payout: **{payout:,}**\n"
-            f"Net: **{net:,}**\n"
-            f"Player: {self.player} = {pv}\n"
-            f"Dealer: {self.dealer} = {dv}\n"
-            f"Rules: dealer_peek=true, dealer_hits_soft_17=true\n"
-            f"Bet TX: `{self.bet_tx}`\n"
-            f"Payout TX: `{self.payout_tx or '-'}`",
+            f"Bet: **{self.bet:,}**\nPayout: **{payout:,}**\nNet: **{net:,}**\n"
+            f"Player: {self.player} = {pv}\nDealer: {self.dealer} = {dv}\n"
+            f"Rules: tie_refund=true, dealer_hits_soft_17=true\n"
+            f"Bet TX: `{self.bet_tx}`\nPayout TX: `{self.payout_tx or '-'}`",
             color
         )
 
@@ -296,14 +309,10 @@ class BlackjackGameView(discord.ui.View):
     @discord.ui.button(label="Hit / اسحب", style=discord.ButtonStyle.success, emoji="➕")
     async def hit_btn(self, interaction, button):
         if self.finished:
-            await interaction.response.send_message(
-                embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user),
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user), ephemeral=True)
             return
 
         self.player.append(self.draw_card())
-
         if hand_value(self.player) > 21:
             await self.finish("lose")
             await interaction.response.edit_message(embed=self.final_embed, view=self)
@@ -314,10 +323,7 @@ class BlackjackGameView(discord.ui.View):
     @discord.ui.button(label="Stand / وقف", style=discord.ButtonStyle.primary, emoji="✋")
     async def stand_btn(self, interaction, button):
         if self.finished:
-            await interaction.response.send_message(
-                embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user),
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user), ephemeral=True)
             return
 
         await self.finish("stand")
@@ -329,10 +335,9 @@ class BlackjackGameView(discord.ui.View):
             "📘 شرح بلاك جاك",
             "اضغط **Hit** عشان تسحب ورقة.\n"
             "اضغط **Stand** عشان توقف وتخلي الديلر يلعب.\n"
-            "الديلر يفحص Blackjack من البداية.\n"
-            "الديلر يسحب على soft 17، وهذا يقوي الديلر ويخلي اللعبة أعدل.\n"
-            "إذا تعديت 21 تخسر.\n"
-            "التعادل على 21 فقط يرجع الرهان، باقي التعادلات لصالح الديلر.",
+            "الديلر يسحب على Soft 17.\n"
+            "أي تعادل يرجع الرهان.\n"
+            "إذا تعديت 21 تخسر.",
             "info",
             interaction.user
         )
@@ -347,10 +352,7 @@ class CasinoView(discord.ui.View):
 
     async def play_game(self, interaction, game):
         if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message(
-                embed=embed("🚫 غير مسموح", "هذا الكازينو لصاحب الأمر فقط.", "bad", interaction.user),
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed("🚫 غير مسموح", "هذا الكازينو لصاحب الأمر فقط.", "bad", interaction.user), ephemeral=True)
             return
 
         if game == "blackjack":
@@ -363,33 +365,11 @@ class CasinoView(discord.ui.View):
             return
 
         res = play(interaction.guild.id, interaction.user.id, interaction.user.display_name, game, self.amount, interaction.channel.id, 0)
-
         if not res["ok"]:
-            await interaction.response.send_message(
-                embed=embed("🎰 فشل اللعب", res["error"], "bad", interaction.user),
-                ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed("🎰 فشل اللعب", res["error"], "bad", interaction.user), ephemeral=True)
             return
 
-        color = "ok" if res["outcome"] == "win" else "warn" if res["outcome"] == "draw" else "bad"
-        title = {"win": "🎉 فوز في الكازينو", "lose": "💀 خسارة في الكازينو", "draw": "🤝 تعادل في الكازينو"}[res["outcome"]]
-
-        e = embed(title, f"**اللعبة:** `{GAME_NAMES.get(game, game)}`\n{res['detail']}", color, interaction.user)
-        e.add_field(name="🎯 الرهان", value=coin(interaction.guild.id, res["bet"]), inline=True)
-        e.add_field(name="💸 الصافي", value=money_delta(interaction.guild.id, res["net"]), inline=True)
-        e.add_field(name="قبل", value=coin(interaction.guild.id, res["before"]), inline=True)
-        e.add_field(name="بعد", value=coin(interaction.guild.id, res["after"]), inline=True)
-        e.add_field(name="TX", value=f"`{str(res['bet_tx'])[:12]}`", inline=False)
-        await interaction.response.send_message(embed=e)
-
-        await send_action_log(
-            self.ctx,
-            "casino",
-            f"🎰 Casino {res['outcome'].upper()}",
-            f"User: {interaction.user.mention} (`{interaction.user.id}`)\n"
-            f"Game: `{game}`\nBet: **{res['bet']:,}**\nPayout: **{res['payout']:,}**\nNet: **{res['net']:,}**\nBefore: **{res['before']:,}**\nAfter: **{res['after']:,}**\nDetail: {res['detail']}\nBet TX: `{res['bet_tx']}`\nPayout TX: `{res['payout_tx'] or '-'}`",
-            color
-        )
+        await send_casino_result(interaction, self.ctx, res, game)
 
     @discord.ui.button(label="حظ", style=discord.ButtonStyle.primary, emoji="🍀")
     async def luck(self, interaction, button):
@@ -412,11 +392,28 @@ class CasinoView(discord.ui.View):
         await self.play_game(interaction, "blackjack")
 
 
-def casino_menu_embed(ctx, amount):
-    e = embed("🎰 كازينو NM", f"اختر اللعبة من الأزرار بالأسفل.\nالرهان الحالي: **{amount}**", "purple", ctx.author)
-    e.add_field(name="الألعاب", value="🍀 حظ\n✌️ دبل\n🎰 سلوت\n🪙 وجه\n🃏 بلاك جاك تفاعلي", inline=True)
-    e.add_field(name="ملاحظات", value="بلاك جاك فيه Hit / Stand، والديلر صار أقوى: يفحص Blackjack، يسحب على soft 17، والتعادل العادي للديلر.", inline=True)
-    return e
+async def send_casino_result(interaction, ctx, res, game):
+    color = "ok" if res["outcome"] == "win" else "warn" if res["outcome"] == "draw" else "bad"
+    title = {"win": "🎉 فوز في الكازينو", "lose": "💀 خسارة في الكازينو", "draw": "🤝 تعادل في الكازينو"}[res["outcome"]]
+
+    e = embed(title, f"**اللعبة:** `{GAME_NAMES.get(game, game)}`\n{res['detail']}", color, interaction.user)
+    e.add_field(name="🎯 الرهان", value=coin(interaction.guild.id, res["bet"]), inline=True)
+    e.add_field(name="💸 الصافي", value=money_delta(interaction.guild.id, res["net"]), inline=True)
+    e.add_field(name="قبل", value=coin(interaction.guild.id, res["before"]), inline=True)
+    e.add_field(name="بعد", value=coin(interaction.guild.id, res["after"]), inline=True)
+    e.add_field(name="TX", value=f"`{str(res['bet_tx'])[:12]}`", inline=False)
+    await interaction.response.send_message(embed=e)
+
+    await send_action_log(
+        ctx,
+        "casino",
+        f"🎰 Casino {res['outcome'].upper()}",
+        f"User: {interaction.user.mention} (`{interaction.user.id}`)\n"
+        f"Game: `{game}`\nBet: **{res['bet']:,}**\nPayout: **{res['payout']:,}**\nNet: **{res['net']:,}**\n"
+        f"Before: **{res['before']:,}**\nAfter: **{res['after']:,}**\nDetail: {res['detail']}\n"
+        f"Bet TX: `{res['bet_tx']}`\nPayout TX: `{res['payout_tx'] or '-'}`",
+        color
+    )
 
 
 def setup(bot):
@@ -431,14 +428,12 @@ def setup(bot):
             return
 
         res = play(ctx.guild.id, ctx.author.id, ctx.author.display_name, game, amount, ctx.channel.id, ctx.message.id)
-
         if not res["ok"]:
             await ctx.reply(embed=embed("🎰 Casino رفض العملية", f"**السبب:** {res['error']}", "bad", ctx.author))
             return
 
         color = "ok" if res["outcome"] == "win" else "warn" if res["outcome"] == "draw" else "bad"
         title = {"win": "🎉 فوز في الكازينو", "lose": "💀 خسارة في الكازينو", "draw": "🤝 تعادل في الكازينو"}[res["outcome"]]
-
         e = embed(title, f"**اللعبة:** `{GAME_NAMES.get(game, game)}`\n{res['detail']}", color, ctx.author)
         e.add_field(name="🎯 الرهان", value=coin(ctx.guild.id, res["bet"]), inline=True)
         e.add_field(name="💸 الصافي", value=money_delta(ctx.guild.id, res["net"]), inline=True)
@@ -451,14 +446,15 @@ def setup(bot):
             ctx,
             "casino",
             f"🎰 Casino {res['outcome'].upper()}",
-            f"User: {ctx.author.mention} (`{ctx.author.id}`)\n"
-            f"Game: `{game}`\nBet: **{res['bet']:,}**\nPayout: **{res['payout']:,}**\nNet: **{res['net']:,}**\nBefore: **{res['before']:,}**\nAfter: **{res['after']:,}**\nDetail: {res['detail']}\nBet TX: `{res['bet_tx']}`\nPayout TX: `{res['payout_tx'] or '-'}`",
+            f"User: {ctx.author.mention} (`{ctx.author.id}`)\nGame: `{game}`\nBet: **{res['bet']:,}**\n"
+            f"Payout: **{res['payout']:,}**\nNet: **{res['net']:,}**\nBefore: **{res['before']:,}**\nAfter: **{res['after']:,}**\n"
+            f"Detail: {res['detail']}\nBet TX: `{res['bet_tx']}`\nPayout TX: `{res['payout_tx'] or '-'}`",
             color
         )
 
     @bot.command(name="كازينو", aliases=["casino"])
     async def casino_menu(ctx, amount: str = "100"):
-        await ctx.reply(embed=casino_menu_embed(ctx, amount), view=CasinoView(ctx, amount))
+        await ctx.reply(embed=casino_lobby_embed(ctx, amount), view=CasinoView(ctx, amount))
 
     @bot.command(name="حظ", aliases=["luck"])
     async def luck(ctx, amount: str):
