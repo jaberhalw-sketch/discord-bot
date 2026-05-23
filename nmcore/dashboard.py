@@ -1126,13 +1126,7 @@ DASHBOARD_BASE_URL</pre>
         )
 
         body = server_pill_html(g, bot) + f"""
-        <div class='card'>
-          <h3>Limited Property Stock</h3>
-          <p class='muted'>العقارات محدودة مثل قبل، والمتجر يعرض المتاح فقط.</p>
-          <table><tr><th>Type</th><th>Total</th><th>Available</th><th>Owned</th><th>Price</th><th>Rent</th></tr>{real_estate_stock_rows}</table>
-        </div>
-
-        <div class='card'>
+<div class='card'>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
