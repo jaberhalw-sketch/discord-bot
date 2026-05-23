@@ -3,7 +3,7 @@ import discord
 from discord.ext import commands
 from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
 from nmcore.services.levels import message_xp
-from nmcore.services.protection import get_settings, contains_bad, has_link, matched_bad_word
+from nmcore.services.protection import get_settings, check_message, is_ignored_channel, is_whitelisted_member
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
 from nmcore.services.log_channels import get_log_channel
@@ -243,44 +243,29 @@ def setup_bot(bot):
             s = get_settings(message.guild.id)
 
             if s.get("enabled") and is_system_enabled(message.guild.id, "protection"):
-                ignored_channels = {
-                    int(x.strip()) for x in str(s.get("ignored_channels") or "").replace("\n", ",").split(",")
-                    if x.strip().isdigit()
-                }
-                whitelist_roles = {
-                    int(x.strip()) for x in str(s.get("whitelist_roles") or "").replace("\n", ",").split(",")
-                    if x.strip().isdigit()
-                }
-
-                if int(message.channel.id) in ignored_channels:
+                if is_ignored_channel(s, message.channel.id):
                     await bot.process_commands(message)
                     return
 
-                if whitelist_roles and any(int(r.id) in whitelist_roles for r in getattr(message.author, "roles", [])):
+                if is_whitelisted_member(s, message.author):
                     await bot.process_commands(message)
                     return
 
-                words = [w.strip() for w in str(s.get("bad_words") or "").split(",") if w.strip()]
+                result = check_message(message, s)
 
-                bad_word = ""
-                bad = False
-
-                if bool(s.get("bad_words_enabled")):
-                    bad_word = matched_bad_word(message.content, words)
-                    bad = bool(bad_word) or contains_bad(message.content, words)
-
-                link = bool(s.get("links_enabled")) and has_link(message.content)
-
-                if bad or link:
+                if result.get("blocked"):
                     if bool(s.get("delete_messages")):
                         try:
                             await message.delete()
                         except Exception:
                             pass
 
-                    if bad:
-                        reason = "استخدام كلمة ممنوعة في السيرفر"
+                    kind = result.get("kind") or "protection"
+                    reason = result.get("reason") or "Protection violation"
+                    matched = result.get("matched") or ""
+                    details = result.get("details") or ""
 
+                    if result.get("warning"):
                         warnsvc.add_warning(
                             message.guild.id,
                             message.author.id,
@@ -291,75 +276,47 @@ def setup_bot(bot):
                             message.content[:1000]
                         )
 
-                        log_event(
-                            message.guild.id,
-                            "protection_warning",
-                            message.author.id,
-                            message.author.display_name,
-                            message.channel.id,
-                            message.channel.name,
-                            "Bad word blocked + warning issued",
-                            message.content[:500],
-                            {"matched": bad_word}
-                        )
+                    event_type = f"protection_{kind}"
+                    log_event(
+                        message.guild.id,
+                        event_type,
+                        message.author.id,
+                        message.author.display_name,
+                        message.channel.id,
+                        message.channel.name,
+                        f"Protection blocked: {kind}",
+                        message.content[:500],
+                        {"matched": matched, "details": details, "warning": bool(result.get("warning"))}
+                    )
 
-                        await send_log(
-                            bot,
-                            message.guild,
-                            "protection",
-                            "🛡️ Protection Warning",
-                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nAction: deleted message + warning\nMatched: `{bad_word or 'hidden'}`\nMessage: `{message.content[:800]}`",
-                            "bad",
+                    await send_log(
+                        bot,
+                        message.guild,
+                        "protection",
+                        f"🛡️ Protection Blocked: {kind}",
+                        f"User: {message.author.mention} (`{message.author.id}`)\n"
+                        f"Channel: {message.channel.mention}\n"
+                        f"Action: {'deleted + warning' if result.get('warning') else 'deleted'}\n"
+                        f"Reason: `{reason}`\n"
+                        f"Matched: `{matched or '-'}`\n"
+                        f"Details: `{details or '-'}`\n"
+                        f"Message: `{message.content[:800]}`",
+                        "bad" if result.get("warning") else "warn",
+                        message.author
+                    )
+
+                    try:
+                        e = embed(
+                            "🛡️ حماية السيرفر",
+                            f"{message.author.mention}\nتم حذف الرسالة.\n**السبب:** {reason}",
+                            "bad" if result.get("warning") else "warn",
                             message.author
                         )
-
-                        try:
-                            e = embed(
-                                "🛡️ رسالة ممنوعة",
-                                f"{message.author.mention}\nتم حذف الرسالة وإعطاؤك **تحذير** بسبب استخدام كلام ممنوع.",
-                                "bad",
-                                message.author
-                            )
-                            e.add_field(name="الإجراء", value="حذف الرسالة + تحذير", inline=True)
-                            e.add_field(name="النظام", value="Protection", inline=True)
-                            await message.channel.send(embed=e, delete_after=8)
-                        except Exception:
-                            pass
-
-                    else:
-                        log_event(
-                            message.guild.id,
-                            "protection_link",
-                            message.author.id,
-                            message.author.display_name,
-                            message.channel.id,
-                            message.channel.name,
-                            "Link blocked",
-                            message.content[:500]
-                        )
-
-                        await send_log(
-                            bot,
-                            message.guild,
-                            "protection",
-                            "🔗 Link Blocked",
-                            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nMessage: `{message.content[:800]}`",
-                            "warn",
-                            message.author
-                        )
-
-                        try:
-                            await message.channel.send(
-                                embed=embed(
-                                    "🔗 رابط ممنوع",
-                                    f"{message.author.mention}\nتم حذف الرابط حسب إعدادات الحماية.",
-                                    "warn",
-                                    message.author
-                                ),
-                                delete_after=7
-                            )
-                        except Exception:
-                            pass
+                        e.add_field(name="الإجراء", value="حذف الرسالة + تحذير" if result.get("warning") else "حذف الرسالة", inline=True)
+                        e.add_field(name="النظام", value=f"Protection / {kind}", inline=True)
+                        await message.channel.send(embed=e, delete_after=8)
+                    except Exception:
+                        pass
 
                     return
 
