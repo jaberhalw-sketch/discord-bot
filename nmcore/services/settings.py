@@ -17,7 +17,7 @@ COMMAND_SYSTEM = {
     "تحذير":"protection","تحذيرات":"protection","مسح_تحذيرات":"protection",
     "متجر":"shop","شراء":"shop","صندوق":"shop",
     "سحب":"giveaway","فعالية":"giveaway",
-    "مساعدة":"utility","بنق":"utility","شرح_الاقتصاد":"utility","شرح_القمار":"utility","شرح_البوت":"utility","ارسال_الشروحات":"admin","اعداد":"admin","لوحة":"admin","قفل":"admin","فتح":"admin","مسح":"admin"
+    "مساعدة":"utility","بنق":"utility","شرح_الاقتصاد":"utility","شرح_القمار":"utility","شرح_البوت":"utility","شرح_لعب":"utility","لعب":"utility","lfg":"utility","قيم":"utility","ارسال_الشروحات":"admin","اعداد":"admin","لوحة":"admin","قفل":"admin","فتح":"admin","مسح":"admin"
 }
 
 def ensure_guild(guild_id:int, guild_name:str=""):
@@ -33,6 +33,11 @@ def ensure_guild(guild_id:int, guild_name:str=""):
 
     try:
         cur.execute("ALTER TABLE guild_settings ADD COLUMN dev_mode_enabled INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_channel_id INTEGER DEFAULT 0")
     except Exception:
         pass
     for k,v in SYSTEM_DEFAULTS.items():
@@ -88,7 +93,7 @@ def get_guild_settings(guild_id:int)->dict:
     return dict(row) if row else {}
 
 def update_channel(guild_id:int, key:str, value:int):
-    if key not in {"commands_channel_id","gambling_channel_id","logs_channel_id"}:
+    if key not in {"commands_channel_id","gambling_channel_id","logs_channel_id","lfg_channel_id"}:
         return
     ensure_guild(guild_id)
     conn=db(); cur=conn.cursor()
@@ -139,5 +144,19 @@ def set_dev_mode_enabled(guild_id:int, enabled:bool):
         cur.execute("ALTER TABLE guild_settings ADD COLUMN dev_mode_enabled INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_channel_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
     cur.execute("UPDATE guild_settings SET dev_mode_enabled=?, updated_at=? WHERE guild_id=?", (1 if enabled else 0,int(time.time()),int(guild_id)))
     conn.commit(); conn.close()
+
+
+def get_lfg_channel_id(guild_id:int)->int:
+    ensure_guild(guild_id)
+    gs = get_guild_settings(guild_id)
+    return int(gs.get("lfg_channel_id") or 0)
+
+def set_lfg_channel_id(guild_id:int, channel_id:int):
+    update_channel(guild_id, "lfg_channel_id", int(channel_id or 0))
