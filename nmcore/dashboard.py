@@ -842,6 +842,12 @@ DASHBOARD_BASE_URL</pre>
 
         body = server_pill_html(g, bot) + f"""
         <div class='card'>
+          <h3>Limited Property Stock</h3>
+          <p class='muted'>العقارات محدودة مثل قبل، والمتجر يعرض المتاح فقط.</p>
+          <table><tr><th>Type</th><th>Total</th><th>Available</th><th>Owned</th><th>Price</th><th>Rent</th></tr>{real_estate_stock_rows}</table>
+        </div>
+
+        <div class='card'>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
@@ -935,6 +941,12 @@ DASHBOARD_BASE_URL</pre>
 
         conn.close()
 
+        real_estate_stock_summary = real_estate.stock_summary(g)
+        real_estate_stock_rows = "".join(
+            f"<tr><td>{esc(s['type_key'])}</td><td>{int(s['total'] or 0):,}</td><td>{int(s['available'] or 0):,}</td><td>{int(s['owned'] or 0):,}</td><td>{int(s['min_price'] or 0):,}</td><td>{int(s['min_rent'] or 0):,}</td></tr>"
+            for s in real_estate_stock_summary
+        )
+
         trs = "".join(
             f"""<tr>
               <td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td>
@@ -1025,7 +1037,7 @@ DASHBOARD_BASE_URL</pre>
                 if prop:
                     if action == "set_owner":
                         cur.execute(
-                            "UPDATE properties SET owner_id=?, owner_name=? WHERE guild_id=? AND id=?",
+                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
                             (owner_id, owner_name[:120], g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
@@ -2268,7 +2280,7 @@ DASHBOARD_BASE_URL</pre>
                 if prop:
                     if action == "set_owner":
                         cur.execute(
-                            "UPDATE properties SET owner_id=?, owner_name=? WHERE guild_id=? AND id=?",
+                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
                             (owner_id, owner_name[:120], g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
