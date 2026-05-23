@@ -1,29 +1,51 @@
-import discord
-from nmcore.services.levels import get_level, top_levels
-from nmcore.ui import embed
+import time, random
+from nmcore.db import db
+from nmcore.config import XP_PER_MESSAGE_MIN, XP_PER_MESSAGE_MAX
 
-def setup(bot):
-    @bot.command(name="لفلي", aliases=["لفل"])
-    async def my_level(ctx, member:discord.Member=None):
-        member = member or ctx.author
-        xp, lvl = get_level(ctx.guild.id, member.id)
+_cooldowns={}
 
-        e = embed("📊 Level Profile", f"{member.mention}", "info", member)
-        e.add_field(name="Level", value=str(lvl), inline=True)
-        e.add_field(name="XP", value=f"{xp:,}/{lvl*100:,}", inline=True)
-        await ctx.reply(embed=e)
+def get_level(guild_id:int,user_id:int):
+    conn=db(); cur=conn.cursor()
+    cur.execute("INSERT OR IGNORE INTO levels (guild_id,user_id,xp,level,updated_at) VALUES (?,?,0,1,?)", (int(guild_id),int(user_id),int(time.time())))
+    conn.commit()
+    cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (int(guild_id),int(user_id)))
+    row=cur.fetchone(); conn.close()
+    return int(row["xp"]), int(row["level"])
 
-    @bot.command(name="ترتيب")
-    async def level_top(ctx):
-        rows = top_levels(ctx.guild.id, 10)
-        lines = [
-            f"**#{i}** <@{uid}> — Level **{lvl}** | XP `{xp}`"
-            for i, (uid, xp, lvl) in enumerate(rows, 1)
-        ]
+def add_xp(guild_id:int,user_id:int,amount:int):
+    xp,level=get_level(guild_id,user_id)
+    xp+=int(amount)
+    needed=level*100
+    up=False
+    while xp>=needed:
+        xp-=needed; level+=1; needed=level*100; up=True
+    conn=db(); cur=conn.cursor()
+    cur.execute("UPDATE levels SET xp=?, level=?, updated_at=? WHERE guild_id=? AND user_id=?", (xp,level,int(time.time()),int(guild_id),int(user_id)))
+    conn.commit(); conn.close()
+    return xp,level,up
 
-        await ctx.reply(embed=embed(
-            "🏅 ترتيب اللفلات",
-            "\n".join(lines) if lines else "لا يوجد بيانات للحين.",
-            "info",
-            ctx.author
-        ))
+def message_xp(guild_id:int,user_id:int,cooldown:int):
+    key=(int(guild_id),int(user_id)); now=time.time()
+    if now-_cooldowns.get(key,0)<cooldown:
+        return None
+    _cooldowns[key]=now
+    return add_xp(guild_id,user_id,random.randint(XP_PER_MESSAGE_MIN,XP_PER_MESSAGE_MAX))
+
+def top_levels(guild_id:int,limit:int=10):
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT user_id,xp,level FROM levels WHERE guild_id=? ORDER BY level DESC,xp DESC LIMIT ?", (int(guild_id),int(limit)))
+    rows=[(int(r["user_id"]),int(r["xp"]),int(r["level"])) for r in cur.fetchall()]
+    conn.close(); return rows
+
+
+VOICE_XP_PER_INTERVAL = 15
+VOICE_XP_INTERVAL_SECONDS = 5 * 60
+
+def voice_xp_interval():
+    return VOICE_XP_INTERVAL_SECONDS
+
+def voice_xp_amount():
+    return VOICE_XP_PER_INTERVAL
+
+def add_voice_xp(guild_id:int,user_id:int):
+    return add_xp(guild_id,user_id,VOICE_XP_PER_INTERVAL)
