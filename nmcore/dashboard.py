@@ -600,6 +600,10 @@ DASHBOARD_BASE_URL</pre>
         g = gid(bot)
         uid = request.args.get("user_id", "").strip()
         source = request.args.get("source", "").strip()
+        actor_id = request.args.get("actor_id", "").strip()
+        min_amount = request.args.get("min_amount", "").strip()
+        max_amount = request.args.get("max_amount", "").strip()
+        direction = request.args.get("direction", "").strip()
         limit_raw = request.args.get("limit", "250").strip()
 
         try:
@@ -614,9 +618,26 @@ DASHBOARD_BASE_URL</pre>
             q += " AND user_id=?"
             params.append(int(uid))
 
+        if actor_id.isdigit():
+            q += " AND actor_id=?"
+            params.append(int(actor_id))
+
         if source:
             q += " AND source_type LIKE ?"
             params.append(f"{source}%")
+
+        if direction == "in":
+            q += " AND amount > 0"
+        elif direction == "out":
+            q += " AND amount < 0"
+
+        if min_amount.lstrip("-").isdigit():
+            q += " AND ABS(amount) >= ?"
+            params.append(abs(int(min_amount)))
+
+        if max_amount.lstrip("-").isdigit():
+            q += " AND ABS(amount) <= ?"
+            params.append(abs(int(max_amount)))
 
         q += " ORDER BY id DESC LIMIT ?"
         params.append(limit)
@@ -629,9 +650,33 @@ DASHBOARD_BASE_URL</pre>
 
         cur.execute("""SELECT source_type, COUNT(*) c,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took
-        FROM money_ledger WHERE guild_id=? GROUP BY source_type ORDER BY c DESC LIMIT 20""", (g,))
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
+        COALESCE(SUM(amount),0) net
+        FROM money_ledger WHERE guild_id=? GROUP BY source_type ORDER BY c DESC LIMIT 30""", (g,))
         source_rows = cur.fetchall()
+
+        cur.execute("""SELECT
+        COUNT(*) rows,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) money_in,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) money_out,
+        COALESCE(SUM(amount),0) net
+        FROM money_ledger WHERE guild_id=?""", (g,))
+        totals = cur.fetchone()
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(amount),0) net,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY received DESC LIMIT 10""", (g,))
+        top_received = cur.fetchall()
+
+        cur.execute("""SELECT actor_id, actor_name, COUNT(*) c,
+        COALESCE(SUM(ABS(amount)),0) volume
+        FROM money_ledger WHERE guild_id=? AND actor_id != 0
+        GROUP BY actor_id, actor_name ORDER BY volume DESC LIMIT 10""", (g,))
+        top_actors = cur.fetchall()
 
         conn.close()
 
@@ -640,8 +685,23 @@ DASHBOARD_BASE_URL</pre>
             for r in source_rows
         )
 
+        source_trs = "".join(
+            f"<tr><td>{esc(r['source_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took']):,}</td><td>{int(r['net']):,}</td></tr>"
+            for r in source_rows
+        )
+
+        received_trs = "".join(
+            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['received']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
+            for r in top_received
+        )
+
+        actor_trs = "".join(
+            f"<tr><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{int(r['volume']):,}</td><td>{int(r['c']):,}</td></tr>"
+            for r in top_actors
+        )
+
         trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{r['user_id']}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td></tr>"
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td><code>{r['actor_id']}</code></td></tr>"
             for r in rows
         )
 
@@ -650,7 +710,15 @@ DASHBOARD_BASE_URL</pre>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(uid)}'>
+            <input name=actor_id placeholder='Actor ID' value='{esc(actor_id)}'>
             <input name=source placeholder='source_type مثل casino / salary' value='{esc(source)}'>
+            <select name=direction>
+              <option value='' {'selected' if direction == '' else ''}>All</option>
+              <option value='in' {'selected' if direction == 'in' else ''}>Money In</option>
+              <option value='out' {'selected' if direction == 'out' else ''}>Money Out</option>
+            </select>
+            <input name=min_amount placeholder='Min abs' value='{esc(min_amount)}' style='width:90px'>
+            <input name=max_amount placeholder='Max abs' value='{esc(max_amount)}' style='width:90px'>
             <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
             <button>Filter</button>
             <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}'>Reset</a>
@@ -658,9 +726,19 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
 
-        body = server_pill_html(g, bot) + form + f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No ledger yet.</span>'}</div>"
-        body += f"<div class='card'><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th></tr>{trs}</table></div>"
-
+        body = server_pill_html(g, bot) + form
+        body += f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(totals['rows'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Money In</div><div class='stat'>{int(totals['money_in'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Money Out</div><div class='stat'>{int(totals['money_out'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Net</div><div class='stat'>{int(totals['net'] or 0):,}</div></div>
+        </div>
+        """
+        body += f"<div class='card'><h3>Quick Source Filters</h3>{chips}</div>"
+        body += f"<div class='card'><h3>Source Summary</h3><table><tr><th>Source</th><th>Rows</th><th>In</th><th>Out</th><th>Net</th></tr>{source_trs}</table></div>"
+        body += f"<div class='grid'><div class='card'><h3>Top Received</h3><table><tr><th>User</th><th>In</th><th>Out</th><th>Net</th><th>Rows</th><th></th></tr>{received_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Name</th><th>Volume</th><th>Rows</th></tr>{actor_trs}</table></div></div>"
+        body += f"<div class='card'><h3>Ledger Rows</h3><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th><th>Actor</th></tr>{trs}</table></div>"
         return page("Money Tracker", body, g)
 
     @app.route("/dashboard/casino")
@@ -670,96 +748,241 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+        user_filter = request.args.get("user_id", "").strip()
+        game_filter = request.args.get("game", "").strip()
+
         conn = db()
         cur = conn.cursor()
 
-        cur.execute("""SELECT source_label, COUNT(*) c,
+        where = "WHERE guild_id=? AND source_type LIKE 'casino_%'"
+        params = [g]
+
+        if user_filter.isdigit():
+            where += " AND user_id=?"
+            params.append(int(user_filter))
+
+        if game_filter:
+            where += " AND source_label=?"
+            params.append(game_filter)
+
+        cur.execute(f"""SELECT source_label, COUNT(*) c,
         COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid
-        FROM money_ledger WHERE guild_id=? AND source_type LIKE 'casino_%'
-        GROUP BY source_label ORDER BY c DESC""", (g,))
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
+        COALESCE(SUM(amount),0) net
+        FROM money_ledger {where}
+        GROUP BY source_label ORDER BY c DESC""", params)
         game_rows = cur.fetchall()
 
-        cur.execute("""SELECT user_id,
+        cur.execute(f"""SELECT user_id,
         COALESCE(SUM(amount),0) net,
         COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
         COUNT(*) rows
         FROM money_ledger
-        WHERE guild_id=? AND source_type LIKE 'casino_%'
+        {where}
         GROUP BY user_id
         ORDER BY net ASC
-        LIMIT 10""", (g,))
+        LIMIT 10""", params)
         biggest_losers = cur.fetchall()
 
-        cur.execute("""SELECT user_id,
+        cur.execute(f"""SELECT user_id,
         COALESCE(SUM(amount),0) net,
         COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
         COUNT(*) rows
         FROM money_ledger
-        WHERE guild_id=? AND source_type LIKE 'casino_%'
+        {where}
         GROUP BY user_id
         ORDER BY net DESC
-        LIMIT 10""", (g,))
+        LIMIT 10""", params)
         biggest_winners = cur.fetchall()
 
-        cur.execute("""SELECT
+        cur.execute(f"""SELECT
         COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COUNT(*) rows
-        FROM money_ledger WHERE guild_id=? AND source_type LIKE 'casino_%'""", (g,))
+        COUNT(*) rows,
+        COUNT(DISTINCT user_id) users
+        FROM money_ledger {where}""", params)
         total = cur.fetchone()
+
+        cur.execute(f"""SELECT * FROM money_ledger {where}
+        ORDER BY id DESC LIMIT 100""", params)
+        recent = cur.fetchall()
 
         conn.close()
 
+        took = int(total["took"] or 0)
+        paid = int(total["paid"] or 0)
+        net = took - paid
+
         game_trs = "".join(
-            f"<tr><td>{esc(r['source_label'])}</td><td>{int(r['c']):,}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took'] or 0)-int(r['paid'] or 0):,}</td></tr>"
+            f"<tr><td><a href='/dashboard/casino?guild_id={g}&game={esc(r['source_label'])}'>{esc(r['source_label'])}</a></td><td>{int(r['c']):,}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took'] or 0)-int(r['paid'] or 0):,}</td></tr>"
             for r in game_rows
         )
 
         loser_trs = "".join(
-            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
             for r in biggest_losers
         )
 
         winner_trs = "".join(
-            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
             for r in biggest_winners
         )
 
+        recent_trs = "".join(
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td><code>{r['user_id']}</code></td><td>{esc(r['source_label'])}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['reason'])}</td></tr>"
+            for r in recent
+        )
+
         body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Casino Rows</div><div class='stat'>{int(total['rows'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Casino Took</div><div class='stat'>{int(total['took'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Casino Paid</div><div class='stat'>{int(total['paid'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Casino Net</div><div class='stat'>{int(total['took'] or 0)-int(total['paid'] or 0):,}</div></div>
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
+            <input name=game placeholder='Game/source_label' value='{esc(game_filter)}'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/casino?guild_id={g}'>Reset</a>
+          </form>
         </div>
-        <div class='card'><h3>By Game</h3><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>Net For Casino</th></tr>{game_trs}</table></div>
-        <div class='card'><h3>Biggest Losers</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{loser_trs}</table></div>
-        <div class='card'><h3>Biggest Winners</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{winner_trs}</table></div>
+        <div class='grid'>
+          <div class='card'><div class='muted'>Casino Took</div><div class='stat'>{took:,}</div></div>
+          <div class='card'><div class='muted'>Casino Paid</div><div class='stat'>{paid:,}</div></div>
+          <div class='card'><div class='muted'>Casino Net</div><div class='stat'>{net:,}</div></div>
+          <div class='card'><div class='muted'>Players</div><div class='stat'>{int(total['users'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Rows</div><div class='stat'>{int(total['rows'] or 0):,}</div></div>
+        </div>
+        <div class='card'><h3>By Game</h3><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>House Net</th></tr>{game_trs}</table></div>
+        <div class='grid'>
+          <div class='card'><h3>Biggest Winners</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{winner_trs}</table></div>
+          <div class='card'><h3>Biggest Losers</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{loser_trs}</table></div>
+        </div>
+        <div class='card'><h3>Recent Casino Ledger</h3><table><tr><th>TX</th><th>User</th><th>Game</th><th>Amount</th><th>Balance After</th><th>Reason</th></tr>{recent_trs}</table></div>
         """
         return page("Casino", body, g)
 
-    @app.route("/dashboard/levels")
+    @app.route("/dashboard/levels", methods=["GET", "POST"])
     def levels_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                user_id = int(request.form.get("user_id") or 0)
+            except Exception:
+                user_id = 0
+
+            try:
+                xp = int(request.form.get("xp") or 0)
+            except Exception:
+                xp = 0
+
+            try:
+                level = int(request.form.get("level") or 1)
+            except Exception:
+                level = 1
+
+            if user_id and action in {"set", "add_xp", "reset"}:
+                conn = db()
+                cur = conn.cursor()
+
+                cur.execute("INSERT OR IGNORE INTO levels (guild_id,user_id,xp,level,updated_at) VALUES (?,?,0,1,strftime('%s','now'))", (g, user_id))
+
+                if action == "set":
+                    cur.execute("UPDATE levels SET xp=?, level=?, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (max(0, xp), max(1, level), g, user_id))
+                elif action == "add_xp":
+                    cur.execute("UPDATE levels SET xp=xp+?, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (max(0, xp), g, user_id))
+                elif action == "reset":
+                    cur.execute("UPDATE levels SET xp=0, level=1, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (g, user_id))
+
+                conn.commit()
+                conn.close()
+
+                log_event(g, f"dashboard_levels_{action}", user_id, str(user_id), 0, "", f"Dashboard levels {action}", f"Actor={actor_id}, XP={xp}, Level={level}")
+
+            return redirect(f"/dashboard/levels?guild_id={g}")
+
+        uid = request.args.get("user_id", "").strip()
+
         conn = db()
         cur = conn.cursor()
-        cur.execute("SELECT * FROM levels WHERE guild_id=? ORDER BY level DESC,xp DESC LIMIT 100", (g,))
+
+        q = "SELECT * FROM levels WHERE guild_id=?"
+        params = [g]
+
+        if uid.isdigit():
+            q += " AND user_id=?"
+            params.append(int(uid))
+
+        q += " ORDER BY level DESC,xp DESC LIMIT 150"
+
+        cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(xp),0) total_xp, COALESCE(AVG(level),0) avg_level, COALESCE(MAX(level),1) max_level FROM levels WHERE guild_id=?", (g,))
+        stats = cur.fetchone()
+
         conn.close()
 
         trs = "".join(
-            f"<tr><td>{r['user_id']}</td><td>{r['level']}</td><td>{r['xp']}</td></tr>"
+            f"""<tr>
+              <td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td>
+              <td>{int(r['level'])}</td>
+              <td>{int(r['xp']):,}</td>
+              <td>
+                <form method='post' style='display:inline-grid;grid-template-columns:120px 80px 80px 70px 80px;gap:6px'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=user_id value='{r['user_id']}'>
+                  <input name=xp value='{int(r['xp'])}' type=number min=0>
+                  <input name=level value='{int(r['level'])}' type=number min=1>
+                  <button name=action value='set'>Set</button>
+                  <button name=action value='add_xp' style='background:#334155'>Add XP</button>
+                  <button name=action value='reset' style='background:#dc2626'>Reset</button>
+                </form>
+              </td>
+            </tr>"""
             for r in rows
         )
 
-        return page("Levels", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>User</th><th>Level</th><th>XP</th></tr>{trs}</table></div>", g)
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Level Users</div><div class='stat'>{int(stats['c'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Total XP</div><div class='stat'>{int(stats['total_xp'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Average Level</div><div class='stat'>{float(stats['avg_level'] or 0):.1f}</div></div>
+          <div class='card'><div class='muted'>Max Level</div><div class='stat'>{int(stats['max_level'] or 1):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Level Admin Control</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' required>
+            <input name=xp type=number min=0 placeholder='XP'>
+            <input name=level type=number min=1 placeholder='Level'>
+            <button name=action value='set'>Set XP/Level</button>
+            <button name=action value='add_xp' style='background:#334155'>Add XP</button>
+            <button name=action value='reset' style='background:#dc2626'>Reset</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/levels?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+
+        <div class='card'><h3>Levels</h3><table><tr><th>User</th><th>Level</th><th>XP</th><th>Actions</th></tr>{trs}</table></div>
+        """
+        return page("Levels", body, g)
 
     @app.route("/dashboard/real-estate", methods=["GET", "POST"])
     def real_estate_page():
@@ -1308,23 +1531,46 @@ DASHBOARD_BASE_URL</pre>
 
         g = gid(bot)
         activity_type = request.args.get("activity_type", "").strip()
+        actor_id = request.args.get("actor_id", "").strip()
+        limit_raw = request.args.get("limit", "250").strip()
+
+        try:
+            limit = max(25, min(int(limit_raw or 250), 1000))
+        except Exception:
+            limit = 250
 
         conn = db()
         cur = conn.cursor()
 
         q = "SELECT * FROM live_activity WHERE guild_id=?"
         params = [g]
+
         if activity_type:
             q += " AND activity_type=?"
             params.append(activity_type)
-        q += " ORDER BY id DESC LIMIT 250"
+
+        if actor_id.isdigit():
+            q += " AND actor_id=?"
+            params.append(int(actor_id))
+
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
 
         cur.execute(q, params)
         rows = cur.fetchall()
 
-        cur.execute("""SELECT activity_type, COUNT(*) c FROM live_activity
-        WHERE guild_id=? GROUP BY activity_type ORDER BY c DESC LIMIT 20""", (g,))
+        cur.execute("""SELECT activity_type, COUNT(*) c, COALESCE(SUM(amount),0) amount
+        FROM live_activity
+        WHERE guild_id=? GROUP BY activity_type ORDER BY c DESC LIMIT 30""", (g,))
         types = cur.fetchall()
+
+        cur.execute("""SELECT actor_id, actor_name, COUNT(*) c, COALESCE(SUM(amount),0) amount
+        FROM live_activity WHERE guild_id=?
+        GROUP BY actor_id, actor_name ORDER BY c DESC LIMIT 15""", (g,))
+        actors = cur.fetchall()
+
+        cur.execute("SELECT COUNT(*) c FROM live_activity WHERE guild_id=?", (g,))
+        total = cur.fetchone()
 
         conn.close()
 
@@ -1333,13 +1579,40 @@ DASHBOARD_BASE_URL</pre>
             for r in types
         )
 
+        type_trs = "".join(
+            f"<tr><td>{esc(r['activity_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
+            for r in types
+        )
+
+        actor_trs = "".join(
+            f"<tr><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
+            for r in actors
+        )
+
         trs = "".join(
             f"<tr><td>{r['id']}</td><td>{esc(r['activity_type'])}</td><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td><td>{int(r['amount']):,}</td></tr>"
             for r in rows
         )
 
         body = server_pill_html(g, bot)
-        body += f"<div class='card'><h3>Live Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'} <a class='btn' style='background:#334155;margin:4px' href='/dashboard/live?guild_id={g}'>Reset</a></div>"
+        body += f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=activity_type placeholder='activity_type' value='{esc(activity_type)}'>
+            <input name=actor_id placeholder='Actor ID' value='{esc(actor_id)}'>
+            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/live?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+        <div class='grid'>
+          <div class='card'><div class='muted'>Live Rows</div><div class='stat'>{int(total['c'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Activity Types</div><div class='stat'>{len(types):,}</div></div>
+        </div>
+        """
+        body += f"<div class='card'><h3>Live Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'}</div>"
+        body += f"<div class='grid'><div class='card'><h3>Activity Summary</h3><table><tr><th>Type</th><th>Rows</th><th>Amount</th></tr>{type_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Name</th><th>Rows</th><th>Amount</th></tr>{actor_trs}</table></div></div>"
         body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>Actor</th><th>Name</th><th>Title</th><th>Details</th><th>Amount</th></tr>{trs}</table></div>"
         return page("Live Activity", body, g)
 
