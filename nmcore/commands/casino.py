@@ -156,7 +156,7 @@ class BlackjackGameView(discord.ui.View):
         payout = 0
 
         if outcome == "blackjack":
-            payout = int(self.bet * 2.5)
+            payout = self.bet * 2
             title = "🃏 Blackjack! فوز قوي"
             color = "ok"
             detail = "Blackjack طبيعي."
@@ -267,7 +267,7 @@ class BlackjackGameView(discord.ui.View):
     async def rules_btn(self, interaction, button):
         e = embed(
             "📘 شرح بلاك جاك",
-            "اضغط **Hit** عشان تسحب ورقة.\nاضغط **Stand** عشان توقف وتخلي الديلر يلعب.\nإذا تعديت 21 تخسر.\nالتعادل يرجع الرهان.\nBlackjack طبيعي يعطي ربح أعلى.",
+            "اضغط **Hit** عشان تسحب ورقة.\nاضغط **Stand** عشان توقف وتخلي الديلر يلعب.\nإذا تعديت 21 تخسر.\nالتعادل يرجع الرهان.\nBlackjack طبيعي يعطي فوز مباشر.",
             "info",
             interaction.user
         )
@@ -350,7 +350,7 @@ class CasinoView(discord.ui.View):
 def casino_menu_embed(ctx, amount):
     e = embed("🎰 كازينو NM", f"اختر اللعبة من الأزرار بالأسفل.\nالرهان الحالي: **{amount}**", "purple", ctx.author)
     e.add_field(name="الألعاب", value="🍀 حظ\n✌️ دبل\n🎰 سلوت\n🪙 وجه\n🃏 بلاك جاك تفاعلي", inline=True)
-    e.add_field(name="ملاحظات", value="بلاك جاك فيه أزرار Hit / Stand. كل العمليات محفوظة في Money Tracker و Casino Dashboard.", inline=True)
+    e.add_field(name="ملاحظات", value="بلاك جاك فيه أزرار Hit / Stand. الاحتمالات تعدلت عشان القمار يكون عادل وما يصير فارم فلوس. كل العمليات محفوظة في Money Tracker و Casino Dashboard.", inline=True)
     return e
 
 
