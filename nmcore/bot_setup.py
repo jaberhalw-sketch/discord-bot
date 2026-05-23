@@ -3,14 +3,13 @@ import asyncio
 import discord
 from discord.ext import commands
 from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system, is_dev_mode_enabled
-from nmcore.services.levels import message_xp
+from nmcore.services.levels import message_xp, add_voice_xp, voice_xp_interval
 from nmcore.services.protection import get_settings, check_message, is_ignored_channel, is_whitelisted_member
 from nmcore.services.activity import log_event
 from nmcore.services import warnings as warnsvc
 from nmcore.services.log_channels import get_log_channel
 from nmcore.services import antiraid
 from nmcore.services import guides
-from nmcore.services import post_rewards
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
@@ -200,12 +199,45 @@ async def guide_background_loop(bot):
 
 
 
+
+
+async def voice_xp_background_loop(bot):
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for guild in list(bot.guilds):
+                if not is_system_enabled(guild.id, "levels"):
+                    continue
+
+                for channel in getattr(guild, "voice_channels", []):
+                    for member in getattr(channel, "members", []):
+                        if member.bot:
+                            continue
+                        if not getattr(member, "voice", None):
+                            continue
+                        if member.voice.self_deaf or member.voice.deaf:
+                            continue
+
+                        res = add_voice_xp(guild.id, member.id)
+                        if res and res[2]:
+                            try:
+                                log_event(guild.id, "voice_level_up", member.id, member.display_name, channel.id, channel.name, "Voice level up", f"Level {res[1]}")
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        await asyncio.sleep(voice_xp_interval())
+
+
+
 def setup_bot(bot):
     global _GUIDE_LOOP_STARTED
     if not _GUIDE_LOOP_STARTED:
         _GUIDE_LOOP_STARTED = True
         try:
             bot.loop.create_task(guide_background_loop(bot))
+            bot.loop.create_task(voice_xp_background_loop(bot))
         except Exception:
             pass
 
@@ -439,37 +471,6 @@ def setup_bot(bot):
                     message.channel.id,
                     message.channel.name,
                     "Protection error",
-                    f"{type(e).__name__}: {e}"
-                )
-            except Exception:
-                pass
-
-
-        try:
-            res = post_rewards.reward_message(message)
-            if res.get("ok"):
-                await send_log(
-                    bot,
-                    message.guild,
-                    "economy",
-                    "📝 Post Reward",
-                    f"User: {message.author.mention} (`{message.author.id}`)\n"
-                    f"Channel: {message.channel.mention}\n"
-                    f"Amount: **{int(res['amount']):,}**\n"
-                    f"TX: `{res['tx_id']}`",
-                    "money",
-                    message.author
-                )
-        except Exception as e:
-            try:
-                log_event(
-                    message.guild.id,
-                    "post_reward_error",
-                    message.author.id,
-                    message.author.display_name,
-                    message.channel.id,
-                    message.channel.name,
-                    "Post reward error",
                     f"{type(e).__name__}: {e}"
                 )
             except Exception:
