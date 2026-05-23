@@ -9,6 +9,7 @@ from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
 from nmcore.services import security
 from nmcore.services import full_check
+from nmcore.services import reports
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -1323,6 +1324,95 @@ DASHBOARD_BASE_URL</pre>
         body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th><th>Action</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
+
+    @app.route("/dashboard/analytics")
+    def analytics_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        money = reports.money_summary(g)
+        casino = reports.casino_summary(g)
+        shop = reports.shop_summary(g)
+        pnl = reports.profit_loss_summary(g)
+        users = reports.user_finance_summary(g, 12)
+
+        def money_fmt(v):
+            return f"{int(v or 0):,}"
+
+        game_rows = "".join(
+            f"<tr><td>{esc(r.get('source_label') or 'unknown')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('took') or 0):,}</td><td>{int(r.get('paid') or 0):,}</td><td>{int(r.get('took') or 0)-int(r.get('paid') or 0):,}</td></tr>"
+            for r in casino.get("games", [])
+        ) or "<tr><td colspan='5'>No casino data yet.</td></tr>"
+
+        item_rows = "".join(
+            f"<tr><td><code>{esc(r.get('item_key') or '')}</code></td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
+            for r in shop.get("top_items", [])
+        ) or "<tr><td colspan='3'>No shop purchases yet.</td></tr>"
+
+        buyer_rows = "".join(
+            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{esc(r.get('user_name') or '')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
+            for r in shop.get("top_buyers", [])
+        ) or "<tr><td colspan='4'>No buyers yet.</td></tr>"
+
+        spender_rows = "".join(
+            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{int(r.get('spent') or 0):,}</td><td>{int(r.get('received') or 0):,}</td><td>{int(r.get('net') or 0):,}</td></tr>"
+            for r in users.get("top_spenders", [])
+        ) or "<tr><td colspan='4'>No ledger data yet.</td></tr>"
+
+        recent_purchase_rows = "".join(
+            f"<tr><td>{r.get('id')}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{esc(r.get('item_key') or '')}</td><td>{int(r.get('price') or 0):,}</td><td><code>{esc(str(r.get('money_tx_id') or ''))[:12]}</code></td></tr>"
+            for r in shop.get("recent", [])
+        ) or "<tr><td colspan='5'>No recent purchases.</td></tr>"
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Total Balances</div><div class='stat'>{money_fmt(money.get('total_balance'))}</div></div>
+          <div class='card kpi-good'><div class='muted'>Money In</div><div class='stat'>{money_fmt(money.get('money_in'))}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Money Out</div><div class='stat'>{money_fmt(money.get('money_out'))}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Ledger Net</div><div class='stat'>{money_fmt(money.get('net'))}</div></div>
+        </div>
+
+        <div class='grid'>
+          <div class='card kpi-good'><div class='muted'>Tracked Server Profit</div><div class='stat'>{money_fmt(pnl.get('server_profit'))}</div><p class='muted'>Casino house net + shop sales</p></div>
+          <div class='card'><div class='muted'>Casino House Net</div><div class='stat'>{money_fmt(pnl.get('casino_house_net'))}</div></div>
+          <div class='card'><div class='muted'>Shop Sales</div><div class='stat'>{money_fmt(pnl.get('shop_sales'))}</div></div>
+          <div class='card'><div class='muted'>Shop Purchases</div><div class='stat'>{money_fmt(shop.get('purchases'))}</div></div>
+        </div>
+
+        <div class='grid'>
+          <div class='card'>
+            <h3>Casino Profit / Loss by Game</h3>
+            <table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>House Net</th></tr>{game_rows}</table>
+          </div>
+
+          <div class='card'>
+            <h3>Top Shop Items</h3>
+            <table><tr><th>Item</th><th>Purchases</th><th>Total Sales</th></tr>{item_rows}</table>
+          </div>
+        </div>
+
+        <div class='grid'>
+          <div class='card'>
+            <h3>Top Spenders</h3>
+            <table><tr><th>User</th><th>Spent</th><th>Received</th><th>Net</th></tr>{spender_rows}</table>
+          </div>
+
+          <div class='card'>
+            <h3>Top Shop Buyers</h3>
+            <table><tr><th>User</th><th>Name</th><th>Purchases</th><th>Total</th></tr>{buyer_rows}</table>
+          </div>
+        </div>
+
+        <div class='card'>
+          <h3>Recent Purchases</h3>
+          <table><tr><th>ID</th><th>User</th><th>Item</th><th>Price</th><th>TX</th></tr>{recent_purchase_rows}</table>
+        </div>
+        """
+        return page("Analytics", body, g)
+
+
 
     @app.route("/dashboard/full-check")
     def full_check_page():
