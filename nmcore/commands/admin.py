@@ -7,6 +7,7 @@ from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_
 from nmcore.services.diagnostics import system_status
 from nmcore.services import antiraid
 from nmcore.services import security
+from nmcore.services import readiness
 from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
@@ -102,7 +103,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -190,6 +191,48 @@ def setup(bot):
         await ctx.reply(embed=e)
 
 
+
+
+
+    @bot.command(name="جاهزية_البوت", aliases=["bot_ready", "readiness"])
+    async def bot_readiness(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        rep = readiness.readiness_report(ctx.guild)
+
+        ok_lines = []
+        bad_lines = []
+
+        for c in rep["checks"]:
+            line = f"{yes_no(c['ok'])} {c['name']}"
+            if c.get("detail"):
+                line += f" — `{c['detail']}`"
+
+            if c["ok"]:
+                ok_lines.append(line)
+            else:
+                bad_lines.append(line)
+
+        desc = f"Readiness Score: **{rep['score']}/100**\n\n"
+        if bad_lines:
+            desc += "**Needs Fix:**\n" + "\n".join(bad_lines[:10])
+        else:
+            desc += "✅ البوت جاهز من ناحية الفحص الأساسي."
+
+        e = embed(
+            "🧩 جاهزية NM System",
+            desc,
+            "ok" if rep["score"] >= 90 else "warn" if rep["score"] >= 70 else "bad",
+            ctx.author
+        )
+
+        e.add_field(name="Logs Mapping", value=f"{rep['mapped_logs']}/{rep['total_logs']}", inline=True)
+        e.add_field(name="Ledger Rows", value=str(rep["counts"].get("money_ledger", 0)), inline=True)
+        e.add_field(name="Log Events", value=str(rep["counts"].get("log_events", 0)), inline=True)
+
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="تقرير_الأمان", aliases=["security_report", "risk"])
