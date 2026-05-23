@@ -11,7 +11,7 @@ from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
 from nmcore.services.warnings import summary as warn_summary
-from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link, check_message, matched_bad_word, contains_bad, has_link, check_message
+from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link, check_message
 from nmcore.services.activity import log_event, record
 
 DISCORD_API = "https://discord.com/api/v10"
