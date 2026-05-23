@@ -10,6 +10,7 @@ from nmcore.services import warnings as warnsvc
 from nmcore.services.log_channels import get_log_channel
 from nmcore.services import antiraid
 from nmcore.services import guides
+from nmcore.services import post_rewards
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
 from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways
 from nmcore.ui import embed
@@ -438,6 +439,37 @@ def setup_bot(bot):
                     message.channel.id,
                     message.channel.name,
                     "Protection error",
+                    f"{type(e).__name__}: {e}"
+                )
+            except Exception:
+                pass
+
+
+        try:
+            res = post_rewards.reward_message(message)
+            if res.get("ok"):
+                await send_log(
+                    bot,
+                    message.guild,
+                    "economy",
+                    "📝 Post Reward",
+                    f"User: {message.author.mention} (`{message.author.id}`)\n"
+                    f"Channel: {message.channel.mention}\n"
+                    f"Amount: **{int(res['amount']):,}**\n"
+                    f"TX: `{res['tx_id']}`",
+                    "money",
+                    message.author
+                )
+        except Exception as e:
+            try:
+                log_event(
+                    message.guild.id,
+                    "post_reward_error",
+                    message.author.id,
+                    message.author.display_name,
+                    message.channel.id,
+                    message.channel.name,
+                    "Post reward error",
                     f"{type(e).__name__}: {e}"
                 )
             except Exception:
