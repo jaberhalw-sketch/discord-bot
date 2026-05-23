@@ -3,7 +3,7 @@ from flask import Flask, request, redirect, session
 from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
 from nmcore.db import db, init_db
 from nmcore.ui import page
-from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
+from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled, get_lfg_channel_id, set_lfg_channel_id
 from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
@@ -2404,7 +2404,7 @@ DASHBOARD_BASE_URL</pre>
             if "coin_name" in request.form:
                 set_coin_name(g, request.form.get("coin_name"))
 
-            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id"]:
+            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id", "lfg_channel_id"]:
                 if key in request.form:
                     update_channel(g, key, int(request.form.get(key) or 0))
 
@@ -2419,6 +2419,7 @@ DASHBOARD_BASE_URL</pre>
         commands_channel_id = int(gs.get("commands_channel_id") or 0)
         gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
         logs_channel_id = int(gs.get("logs_channel_id") or 0)
+        lfg_channel_id = get_lfg_channel_id(g)
         log_map = all_log_channels(g)
         pr = post_rewards.get_settings(g)
 
@@ -2465,6 +2466,18 @@ DASHBOARD_BASE_URL</pre>
             <button>Save Post Reward</button>
           </form>
           <p class='muted'><a href='/dashboard/post-rewards?guild_id={g}'>Open Post Rewards Report</a></p>
+        </div>
+
+        <div class='card kpi-info'>
+          <h3>Looking For Game Channel</h3>
+          <p class='muted'>حدد روم التجمعات من الداشبورد بدل ما يكون ID ثابت في الكود.</p>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <label>LFG Channel ID</label><br>
+            <input name=lfg_channel_id value='{lfg_channel_id}' placeholder='مثال: 1504066361876418703' style='width:320px'>
+            <button>Save LFG Channel</button>
+          </form>
+          <p class='muted'>بعد الحفظ: <code>!شرح_لعب</code> يرسل الشرح هناك، و <code>!لعب</code> يشتغل هناك فقط.</p>
         </div>
 
         <div class='card kpi-warn'>
