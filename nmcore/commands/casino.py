@@ -29,8 +29,20 @@ GAME_NAMES = {
 }
 
 
-def draw_card():
-    return random.choice(["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"])
+CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+
+def new_shoe(decks: int = 6):
+    """
+    Realistic blackjack shoe instead of random.choice every card.
+    This prevents weird easy patterns and makes the dealer/player odds more normal.
+    """
+    shoe = []
+    for _ in range(int(decks)):
+        for rank in CARD_RANKS:
+            shoe.extend([rank] * 4)
+    random.shuffle(shoe)
+    return shoe
 
 
 def hand_value(cards):
@@ -53,6 +65,30 @@ def hand_value(cards):
     return total
 
 
+def is_soft_17(cards):
+    total = 0
+    aces = 0
+
+    for c in cards:
+        if c == "A":
+            aces += 1
+            total += 11
+        elif c in {"J", "Q", "K"}:
+            total += 10
+        else:
+            total += int(c)
+
+    while total > 21 and aces:
+        total -= 10
+        aces -= 1
+
+    return total == 17 and aces > 0
+
+
+def is_blackjack(cards):
+    return len(cards) == 2 and hand_value(cards) == 21
+
+
 def fmt_hand(cards, hide_second=False):
     if hide_second and len(cards) > 1:
         return f"`{cards[0]}` `?`"
@@ -71,7 +107,13 @@ class BlackjackGameView(discord.ui.View):
         self.payout_tx = ""
         self.player = []
         self.dealer = []
+        self.shoe = []
         self.final_embed = None
+
+    def draw_card(self):
+        if not self.shoe:
+            self.shoe = new_shoe(6)
+        return self.shoe.pop()
 
     async def start(self):
         bal = get_balance(self.ctx.guild.id, self.ctx.author.id)
@@ -85,6 +127,7 @@ class BlackjackGameView(discord.ui.View):
 
         self.before = bal
         self.bet = int(bet)
+        self.shoe = new_shoe(6)
 
         tx = debit(
             self.ctx.guild.id,
@@ -96,18 +139,25 @@ class BlackjackGameView(discord.ui.View):
             reason="Interactive blackjack bet",
             channel_id=self.ctx.channel.id,
             message_id=getattr(self.ctx.message, "id", 0),
-            metadata={"game": "blackjack", "mode": "interactive"}
+            metadata={"game": "blackjack", "mode": "interactive", "rules": "dealer_hits_soft_17"}
         )
 
         if not tx.get("ok"):
             return False, embed("🃏 بلاك جاك", "رصيدك ما يكفي.", "bad", self.ctx.author)
 
         self.bet_tx = tx["tx_id"]
-        self.player = [draw_card(), draw_card()]
-        self.dealer = [draw_card(), draw_card()]
+        self.player = [self.draw_card(), self.draw_card()]
+        self.dealer = [self.draw_card(), self.draw_card()]
 
-        if hand_value(self.player) == 21:
-            await self.finish("blackjack")
+        # Dealer peeks for blackjack. This prevents the player from getting free decisions
+        # when dealer already has blackjack.
+        if is_blackjack(self.player) or is_blackjack(self.dealer):
+            if is_blackjack(self.player) and is_blackjack(self.dealer):
+                await self.finish("draw")
+            elif is_blackjack(self.player):
+                await self.finish("blackjack")
+            else:
+                await self.finish("lose")
             return True, self.final_embed
 
         return True, self.build_embed()
@@ -128,6 +178,7 @@ class BlackjackGameView(discord.ui.View):
             value=fmt_hand(self.dealer, hide_second=not reveal_dealer),
             inline=False
         )
+        e.add_field(name="Rules", value="Dealer peeks blackjack + hits soft 17. التعادل يرجع الرهان.", inline=False)
         e.add_field(name="Bet TX", value=f"`{self.bet_tx[:12]}`", inline=True)
         return e
 
@@ -138,13 +189,17 @@ class BlackjackGameView(discord.ui.View):
         self.finished = True
 
         if outcome == "stand":
-            while hand_value(self.dealer) < 17:
-                self.dealer.append(draw_card())
+            # Dealer draws until 17 and also hits soft 17.
+            # This makes dealer stronger and more realistic.
+            while hand_value(self.dealer) < 17 or is_soft_17(self.dealer):
+                self.dealer.append(self.draw_card())
 
             pv = hand_value(self.player)
             dv = hand_value(self.dealer)
 
-            if dv > 21 or pv > dv:
+            if dv > 21:
+                outcome = "win"
+            elif pv > dv:
                 outcome = "win"
             elif pv == dv:
                 outcome = "draw"
@@ -156,8 +211,10 @@ class BlackjackGameView(discord.ui.View):
         payout = 0
 
         if outcome == "blackjack":
+            # Total payout 2x means the user profits +bet after their initial bet was deducted.
+            # We are not using 2.5x because it was too generous for this economy.
             payout = self.bet * 2
-            title = "🃏 Blackjack! فوز قوي"
+            title = "🃏 Blackjack! فوز"
             color = "ok"
             detail = "Blackjack طبيعي."
         elif outcome == "win":
@@ -219,6 +276,7 @@ class BlackjackGameView(discord.ui.View):
             f"Net: **{net:,}**\n"
             f"Player: {self.player} = {pv}\n"
             f"Dealer: {self.dealer} = {dv}\n"
+            f"Rules: dealer_peek=true, dealer_hits_soft_17=true\n"
             f"Bet TX: `{self.bet_tx}`\n"
             f"Payout TX: `{self.payout_tx or '-'}`",
             color
@@ -242,7 +300,7 @@ class BlackjackGameView(discord.ui.View):
             )
             return
 
-        self.player.append(draw_card())
+        self.player.append(self.draw_card())
 
         if hand_value(self.player) > 21:
             await self.finish("lose")
@@ -267,7 +325,12 @@ class BlackjackGameView(discord.ui.View):
     async def rules_btn(self, interaction, button):
         e = embed(
             "📘 شرح بلاك جاك",
-            "اضغط **Hit** عشان تسحب ورقة.\nاضغط **Stand** عشان توقف وتخلي الديلر يلعب.\nإذا تعديت 21 تخسر.\nالتعادل يرجع الرهان.\nBlackjack طبيعي يعطي فوز مباشر.",
+            "اضغط **Hit** عشان تسحب ورقة.\n"
+            "اضغط **Stand** عشان توقف وتخلي الديلر يلعب.\n"
+            "الديلر يفحص Blackjack من البداية.\n"
+            "الديلر يسحب على soft 17، وهذا يقوي الديلر ويخلي اللعبة أعدل.\n"
+            "إذا تعديت 21 تخسر.\n"
+            "التعادل يرجع الرهان.",
             "info",
             interaction.user
         )
@@ -350,7 +413,7 @@ class CasinoView(discord.ui.View):
 def casino_menu_embed(ctx, amount):
     e = embed("🎰 كازينو NM", f"اختر اللعبة من الأزرار بالأسفل.\nالرهان الحالي: **{amount}**", "purple", ctx.author)
     e.add_field(name="الألعاب", value="🍀 حظ\n✌️ دبل\n🎰 سلوت\n🪙 وجه\n🃏 بلاك جاك تفاعلي", inline=True)
-    e.add_field(name="ملاحظات", value="بلاك جاك فيه أزرار Hit / Stand. الاحتمالات تعدلت عشان القمار يكون عادل وما يصير فارم فلوس. كل العمليات محفوظة في Money Tracker و Casino Dashboard.", inline=True)
+    e.add_field(name="ملاحظات", value="بلاك جاك فيه Hit / Stand، والديلر صار أقوى: يفحص Blackjack ويسحب على soft 17.", inline=True)
     return e
 
 
