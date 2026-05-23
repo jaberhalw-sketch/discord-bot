@@ -9,6 +9,7 @@ from nmcore.services import antiraid
 from nmcore.services import security
 from nmcore.services import readiness
 from nmcore.services import reports
+from nmcore.services import full_check
 from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
@@ -104,7 +105,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!فحص_كامل` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -194,6 +195,45 @@ def setup(bot):
 
 
 
+
+
+
+    @bot.command(name="فحص_كامل", aliases=["full_check", "check_all"])
+    async def full_system_check(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        report = full_check.run_full_check(ctx.guild)
+
+        failed = report["failed"][:12]
+        passed_count = len(report["passed"])
+        total_count = len(report["checks"])
+
+        if failed:
+            failed_text = "\n".join(
+                f"❌ **{c['category']}** — {c['name']} `{c['detail']}`"
+                for c in failed
+            )
+        else:
+            failed_text = "✅ ما فيه مشاكل أساسية واضحة."
+
+        e = embed(
+            "🧪 فحص كامل للبوت",
+            f"Score: **{report['score']}/100**\nStatus: **{report['label']}**\nPassed: **{passed_count}/{total_count}**\n\n{failed_text}",
+            "ok" if report["score"] >= 90 else "warn" if report["score"] >= 75 else "bad",
+            ctx.author
+        )
+
+        e.add_field(name="DB", value=f"`{report['db']['path']}`\nSize: `{report['db']['size_text']}`", inline=False)
+        e.add_field(name="Logs Mapping", value=f"{report['logs']['mapped']}/{report['logs']['total']}", inline=True)
+        e.add_field(name="Ledger Rows", value=str(report["counts"].get("ledger", 0)), inline=True)
+        e.add_field(name="Log Events", value=str(report["counts"].get("logs", 0)), inline=True)
+        e.add_field(name="Warnings", value=str(report["counts"].get("warnings", 0)), inline=True)
+        e.add_field(name="Properties", value=str(report["counts"].get("properties", 0)), inline=True)
+        e.add_field(name="Giveaways", value=str(report["counts"].get("giveaways", 0)), inline=True)
+
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="تقرير_النظام", aliases=["system_report"])
