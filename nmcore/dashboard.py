@@ -11,7 +11,7 @@ from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
 from nmcore.services.warnings import summary as warn_summary
-from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words
+from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link
 from nmcore.services.activity import log_event, record
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -761,7 +761,7 @@ DASHBOARD_BASE_URL</pre>
 
         return page("Levels", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>User</th><th>Level</th><th>XP</th></tr>{trs}</table></div>", g)
 
-    @app.route("/dashboard/real-estate")
+    @app.route("/dashboard/real-estate", methods=["GET", "POST"])
     def real_estate_page():
         d = require_login()
         if d:
@@ -769,14 +769,145 @@ DASHBOARD_BASE_URL</pre>
 
         g = gid(bot)
         real_estate.seed(g)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                property_id = int(request.form.get("property_id") or 0)
+            except Exception:
+                property_id = 0
+
+            try:
+                owner_id = int(request.form.get("owner_id") or 0)
+            except Exception:
+                owner_id = 0
+
+            owner_name = request.form.get("owner_name", "").strip() or str(owner_id or "")
+            reason = request.form.get("reason", "").strip() or f"Dashboard real estate {action}"
+
+            conn = db()
+            cur = conn.cursor()
+
+            if action in {"set_owner", "clear_owner", "edit_property"} and property_id:
+                cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (g, property_id))
+                prop = cur.fetchone()
+
+                if prop:
+                    if action == "set_owner":
+                        cur.execute(
+                            "UPDATE properties SET owner_id=?, owner_name=? WHERE guild_id=? AND id=?",
+                            (owner_id, owner_name[:120], g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_set_owner", int(prop["owner_id"] or 0), owner_id, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
+
+                    elif action == "clear_owner":
+                        cur.execute(
+                            "UPDATE properties SET owner_id=0, owner_name='' WHERE guild_id=? AND id=?",
+                            (g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_clear_owner", int(prop["owner_id"] or 0), 0, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
+
+                    elif action == "edit_property":
+                        try:
+                            price = max(0, int(request.form.get("price") or prop["price"]))
+                            rent = max(0, int(request.form.get("rent") or prop["rent"]))
+                            level = max(1, int(request.form.get("level") or prop["level"]))
+                        except Exception:
+                            price, rent, level = int(prop["price"]), int(prop["rent"]), int(prop["level"])
+
+                        cur.execute(
+                            "UPDATE properties SET price=?, rent=?, level=? WHERE guild_id=? AND id=?",
+                            (price, rent, level, g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_edit_property", int(prop["owner_id"] or 0), int(prop["owner_id"] or 0), actor_id, 0, int(prop["level"]), level, int(prop["price"]), price, reason, ""))
+
+                    conn.commit()
+
+                    log_event(
+                        g,
+                        f"dashboard_real_estate_{action}",
+                        owner_id or int(prop["owner_id"] or 0),
+                        owner_name,
+                        0,
+                        "",
+                        f"Dashboard real estate {action}",
+                        f"Actor={actor_id}, Property={property_id}, Reason={reason}"
+                    )
+
+            conn.close()
+            return redirect(f"/dashboard/real-estate?guild_id={g}")
+
+        owner_filter = request.args.get("owner_id", "").strip()
+        only_available = request.args.get("available", "").strip() == "1"
+
         rows = real_estate.rows(g)
 
+        if owner_filter.isdigit():
+            rows = [r for r in rows if int(r["owner_id"] or 0) == int(owner_filter)]
+
+        if only_available:
+            rows = [r for r in rows if int(r["owner_id"] or 0) == 0]
+
+        rows = rows[:300]
+
         trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['display_name'])}</td><td>{r['owner_id'] or '-'}</td><td>{int(r['price']):,}</td><td>{int(r['rent']):,}</td><td>{r['level']}</td></tr>"
+            f"""<tr>
+              <td>{r['id']}</td>
+              <td>{esc(r['display_name'])}</td>
+              <td>{r['owner_id'] or '-'}</td>
+              <td>{esc(r['owner_name'] or '')}</td>
+              <td>{int(r['price']):,}</td>
+              <td>{int(r['rent']):,}</td>
+              <td>{r['level']}</td>
+              <td>
+                <form method='post' style='display:grid;grid-template-columns:110px 110px 80px 80px 70px 120px;gap:6px;min-width:620px'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=property_id value='{r['id']}'>
+                  <input name=owner_id placeholder='Owner ID'>
+                  <input name=owner_name placeholder='Name'>
+                  <input name=price value='{int(r['price'])}' type=number min=0>
+                  <input name=rent value='{int(r['rent'])}' type=number min=0>
+                  <input name=level value='{int(r['level'])}' type=number min=1>
+                  <input name=reason placeholder='Reason'>
+                  <button name=action value='set_owner'>Set Owner</button>
+                  <button name=action value='clear_owner' style='background:#dc2626'>Clear</button>
+                  <button name=action value='edit_property' style='background:#334155'>Edit</button>
+                </form>
+              </td>
+            </tr>"""
             for r in rows
         )
 
-        return page("Real Estate", server_pill_html(g, bot) + f"<div class='card'><table><tr><th>ID</th><th>Name</th><th>Owner</th><th>Price</th><th>Rent</th><th>Level</th></tr>{trs}</table></div>", g)
+        body = server_pill_html(g, bot) + f"""
+        <div class='card'>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=owner_id placeholder='Owner ID' value='{esc(owner_filter)}'>
+            <label><input type=checkbox name=available value=1 {'checked' if only_available else ''}> Available only</label>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/real-estate?guild_id={g}'>Reset</a>
+          </form>
+        </div>
+        <div class='card'>
+          <h3>Real Estate Admin Control</h3>
+          <table>
+            <tr><th>ID</th><th>Name</th><th>Owner</th><th>Owner Name</th><th>Price</th><th>Rent</th><th>Level</th><th>Actions</th></tr>
+            {trs}
+          </table>
+        </div>
+        """
+        return page("Real Estate", body, g)
 
     @app.route("/dashboard/warnings", methods=["GET", "POST"])
     def warnings_page():
@@ -795,7 +926,25 @@ DASHBOARD_BASE_URL</pre>
             except Exception:
                 user_id = 0
 
+            user_name = request.form.get("user_name", "").strip() or str(user_id or "")
             reason = request.form.get("reason", "").strip() or "Dashboard action"
+
+            if action == "add_warning" and user_id:
+                from nmcore.services import warnings as warnsvc
+                warnsvc.add_warning(g, user_id, user_name, actor_id, actor_name, reason, "Added from dashboard")
+
+                log_event(
+                    g,
+                    "dashboard_add_warning",
+                    user_id,
+                    user_name,
+                    0,
+                    "",
+                    "Dashboard added warning",
+                    f"Actor={actor_id}, Reason={reason}"
+                )
+
+                return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
 
             if action == "clear_user" and user_id:
                 from nmcore.services import warnings as warnsvc
@@ -813,6 +962,39 @@ DASHBOARD_BASE_URL</pre>
                 )
 
                 return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
+
+            if action == "clear_warning":
+                try:
+                    warning_id = int(request.form.get("warning_id") or 0)
+                except Exception:
+                    warning_id = 0
+
+                if warning_id:
+                    conn = db()
+                    cur = conn.cursor()
+                    cur.execute("SELECT * FROM warnings WHERE guild_id=? AND id=?", (g, warning_id))
+                    row = cur.fetchone()
+
+                    if row and str(row["status"]) == "active":
+                        cur.execute("""UPDATE warnings SET status='cleared', cleared_at=strftime('%s','now'),
+                        cleared_by_id=?, cleared_by_name=?, clear_reason=? WHERE guild_id=? AND id=?""",
+                        (actor_id, actor_name, reason, g, warning_id))
+                        conn.commit()
+
+                        log_event(
+                            g,
+                            "dashboard_clear_warning",
+                            int(row["user_id"]),
+                            str(row["user_name"]),
+                            0,
+                            "",
+                            "Dashboard cleared one warning",
+                            f"Actor={actor_id}, WarningID={warning_id}, Reason={reason}"
+                        )
+
+                    conn.close()
+
+                return redirect(f"/dashboard/warnings?guild_id={g}&status=all")
 
         uid = request.args.get("user_id", "").strip()
         status = request.args.get("status", "active").strip()
@@ -868,7 +1050,17 @@ DASHBOARD_BASE_URL</pre>
         )
 
         trs = "".join(
-            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td><td>{esc(r['moderator_name'])}</td></tr>"
+            f"""<tr>
+              <td>{r['id']}</td>
+              <td><code>{r['user_id']}</code></td>
+              <td>{esc(r['user_name'])}</td>
+              <td>{esc(r['reason'])}</td>
+              <td>{esc(r['status'])}</td>
+              <td>{esc(r['moderator_name'])}</td>
+              <td>
+                {f"<form method='post' style='display:inline'><input type=hidden name=guild_id value='{g}'><input type=hidden name=action value='clear_warning'><input type=hidden name=warning_id value='{r['id']}'><input type=hidden name=reason value='Cleared one warning from dashboard'><button style='background:#334155'>Clear One</button></form>" if str(r['status']) == 'active' else ''}
+              </td>
+            </tr>"""
             for r in rows
         )
 
@@ -886,11 +1078,23 @@ DASHBOARD_BASE_URL</pre>
             <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}'>Reset</a>
           </form>
         </div>
+
+        <div class='card'>
+          <h3>Add Warning From Dashboard</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='add_warning'>
+            <input name=user_id placeholder='User ID' required>
+            <input name=user_name placeholder='Name optional'>
+            <input name=reason placeholder='Reason' style='min-width:320px' required>
+            <button>Add Warning</button>
+          </form>
+        </div>
         """
 
         body = server_pill_html(g, bot) + form
         body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th><th>Action</th></tr>{grouped_trs}</table></div>"
-        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th></tr>{trs}</table></div>"
+        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th><th>Action</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
 
@@ -901,27 +1105,47 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+        test_result = ""
 
         if request.method == "POST":
             if request.form.get("action") == "reset_bad_words":
                 prot_update(g, {"bad_words": get_default_bad_words()})
                 return redirect(f"/dashboard/protection?guild_id={g}")
 
-            data = {
-                "enabled": 1 if request.form.get("enabled") else 0,
-                "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
-                "links_enabled": 1 if request.form.get("links_enabled") else 0,
-                "delete_messages": 1 if request.form.get("delete_messages") else 0,
-                "bad_words": request.form.get("bad_words", ""),
-                "ignored_channels": request.form.get("ignored_channels", ""),
-                "whitelist_roles": request.form.get("whitelist_roles", "")
-            }
-            prot_update(g, data)
-            return redirect(f"/dashboard/protection?guild_id={g}")
+            if request.form.get("action") == "test_message":
+                s_test = prot_get(g)
+                raw = request.form.get("test_text", "")
+                words = [w.strip() for w in str(s_test.get("bad_words") or "").split(",") if w.strip()]
+                match = matched_bad_word(raw, words)
+                bad = bool(match) or contains_bad(raw, words)
+                link = has_link(raw)
+                test_result = f"""
+                <div class='card'>
+                  <h3>Protection Test Result</h3>
+                  <p>Bad Word: <b class='{'bad' if bad else 'ok'}'>{'YES' if bad else 'NO'}</b></p>
+                  <p>Matched: <code>{esc(match or '-')}</code></p>
+                  <p>Link: <b class='{'warn' if link else 'ok'}'>{'YES' if link else 'NO'}</b></p>
+                  <p class='muted'>Test text is not saved and no warning is issued.</p>
+                </div>
+                """
+            else:
+                data = {
+                    "enabled": 1 if request.form.get("enabled") else 0,
+                    "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
+                    "links_enabled": 1 if request.form.get("links_enabled") else 0,
+                    "delete_messages": 1 if request.form.get("delete_messages") else 0,
+                    "bad_words": request.form.get("bad_words", ""),
+                    "ignored_channels": request.form.get("ignored_channels", ""),
+                    "whitelist_roles": request.form.get("whitelist_roles", "")
+                }
+                prot_update(g, data)
+                return redirect(f"/dashboard/protection?guild_id={g}")
 
         s = prot_get(g)
         bad_words_raw = str(s.get("bad_words") or "")
         bad_count = len([w for w in bad_words_raw.split(",") if w.strip()])
+        ignored_count = len([w for w in str(s.get("ignored_channels") or "").replace("\n", ",").split(",") if w.strip()])
+        whitelist_count = len([w for w in str(s.get("whitelist_roles") or "").replace("\n", ",").split(",") if w.strip()])
 
         conn = db()
         cur = conn.cursor()
@@ -950,8 +1174,21 @@ DASHBOARD_BASE_URL</pre>
         <div class='grid'>
           <div class='card'><div class='muted'>Protection</div><div class='stat'>{'ON' if s.get('enabled') else 'OFF'}</div></div>
           <div class='card'><div class='muted'>Bad Words</div><div class='stat'>{bad_count:,}</div></div>
-          <div class='card'><div class='muted'>Delete Messages</div><div class='stat'>{'ON' if s.get('delete_messages') else 'OFF'}</div></div>
+          <div class='card'><div class='muted'>Ignored Channels</div><div class='stat'>{ignored_count:,}</div></div>
+          <div class='card'><div class='muted'>Whitelist Roles</div><div class='stat'>{whitelist_count:,}</div></div>
           <div class='card'><div class='muted'>Auto Warnings</div><div class='stat'>{len(auto_warnings):,}</div></div>
+        </div>
+
+        {test_result}
+
+        <div class='card'>
+          <h3>Test Protection Filter</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='test_message'>
+            <textarea name=test_text placeholder='Write test message here' style='width:100%;height:70px'></textarea><br><br>
+            <button>Test Only</button>
+          </form>
         </div>
 
         <div class='card'>
@@ -963,6 +1200,7 @@ DASHBOARD_BASE_URL</pre>
             <label><input type=checkbox name=links_enabled {'checked' if s.get('links_enabled') else ''}> Links</label><br>
             <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label><br><br>
 
+            Bad Words / Phrases<br>
             <textarea name=bad_words style='width:100%;height:180px'>{esc(bad_words_raw)}</textarea><br><br>
 
             Ignored Channel IDs<br>
@@ -1236,7 +1474,7 @@ DASHBOARD_BASE_URL</pre>
                 shop_service.seed_defaults(g)
                 return redirect(f"/dashboard/shop?guild_id={g}")
 
-            if action == "add":
+            if action in {"add", "update"}:
                 item_key = request.form.get("item_key", "").strip()
                 name = request.form.get("name", "").strip()
                 description = request.form.get("description", "").strip()
@@ -1252,8 +1490,17 @@ DASHBOARD_BASE_URL</pre>
                 shop_service.set_enabled(g, item_id, enabled)
                 return redirect(f"/dashboard/shop?guild_id={g}")
 
+        user_filter = request.args.get("user_id", "").strip()
         items = shop_service.items(g, include_disabled=True)
-        purchases = shop_service.recent_purchases(g, 100)
+
+        if user_filter.isdigit():
+            conn = db()
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM shop_purchases WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 100", (g, int(user_filter)))
+            purchases = cur.fetchall()
+            conn.close()
+        else:
+            purchases = shop_service.recent_purchases(g, 100)
 
         item_trs = "".join(
             f"""<tr>
@@ -1263,6 +1510,18 @@ DASHBOARD_BASE_URL</pre>
               <td>{int(r['price']):,}</td>
               <td>{'<code>'+esc(r['role_id'])+'</code>' if int(r['role_id'] or 0) else '-'}</td>
               <td>{'✅' if int(r['enabled']) else '❌'}</td>
+              <td>
+                <form method='post' style='display:grid;grid-template-columns:120px 120px 90px 120px 70px;gap:6px;min-width:560px'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=action value='update'>
+                  <input type=hidden name=item_key value='{esc(r['item_key'])}'>
+                  <input name=name value='{esc(r['name'])}'>
+                  <input name=price value='{int(r['price'])}' type=number min=0>
+                  <input name=role_id value='{int(r['role_id'] or 0)}' type=number min=0>
+                  <label><input type=checkbox name=enabled {'checked' if int(r['enabled']) else ''}> On</label>
+                  <button>Update</button>
+                </form>
+              </td>
               <td>
                 <form method='post' style='display:inline'>
                   <input type=hidden name=guild_id value='{g}'>
@@ -1310,11 +1569,18 @@ DASHBOARD_BASE_URL</pre>
 
         <div class='card'>
           <h3>Items</h3>
-          <table><tr><th>ID</th><th>Key</th><th>Name</th><th>Price</th><th>Role ID</th><th>Enabled</th><th>Action</th></tr>{item_trs}</table>
+          <table><tr><th>ID</th><th>Key</th><th>Name</th><th>Price</th><th>Role ID</th><th>Enabled</th><th>Edit</th><th>Toggle</th></tr>{item_trs}</table>
         </div>
 
         <div class='card'>
-          <h3>Recent Purchases</h3>
+          <h3>Purchases</h3>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/shop?guild_id={g}'>Reset</a>
+          </form>
+          <br>
           <table><tr><th>ID</th><th>User</th><th>Item</th><th>Price</th><th>TX</th></tr>{purchase_trs}</table>
         </div>
         """
@@ -1345,11 +1611,28 @@ DASHBOARD_BASE_URL</pre>
                 giveaway_service.close_giveaway(g, giveaway_id)
                 return redirect(f"/dashboard/giveaways?guild_id={g}")
 
+            if action == "reopen":
+                giveaway_id = int(request.form.get("giveaway_id") or 0)
+                conn = db()
+                cur = conn.cursor()
+                cur.execute("UPDATE giveaways SET status='open', ended_at=0 WHERE guild_id=? AND id=?", (g, giveaway_id))
+                conn.commit()
+                conn.close()
+                return redirect(f"/dashboard/giveaways?guild_id={g}")
+
             if action == "pick":
                 giveaway_id = int(request.form.get("giveaway_id") or 0)
                 giveaway_service.pick_winners(g, giveaway_id)
-                return redirect(f"/dashboard/giveaways?guild_id={g}")
+                return redirect(f"/dashboard/giveaways?guild_id={g}&view_id={giveaway_id}")
 
+            if action == "add_entry":
+                giveaway_id = int(request.form.get("giveaway_id") or 0)
+                user_id = int(request.form.get("user_id") or 0)
+                user_name = request.form.get("user_name", "").strip() or str(user_id)
+                giveaway_service.join(g, giveaway_id, user_id, user_name)
+                return redirect(f"/dashboard/giveaways?guild_id={g}&view_id={giveaway_id}")
+
+        view_id = request.args.get("view_id", "").strip()
         rows = giveaway_service.giveaways(g, 100)
 
         giveaway_trs = ""
@@ -1363,15 +1646,40 @@ DASHBOARD_BASE_URL</pre>
               <td>{entries}</td>
               <td>{esc(r['status'])}</td>
               <td>{esc(', '.join(str(w) for w in winners)) or '-'}</td>
+              <td><a href='/dashboard/giveaways?guild_id={g}&view_id={r['id']}'>Entries</a></td>
               <td>
                 <form method='post' style='display:inline'>
                   <input type=hidden name=guild_id value='{g}'>
                   <input type=hidden name=giveaway_id value='{r['id']}'>
                   <button name=action value='pick'>Pick</button>
                   <button name=action value='close' style='background:#334155'>Close</button>
+                  <button name=action value='reopen' style='background:#16a34a'>Reopen</button>
                 </form>
               </td>
             </tr>"""
+
+        entries_card = ""
+        if view_id.isdigit():
+            entries = giveaway_service.entries(g, int(view_id))
+            entry_trs = "".join(
+                f"<tr><td>{e['id']}</td><td><code>{e['user_id']}</code></td><td>{esc(e['user_name'])}</td></tr>"
+                for e in entries
+            )
+            entries_card = f"""
+            <div class='card'>
+              <h3>Entries for Giveaway #{view_id}</h3>
+              <form method=post>
+                <input type=hidden name=guild_id value='{g}'>
+                <input type=hidden name=action value='add_entry'>
+                <input type=hidden name=giveaway_id value='{view_id}'>
+                <input name=user_id placeholder='User ID' required>
+                <input name=user_name placeholder='Name optional'>
+                <button>Add Entry</button>
+              </form>
+              <br>
+              <table><tr><th>ID</th><th>User ID</th><th>Name</th></tr>{entry_trs}</table>
+            </div>
+            """
 
         body = server_pill_html(g, bot) + f"""
         <div class='card'>
@@ -1385,9 +1693,11 @@ DASHBOARD_BASE_URL</pre>
           </form>
         </div>
 
+        {entries_card}
+
         <div class='card'>
           <h3>Giveaways</h3>
-          <table><tr><th>ID</th><th>Prize</th><th>Winners</th><th>Entries</th><th>Status</th><th>Winner IDs</th><th>Action</th></tr>{giveaway_trs}</table>
+          <table><tr><th>ID</th><th>Prize</th><th>Winners</th><th>Entries</th><th>Status</th><th>Winner IDs</th><th>Entries</th><th>Action</th></tr>{giveaway_trs}</table>
         </div>
         """
         return page("Giveaways", body, g)
