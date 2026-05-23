@@ -25,20 +25,66 @@ class MyPropertiesView(discord.ui.View):
     @discord.ui.button(label="استلام الإيجار", style=discord.ButtonStyle.success, emoji="💵")
     async def collect_rent(self, interaction, button):
         if interaction.user.id != self.ctx.author.id:
-            await interaction.response.send_message("هذا الزر لصاحب العقارات فقط.", ephemeral=True)
+            await interaction.response.send_message(
+                embed=embed("🚫 غير مسموح", "هذا الزر لصاحب العقارات فقط.", "bad", interaction.user),
+                ephemeral=True
+            )
             return
 
-        res = real_estate.collect_rent(interaction.guild.id, interaction.user.id, interaction.user.display_name)
-        if not res["ok"]:
-            await interaction.response.send_message(res["error"], ephemeral=True)
-            return
+        # Important: defer first so Discord does not show "This interaction failed"
+        # if the database work takes a moment.
+        await interaction.response.defer(ephemeral=True, thinking=True)
 
-        e = embed("💵 تم جمع الإيجار", f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}", "ok", interaction.user)
-        await interaction.response.send_message(embed=e)
+        try:
+            res = real_estate.collect_rent(interaction.guild.id, interaction.user.id, interaction.user.display_name)
+
+            if not res["ok"]:
+                status = real_estate.rent_status(interaction.guild.id, interaction.user.id)
+
+                e = embed("💵 الإيجار غير جاهز", res["error"], "warn", interaction.user)
+
+                if status.get("has_properties"):
+                    e.add_field(name="عدد عقاراتك", value=str(status.get("properties_count", 0)), inline=True)
+                    e.add_field(name="جاهزة الآن", value=str(status.get("ready_count", 0)), inline=True)
+
+                    if status.get("next_seconds") is not None:
+                        e.add_field(
+                            name="الوقت المتبقي لأقرب إيجار",
+                            value=real_estate.format_duration(status["next_seconds"]),
+                            inline=False
+                        )
+
+                    e.add_field(
+                        name="معلومة",
+                        value="الإيجار يتجمع كل **3 ساعات**، وتقدر تستلمه متى ما تبي بعد ما يتجمع.",
+                        inline=False
+                    )
+
+                await interaction.followup.send(embed=e, ephemeral=True)
+                return
+
+            e = embed(
+                "💵 تم جمع الإيجار",
+                f"عدد العقارات الجاهزة: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}",
+                "ok",
+                interaction.user
+            )
+            e.add_field(name="TX", value=f"`{res['tx_id'][:12]}`", inline=True)
+            e.add_field(name="معلومة", value="الإيجار القادم يبدأ يتجمع من الآن كل 3 ساعات.", inline=False)
+            await interaction.followup.send(embed=e, ephemeral=True)
+
+        except Exception as ex:
+            await interaction.followup.send(
+                embed=embed("❌ خطأ في زر الإيجار", f"`{type(ex).__name__}: {str(ex)[:500]}`", "bad", interaction.user),
+                ephemeral=True
+            )
 
     @discord.ui.button(label="فتح المتجر", style=discord.ButtonStyle.secondary, emoji="🏘️")
     async def open_shop(self, interaction, button):
-        await interaction.response.send_message("اكتب `!متجر` لفتح سوق العقارات بالأزرار.", ephemeral=True)
+        await interaction.response.send_message(
+            embed=embed("🏘️ متجر العقارات", "اكتب `!متجر` لفتح سوق العقارات بالأزرار.", "purple", interaction.user),
+            ephemeral=True
+        )
 
 
 def property_line(ctx, r):
@@ -52,6 +98,16 @@ def setup(bot):
         lines = [property_line(ctx, r) for r in rows]
 
         e = embed("🏘️ العقارات المتاحة", "\n".join(lines) if lines else "لا يوجد عقارات متاحة.", "purple", ctx.author)
+
+        try:
+            stock_lines = []
+            for s in real_estate.stock_summary(ctx.guild.id):
+                stock_lines.append(f"`{s['type_key']}`: **{int(s['available'] or 0)}/{int(s['total'] or 0)}** متاح")
+            if stock_lines:
+                e.add_field(name="📦 الكمية المحدودة", value="\n".join(stock_lines[:8]), inline=False)
+        except Exception:
+            pass
+
         e.add_field(name="شراء سريع", value="استخدم `!متجر` عشان تشتري بالأزرار أو `!شراء_عقار ID`.", inline=False)
         await ctx.reply(embed=e)
 
@@ -76,7 +132,15 @@ def setup(bot):
         res = real_estate.collect_rent(ctx.guild.id, ctx.author.id, ctx.author.display_name)
 
         if not res["ok"]:
-            await ctx.reply(embed=embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", ctx.author))
+            status = real_estate.rent_status(ctx.guild.id, ctx.author.id)
+            e = embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", ctx.author)
+            if status.get("has_properties"):
+                e.add_field(name="عدد عقاراتك", value=str(status.get("properties_count", 0)), inline=True)
+                e.add_field(name="جاهزة الآن", value=str(status.get("ready_count", 0)), inline=True)
+                if status.get("next_seconds") is not None:
+                    e.add_field(name="الوقت المتبقي لأقرب إيجار", value=real_estate.format_duration(status["next_seconds"]), inline=False)
+                e.add_field(name="معلومة", value="الإيجار يتجمع كل **3 ساعات** وتستلمه متى ما تبي.", inline=False)
+            await ctx.reply(embed=e)
             return
 
         e = embed("💵 تم جمع الإيجار", f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}", "ok", ctx.author)
@@ -91,5 +155,13 @@ def setup(bot):
         lines = [f"`#{r['id']}` **{r['display_name']}** • L{r['level']} • Rent **{int(r['rent']):,}**" for r in rows[:20]]
 
         e = embed("🏘️ عقاراتك", "\n".join(lines) if lines else "ما عندك عقارات.", "purple", ctx.author)
-        e.add_field(name="الإيجار", value="اضغط الزر أو اكتب `!ايجار`.", inline=False)
+
+        if rows:
+            status = real_estate.rent_status(ctx.guild.id, ctx.author.id)
+            e.add_field(name="جاهز للاستلام", value=f"{status.get('ready_count', 0)} عقار", inline=True)
+            e.add_field(name="المبلغ الجاهز", value=coin(ctx.guild.id, status.get("total_amount", 0)), inline=True)
+            if status.get("next_seconds") is not None:
+                e.add_field(name="الإيجار القادم", value=real_estate.format_duration(status["next_seconds"]), inline=False)
+
+        e.add_field(name="الإيجار", value="اضغط الزر أو اكتب `!ايجار`. الإيجار يتجمع كل **3 ساعات**.", inline=False)
         await ctx.reply(embed=e, view=MyPropertiesView(ctx) if rows else None)
