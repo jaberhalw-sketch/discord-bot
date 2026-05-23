@@ -3,7 +3,7 @@ from flask import Flask, request, redirect, session
 from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
 from nmcore.db import db, init_db
 from nmcore.ui import page
-from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel
+from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
 from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
@@ -2079,6 +2079,10 @@ DASHBOARD_BASE_URL</pre>
         if request.method == "POST":
             action = request.form.get("action", "").strip()
 
+            if action == "save_dev_mode":
+                set_dev_mode_enabled(g, bool(request.form.get("dev_mode_enabled")))
+                return redirect(f"/dashboard/settings?guild_id={g}")
+
             if action == "save_log_channels":
                 for key in LOG_CHANNELS.keys():
                     raw = request.form.get(f"log_{key}", "0")
@@ -2139,6 +2143,18 @@ DASHBOARD_BASE_URL</pre>
           <div class='card'><div class='muted'>General Logs</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
         </div>
 
+        <div class='card kpi-warn'>
+          <h3>Bot Access / Development Mode</h3>
+          <p class='muted'>Dev Mode يقفل الأوامر على الناس ويخليها لصاحب البوت فقط. الآن الافتراضي OFF عشان البوت مفتوح للجميع.</p>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input type=hidden name=action value='save_dev_mode'>
+            <label><input type=checkbox name=dev_mode_enabled {'checked' if is_dev_mode_enabled(g) else ''}> Dev Mode ON / البوت قيد التطوير</label>
+            <br><br>
+            <button>Save Dev Mode</button>
+          </form>
+        </div>
+
         <div class='card'>
           <form method=post>
             <input type=hidden name=guild_id value='{g}'>
@@ -2190,126 +2206,195 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
-        shop_service.ensure_tables()
+        real_estate.seed(g)
 
         if request.method == "POST":
             action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
 
-            if action == "seed":
-                shop_service.seed_defaults(g)
-                return redirect(f"/dashboard/shop?guild_id={g}")
+            try:
+                property_id = int(request.form.get("property_id") or 0)
+            except Exception:
+                property_id = 0
 
-            if action in {"add", "update"}:
-                item_key = request.form.get("item_key", "").strip()
-                name = request.form.get("name", "").strip()
-                description = request.form.get("description", "").strip()
-                price = int(request.form.get("price") or 0)
-                role_id = int(request.form.get("role_id") or 0)
-                enabled = 1 if request.form.get("enabled") else 0
-                shop_service.upsert_item(g, item_key, name, description, price, role_id, enabled)
-                return redirect(f"/dashboard/shop?guild_id={g}")
+            try:
+                owner_id = int(request.form.get("owner_id") or 0)
+            except Exception:
+                owner_id = 0
 
-            if action == "toggle":
-                item_id = int(request.form.get("item_id") or 0)
-                enabled = int(request.form.get("enabled") or 0)
-                shop_service.set_enabled(g, item_id, enabled)
-                return redirect(f"/dashboard/shop?guild_id={g}")
+            owner_name = request.form.get("owner_name", "").strip() or str(owner_id or "")
+            reason = request.form.get("reason", "").strip() or f"Dashboard real estate shop {action}"
 
-        user_filter = request.args.get("user_id", "").strip()
-        items = shop_service.items(g, include_disabled=True)
-
-        if user_filter.isdigit():
             conn = db()
             cur = conn.cursor()
-            cur.execute("SELECT * FROM shop_purchases WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 100", (g, int(user_filter)))
-            purchases = cur.fetchall()
-            conn.close()
-        else:
-            purchases = shop_service.recent_purchases(g, 100)
 
-        item_trs = "".join(
+            if action in {"set_owner", "clear_owner", "edit_property"} and property_id:
+                cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (g, property_id))
+                prop = cur.fetchone()
+
+                if prop:
+                    if action == "set_owner":
+                        cur.execute(
+                            "UPDATE properties SET owner_id=?, owner_name=? WHERE guild_id=? AND id=?",
+                            (owner_id, owner_name[:120], g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_shop_set_owner", int(prop["owner_id"] or 0), owner_id, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
+
+                    elif action == "clear_owner":
+                        cur.execute(
+                            "UPDATE properties SET owner_id=0, owner_name='' WHERE guild_id=? AND id=?",
+                            (g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_shop_clear_owner", int(prop["owner_id"] or 0), 0, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
+
+                    elif action == "edit_property":
+                        try:
+                            price = max(0, int(request.form.get("price") or prop["price"]))
+                            rent = max(0, int(request.form.get("rent") or prop["rent"]))
+                            level = max(1, int(request.form.get("level") or prop["level"]))
+                        except Exception:
+                            price, rent, level = int(prop["price"]), int(prop["rent"]), int(prop["level"])
+
+                        cur.execute(
+                            "UPDATE properties SET price=?, rent=?, level=? WHERE guild_id=? AND id=?",
+                            (price, rent, level, g, property_id)
+                        )
+                        cur.execute("""INSERT INTO property_ledger
+                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
+                        (g, property_id, "dashboard_shop_edit_property", int(prop["owner_id"] or 0), int(prop["owner_id"] or 0), actor_id, 0, int(prop["level"]), level, int(prop["price"]), price, reason, ""))
+
+                    conn.commit()
+
+                    log_event(
+                        g,
+                        f"dashboard_real_estate_shop_{action}",
+                        owner_id or int(prop["owner_id"] or 0),
+                        owner_name,
+                        0,
+                        "",
+                        f"Dashboard real estate shop {action}",
+                        f"Actor={actor_id}, Property={property_id}, Reason={reason}"
+                    )
+
+            conn.close()
+            return redirect(f"/dashboard/shop?guild_id={g}")
+
+        owner_filter = request.args.get("owner_id", "").strip()
+        property_type = request.args.get("type", "").strip()
+        only_available = request.args.get("available", "1").strip() == "1"
+
+        rows = real_estate.rows(g, only_available=only_available)
+
+        if owner_filter.isdigit():
+            rows = [r for r in rows if int(r["owner_id"] or 0) == int(owner_filter)]
+
+        if property_type:
+            rows = [r for r in rows if str(r["type_key"]) == property_type]
+
+        all_rows = real_estate.rows(g)
+        available_count = sum(1 for r in all_rows if int(r["owner_id"] or 0) == 0)
+        sold_count = len(all_rows) - available_count
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""SELECT p.*, l.created_at, l.money_tx_id, l.amount
+        FROM property_ledger l
+        JOIN properties p ON p.guild_id=l.guild_id AND p.id=l.property_id
+        WHERE l.guild_id=? AND l.action IN ('buy_from_system','dashboard_shop_set_owner')
+        ORDER BY l.id DESC LIMIT 40""", (g,))
+        purchases = cur.fetchall()
+
+        cur.execute("""SELECT type_key, COUNT(*) c,
+        SUM(CASE WHEN owner_id=0 THEN 1 ELSE 0 END) available,
+        COALESCE(SUM(CASE WHEN owner_id!=0 THEN price ELSE 0 END),0) sold_value
+        FROM properties WHERE guild_id=? GROUP BY type_key ORDER BY sold_value DESC""", (g,))
+        type_summary = cur.fetchall()
+        conn.close()
+
+        summary_trs = "".join(
+            f"<tr><td>{esc(r['type_key'])}</td><td>{int(r['c']):,}</td><td>{int(r['available'] or 0):,}</td><td>{int(r['sold_value'] or 0):,}</td></tr>"
+            for r in type_summary
+        )
+
+        trs = "".join(
             f"""<tr>
               <td>{r['id']}</td>
-              <td><code>{esc(r['item_key'])}</code></td>
-              <td>{esc(r['name'])}</td>
+              <td>{esc(r['display_name'])}</td>
+              <td>{esc(r['type_key'])}</td>
+              <td>{r['owner_id'] or '-'}</td>
+              <td>{esc(r['owner_name'] or '')}</td>
               <td>{int(r['price']):,}</td>
-              <td>{'<code>'+esc(r['role_id'])+'</code>' if int(r['role_id'] or 0) else '-'}</td>
-              <td>{'✅' if int(r['enabled']) else '❌'}</td>
+              <td>{int(r['rent']):,}</td>
+              <td>{int(r['level'])}</td>
               <td>
-                <form method='post' style='display:grid;grid-template-columns:120px 120px 90px 120px 70px;gap:6px;min-width:560px'>
+                <form method='post' style='display:grid;grid-template-columns:110px 110px 85px 85px 70px 120px;gap:6px;min-width:640px'>
                   <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=action value='update'>
-                  <input type=hidden name=item_key value='{esc(r['item_key'])}'>
-                  <input name=name value='{esc(r['name'])}'>
+                  <input type=hidden name=property_id value='{r['id']}'>
+                  <input name=owner_id placeholder='Owner ID'>
+                  <input name=owner_name placeholder='Name'>
                   <input name=price value='{int(r['price'])}' type=number min=0>
-                  <input name=role_id value='{int(r['role_id'] or 0)}' type=number min=0>
-                  <label><input type=checkbox name=enabled {'checked' if int(r['enabled']) else ''}> On</label>
-                  <button>Update</button>
-                </form>
-              </td>
-              <td>
-                <form method='post' style='display:inline'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=action value='toggle'>
-                  <input type=hidden name=item_id value='{r['id']}'>
-                  <input type=hidden name=enabled value='{0 if int(r['enabled']) else 1}'>
-                  <button>{'Disable' if int(r['enabled']) else 'Enable'}</button>
+                  <input name=rent value='{int(r['rent'])}' type=number min=0>
+                  <input name=level value='{int(r['level'])}' type=number min=1>
+                  <input name=reason placeholder='Reason'>
+                  <button name=action value='set_owner'>Set Owner</button>
+                  <button name=action value='clear_owner' style='background:#dc2626'>Clear</button>
+                  <button name=action value='edit_property' style='background:#334155'>Edit</button>
                 </form>
               </td>
             </tr>"""
-            for r in items
+            for r in rows[:250]
         )
 
         purchase_trs = "".join(
-            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['item_key'])}</td><td>{int(r['price']):,}</td><td><code>{esc(r['money_tx_id'])[:12]}</code></td></tr>"
-            for r in purchases
+            f"<tr><td>{p['id']}</td><td>{esc(p['display_name'])}</td><td>{esc(p['type_key'])}</td><td><code>{p['owner_id']}</code></td><td>{esc(p['owner_name'])}</td><td>{int(p['amount'] or p['price'] or 0):,}</td><td><code>{esc(p['money_tx_id'])[:12]}</code></td></tr>"
+            for p in purchases
         )
 
         body = server_pill_html(g, bot) + f"""
         <div class='grid'>
-          <div class='card'><div class='muted'>Shop Items</div><div class='stat'>{len(items):,}</div></div>
-          <div class='card'><div class='muted'>Recent Purchases</div><div class='stat'>{len(purchases):,}</div></div>
+          <div class='card kpi-info'><div class='muted'>Shop Mode</div><div class='stat'>Real Estate</div></div>
+          <div class='card kpi-good'><div class='muted'>Available</div><div class='stat'>{available_count:,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Sold / Owned</div><div class='stat'>{sold_count:,}</div></div>
+          <div class='card'><div class='muted'>Total Properties</div><div class='stat'>{len(all_rows):,}</div></div>
         </div>
 
         <div class='card'>
-          <h3>Add / Update Item</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='add'>
-            <input name=item_key placeholder='item_key مثل vip_day' required>
-            <input name=name placeholder='Display name' required>
-            <input name=price placeholder='Price' type=number min=0 required>
-            <input name=role_id placeholder='Role ID optional' type=number min=0>
-            <br><br>
-            <textarea name=description placeholder='Description' style='width:100%;height:80px'></textarea><br><br>
-            <label><input type=checkbox name=enabled checked> Enabled</label>
-            <button>Save Item</button>
-          </form>
-          <form method=post style='margin-top:12px'>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='seed'>
-            <button style='background:#334155'>Add Default Items</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Items</h3>
-          <table><tr><th>ID</th><th>Key</th><th>Name</th><th>Price</th><th>Role ID</th><th>Enabled</th><th>Edit</th><th>Toggle</th></tr>{item_trs}</table>
-        </div>
-
-        <div class='card'>
-          <h3>Purchases</h3>
+          <h3>Real Estate Shop Filters</h3>
           <form>
             <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
+            <input name=owner_id placeholder='Owner ID' value='{esc(owner_filter)}'>
+            <input name=type placeholder='type_key مثل room/apartment' value='{esc(property_type)}'>
+            <label><input type=checkbox name=available value=1 {'checked' if only_available else ''}> Available only</label>
             <button>Filter</button>
             <a class='btn' style='background:#334155' href='/dashboard/shop?guild_id={g}'>Reset</a>
           </form>
-          <br>
-          <table><tr><th>ID</th><th>User</th><th>Item</th><th>Price</th><th>TX</th></tr>{purchase_trs}</table>
+          <p class='muted'>المتجر حاليًا مخصص للعقارات فقط. أمر الشراء في الديسكورد: <code>!شراء ID</code></p>
+        </div>
+
+        <div class='card'>
+          <h3>Property Type Summary</h3>
+          <table><tr><th>Type</th><th>Total</th><th>Available</th><th>Sold Value</th></tr>{summary_trs}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Properties Shop</h3>
+          <table><tr><th>ID</th><th>Name</th><th>Type</th><th>Owner</th><th>Owner Name</th><th>Price</th><th>Rent</th><th>Level</th><th>Actions</th></tr>{trs}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Recent Property Purchases</h3>
+          <table><tr><th>ID</th><th>Property</th><th>Type</th><th>Buyer</th><th>Name</th><th>Amount</th><th>TX</th></tr>{purchase_trs}</table>
         </div>
         """
-        return page("Shop", body, g)
+        return page("Real Estate Shop", body, g)
+
 
     @app.route("/dashboard/giveaways", methods=["GET", "POST"])
     def giveaways_page():
