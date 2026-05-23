@@ -56,7 +56,7 @@ def page(title, body, guild_id=0):
         ("Community", [
             ("📊 Levels",f"/dashboard/levels{q}"),
             ("🎁 Giveaways",f"/dashboard/giveaways{q}"),
-            ("👤 User Lookup",f"/dashboard/user{q}"),
+            ("👤 User Profile",f"/dashboard/user{q}"),
             ("🎭 Game Roles",f"/dashboard/game-roles{q}"),
         ]),
         ("Safety / Moderation", [
