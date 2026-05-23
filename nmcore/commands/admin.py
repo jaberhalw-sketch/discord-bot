@@ -1,5 +1,6 @@
+import os
 import discord
-from nmcore.config import DASHBOARD_BASE_URL, DB_FILE
+from nmcore.config import DB_FILE
 from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
 from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
@@ -135,7 +136,7 @@ def setup(bot):
 
     @bot.command(name="داشبورد", aliases=["dashboard", "لوحة"])
     async def dashboard_link(ctx):
-        base = (DASHBOARD_BASE_URL or "").rstrip("/")
+        base = (os.getenv("DASHBOARD_BASE_URL", "") or "").rstrip("/")
         if not base:
             await ctx.reply(embed=error("رابط الداشبورد غير مضبوط", "تأكد من متغير DASHBOARD_BASE_URL في Railway.", ctx.author))
             return
@@ -171,7 +172,7 @@ def setup(bot):
         checks.append(f"{yes_no(perms.get('manage_messages'))} Manage Messages")
         checks.append(f"{yes_no(perms.get('embed_links'))} Embed Links")
 
-        base = (DASHBOARD_BASE_URL or "").rstrip("/")
+        base = (os.getenv("DASHBOARD_BASE_URL", "") or "").rstrip("/")
         dash_link = f"{base}/dashboard/settings?guild_id={ctx.guild.id}" if base else "DASHBOARD_BASE_URL not set"
 
         e = embed(
