@@ -11,7 +11,7 @@ from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
 from nmcore.services.warnings import summary as warn_summary
-from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link
+from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link, check_message, matched_bad_word, contains_bad, has_link, check_message
 from nmcore.services.activity import log_event, record
 
 DISCORD_API = "https://discord.com/api/v10"
@@ -1338,28 +1338,71 @@ DASHBOARD_BASE_URL</pre>
             if request.form.get("action") == "test_message":
                 s_test = prot_get(g)
                 raw = request.form.get("test_text", "")
-                words = [w.strip() for w in str(s_test.get("bad_words") or "").split(",") if w.strip()]
-                match = matched_bad_word(raw, words)
-                bad = bool(match) or contains_bad(raw, words)
-                link = has_link(raw)
+
+                class DummyAuthor:
+                    id = 0
+                    display_name = "Dashboard Test"
+                    roles = []
+
+                class DummyChannel:
+                    id = 0
+                    name = "dashboard-test"
+
+                class DummyGuild:
+                    id = g
+
+                class DummyMessage:
+                    content = raw
+                    author = DummyAuthor()
+                    channel = DummyChannel()
+                    guild = DummyGuild()
+                    mentions = []
+                    role_mentions = []
+
+                result = check_message(DummyMessage(), s_test)
                 test_result = f"""
                 <div class='card'>
                   <h3>Protection Test Result</h3>
-                  <p>Bad Word: <b class='{'bad' if bad else 'ok'}'>{'YES' if bad else 'NO'}</b></p>
-                  <p>Matched: <code>{esc(match or '-')}</code></p>
-                  <p>Link: <b class='{'warn' if link else 'ok'}'>{'YES' if link else 'NO'}</b></p>
-                  <p class='muted'>Test text is not saved and no warning is issued.</p>
+                  <p>Blocked: <b class='{'bad' if result.get('blocked') else 'ok'}'>{'YES' if result.get('blocked') else 'NO'}</b></p>
+                  <p>Warning: <b class='{'warn' if result.get('warning') else 'ok'}'>{'YES' if result.get('warning') else 'NO'}</b></p>
+                  <p>Kind: <code>{esc(result.get('kind') or '-')}</code></p>
+                  <p>Reason: <code>{esc(result.get('reason') or '-')}</code></p>
+                  <p>Matched: <code>{esc(result.get('matched') or '-')}</code></p>
+                  <p>Details: <code>{esc(result.get('details') or '-')}</code></p>
+                  <p class='muted'>Test only. No delete, no warning, no log.</p>
                 </div>
                 """
             else:
+                def as_int(name, default=0):
+                    try:
+                        return int(request.form.get(name) or default)
+                    except Exception:
+                        return default
+
                 data = {
                     "enabled": 1 if request.form.get("enabled") else 0,
                     "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
                     "links_enabled": 1 if request.form.get("links_enabled") else 0,
+                    "spam_enabled": 1 if request.form.get("spam_enabled") else 0,
+                    "mass_mention_enabled": 1 if request.form.get("mass_mention_enabled") else 0,
                     "delete_messages": 1 if request.form.get("delete_messages") else 0,
+                    "timeout_enabled": 1 if request.form.get("timeout_enabled") else 0,
+                    "caps_enabled": 1 if request.form.get("caps_enabled") else 0,
+                    "duplicate_enabled": 1 if request.form.get("duplicate_enabled") else 0,
+                    "invite_block_enabled": 1 if request.form.get("invite_block_enabled") else 0,
+                    "max_newlines_enabled": 1 if request.form.get("max_newlines_enabled") else 0,
                     "bad_words": request.form.get("bad_words", ""),
                     "ignored_channels": request.form.get("ignored_channels", ""),
-                    "whitelist_roles": request.form.get("whitelist_roles", "")
+                    "whitelist_roles": request.form.get("whitelist_roles", ""),
+                    "link_whitelist": request.form.get("link_whitelist", ""),
+                    "spam_threshold": as_int("spam_threshold", 5),
+                    "spam_window": as_int("spam_window", 8),
+                    "mention_threshold": as_int("mention_threshold", 5),
+                    "caps_percent": as_int("caps_percent", 80),
+                    "caps_min_length": as_int("caps_min_length", 12),
+                    "duplicate_threshold": as_int("duplicate_threshold", 3),
+                    "duplicate_window": as_int("duplicate_window", 15),
+                    "max_newlines": as_int("max_newlines", 10),
                 }
                 prot_update(g, data)
                 return redirect(f"/dashboard/protection?guild_id={g}")
@@ -1369,17 +1412,18 @@ DASHBOARD_BASE_URL</pre>
         bad_count = len([w for w in bad_words_raw.split(",") if w.strip()])
         ignored_count = len([w for w in str(s.get("ignored_channels") or "").replace("\n", ",").split(",") if w.strip()])
         whitelist_count = len([w for w in str(s.get("whitelist_roles") or "").replace("\n", ",").split(",") if w.strip()])
+        link_whitelist_count = len([w for w in str(s.get("link_whitelist") or "").replace("\n", ",").split(",") if w.strip()])
 
         conn = db()
         cur = conn.cursor()
         cur.execute("""SELECT * FROM log_events
-        WHERE guild_id=? AND event_type IN ('protection_warning','protection_link')
-        ORDER BY id DESC LIMIT 50""", (g,))
+        WHERE guild_id=? AND event_type LIKE 'protection_%'
+        ORDER BY id DESC LIMIT 80""", (g,))
         events = cur.fetchall()
 
         cur.execute("""SELECT * FROM warnings
         WHERE guild_id=? AND moderator_name LIKE '%NM System%'
-        ORDER BY id DESC LIMIT 50""", (g,))
+        ORDER BY id DESC LIMIT 80""", (g,))
         auto_warnings = cur.fetchall()
         conn.close()
 
@@ -1399,6 +1443,7 @@ DASHBOARD_BASE_URL</pre>
           <div class='card'><div class='muted'>Bad Words</div><div class='stat'>{bad_count:,}</div></div>
           <div class='card'><div class='muted'>Ignored Channels</div><div class='stat'>{ignored_count:,}</div></div>
           <div class='card'><div class='muted'>Whitelist Roles</div><div class='stat'>{whitelist_count:,}</div></div>
+          <div class='card'><div class='muted'>Link Whitelist</div><div class='stat'>{link_whitelist_count:,}</div></div>
           <div class='card'><div class='muted'>Auto Warnings</div><div class='stat'>{len(auto_warnings):,}</div></div>
         </div>
 
@@ -1409,7 +1454,7 @@ DASHBOARD_BASE_URL</pre>
           <form method=post>
             <input type=hidden name=guild_id value='{g}'>
             <input type=hidden name=action value='test_message'>
-            <textarea name=test_text placeholder='Write test message here' style='width:100%;height:70px'></textarea><br><br>
+            <textarea name=test_text placeholder='اكتب رسالة تجربة هنا. ما راح تنحذف ولا تعطي تحذير.' style='width:100%;height:70px'></textarea><br><br>
             <button>Test Only</button>
           </form>
         </div>
@@ -1418,21 +1463,46 @@ DASHBOARD_BASE_URL</pre>
           <form method=post>
             <input type=hidden name=guild_id value='{g}'>
 
-            <label><input type=checkbox name=enabled {'checked' if s.get('enabled') else ''}> Enabled</label><br>
-            <label><input type=checkbox name=bad_words_enabled {'checked' if s.get('bad_words_enabled') else ''}> Bad Words</label><br>
-            <label><input type=checkbox name=links_enabled {'checked' if s.get('links_enabled') else ''}> Links</label><br>
-            <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label><br><br>
+            <h3>Main Toggles</h3>
+            <div class='grid'>
+              <label><input type=checkbox name=enabled {'checked' if s.get('enabled') else ''}> Enabled</label>
+              <label><input type=checkbox name=delete_messages {'checked' if s.get('delete_messages') else ''}> Delete Messages</label>
+              <label><input type=checkbox name=bad_words_enabled {'checked' if s.get('bad_words_enabled') else ''}> Bad Words</label>
+              <label><input type=checkbox name=links_enabled {'checked' if s.get('links_enabled') else ''}> Links</label>
+              <label><input type=checkbox name=invite_block_enabled {'checked' if s.get('invite_block_enabled') else ''}> Discord Invites</label>
+              <label><input type=checkbox name=spam_enabled {'checked' if s.get('spam_enabled') else ''}> Anti Spam</label>
+              <label><input type=checkbox name=duplicate_enabled {'checked' if s.get('duplicate_enabled') else ''}> Anti Duplicate</label>
+              <label><input type=checkbox name=mass_mention_enabled {'checked' if s.get('mass_mention_enabled') else ''}> Anti Mass Mention</label>
+              <label><input type=checkbox name=caps_enabled {'checked' if s.get('caps_enabled') else ''}> Anti Caps</label>
+              <label><input type=checkbox name=max_newlines_enabled {'checked' if s.get('max_newlines_enabled') else ''}> Anti Long Newlines</label>
+            </div>
 
-            Bad Words / Phrases<br>
+            <h3>Thresholds</h3>
+            <div class='grid'>
+              <div>Spam Threshold<br><input name=spam_threshold type=number min=2 value='{int(s.get('spam_threshold') or 5)}'></div>
+              <div>Spam Window Seconds<br><input name=spam_window type=number min=2 value='{int(s.get('spam_window') or 8)}'></div>
+              <div>Mention Threshold<br><input name=mention_threshold type=number min=1 value='{int(s.get('mention_threshold') or 5)}'></div>
+              <div>Caps Percent<br><input name=caps_percent type=number min=1 max=100 value='{int(s.get('caps_percent') or 80)}'></div>
+              <div>Caps Min Length<br><input name=caps_min_length type=number min=1 value='{int(s.get('caps_min_length') or 12)}'></div>
+              <div>Duplicate Threshold<br><input name=duplicate_threshold type=number min=2 value='{int(s.get('duplicate_threshold') or 3)}'></div>
+              <div>Duplicate Window<br><input name=duplicate_window type=number min=2 value='{int(s.get('duplicate_window') or 15)}'></div>
+              <div>Max Newlines<br><input name=max_newlines type=number min=1 value='{int(s.get('max_newlines') or 10)}'></div>
+            </div>
+
+            <h3>Bad Words / Phrases</h3>
             <textarea name=bad_words style='width:100%;height:180px'>{esc(bad_words_raw)}</textarea><br><br>
 
+            <h3>Easy Control Lists</h3>
             Ignored Channel IDs<br>
             <textarea name=ignored_channels placeholder='Channel IDs separated by comma' style='width:100%;height:70px'>{esc(s.get('ignored_channels') or '')}</textarea><br><br>
 
             Whitelist Role IDs<br>
             <textarea name=whitelist_roles placeholder='Role IDs separated by comma' style='width:100%;height:70px'>{esc(s.get('whitelist_roles') or '')}</textarea><br><br>
 
-            <button>Save</button>
+            Link Whitelist<br>
+            <textarea name=link_whitelist placeholder='allowed domains مثل youtube.com, twitch.tv' style='width:100%;height:70px'>{esc(s.get('link_whitelist') or '')}</textarea><br><br>
+
+            <button>Save Protection Settings</button>
             <button name='action' value='reset_bad_words' style='background:#334155;margin-left:8px'>Reset Default Bad Words</button>
           </form>
         </div>
