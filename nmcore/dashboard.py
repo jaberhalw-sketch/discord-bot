@@ -7,6 +7,7 @@ from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name,
 from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
+from nmcore.services import security
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -1321,6 +1322,95 @@ DASHBOARD_BASE_URL</pre>
         body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th><th>Action</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
+
+    @app.route("/dashboard/security")
+    def security_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        guild_obj = None
+        for bg in bot.guilds:
+            if int(bg.id) == int(g):
+                guild_obj = bg
+                break
+
+        if not guild_obj:
+            return page("Security", server_pill_html(g, bot) + "<div class='card'><h3>Bot is not connected to this guild.</h3></div>", g)
+
+        report = security.risk_report(guild_obj)
+        events = security.recent_security_events(g, 120)
+
+        def ok_bad(v):
+            return "✅" if v else "❌"
+
+        perm_rows = "".join(
+            f"<tr><td>{esc(v['label'])}</td><td>{ok_bad(v['ok'])}</td></tr>"
+            for k, v in report["permissions"].items()
+        )
+
+        role_rows = "".join(
+            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['name'])}</td><td>{r['members']}</td><td>{'✅' if r['managed'] else '❌'}</td><td>{esc(', '.join(r['permissions']))}</td></tr>"
+            for r in report["roles"][:80]
+        )
+
+        event_rows = "".join(
+            f"<tr><td>{r['id']}</td><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
+            for r in events
+        )
+
+        issues = "".join(f"<li>{esc(x)}</li>" for x in report["issues"]) or "<li>No major issues detected.</li>"
+
+        color_class = "ok" if report["score"] >= 85 else "warn" if report["score"] >= 65 else "bad"
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Security Score</div><div class='stat {color_class}'>{report['score']}/100</div></div>
+          <div class='card'><div class='muted'>Risk Level</div><div class='stat {color_class}'>{esc(report['label'])}</div></div>
+          <div class='card'><div class='muted'>Active Warnings</div><div class='stat'>{report['counts']['active_warnings']:,}</div></div>
+          <div class='card'><div class='muted'>Anti-Raid Events</div><div class='stat'>{report['counts']['antiraid_events']:,}</div></div>
+          <div class='card'><div class='muted'>Protection Events</div><div class='stat'>{report['counts']['protection_events']:,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Security Issues / Recommendations</h3>
+          <ul>{issues}</ul>
+          <a class='btn' href='/dashboard/protection?guild_id={g}'>Open Protection Controls</a>
+          <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}'>Open Logs</a>
+        </div>
+
+        <div class='grid'>
+          <div class='card'>
+            <h3>Bot Permissions</h3>
+            <table><tr><th>Permission</th><th>Status</th></tr>{perm_rows}</table>
+          </div>
+
+          <div class='card'>
+            <h3>Anti-Raid Settings</h3>
+            <p>Enabled: <b>{ok_bad(report['antiraid'].get('enabled'))}</b></p>
+            <p>Threshold: <code>{int(report['antiraid'].get('threshold') or 3)} actions / {int(report['antiraid'].get('window') or 60)}s</code></p>
+            <p>Punishment: <code>{esc(report['antiraid'].get('punish_action') or 'log_only')}</code></p>
+            <p>Trusted Users: <code>{esc(report['antiraid'].get('trusted_users') or '-')}</code></p>
+            <p>Trusted Roles: <code>{esc(report['antiraid'].get('trusted_roles') or '-')}</code></p>
+          </div>
+        </div>
+
+        <div class='card'>
+          <h3>Dangerous Roles</h3>
+          <p class='muted'>Roles with high-risk permissions. This helps you know which roles should be trusted carefully.</p>
+          <table><tr><th>ID</th><th>Name</th><th>Members</th><th>Managed</th><th>Dangerous Permissions</th></tr>{role_rows}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Recent Security Events</h3>
+          <table><tr><th>ID</th><th>Type</th><th>User</th><th>Name</th><th>Title</th><th>Details</th></tr>{event_rows}</table>
+        </div>
+        """
+        return page("Security", body, g)
+
+
 
     @app.route("/dashboard/protection", methods=["GET", "POST"])
     def protection_page():
