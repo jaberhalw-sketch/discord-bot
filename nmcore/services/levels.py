@@ -36,3 +36,16 @@ def top_levels(guild_id:int,limit:int=10):
     cur.execute("SELECT user_id,xp,level FROM levels WHERE guild_id=? ORDER BY level DESC,xp DESC LIMIT ?", (int(guild_id),int(limit)))
     rows=[(int(r["user_id"]),int(r["xp"]),int(r["level"])) for r in cur.fetchall()]
     conn.close(); return rows
+
+
+VOICE_XP_PER_INTERVAL = 15
+VOICE_XP_INTERVAL_SECONDS = 5 * 60
+
+def voice_xp_interval():
+    return VOICE_XP_INTERVAL_SECONDS
+
+def voice_xp_amount():
+    return VOICE_XP_PER_INTERVAL
+
+def add_voice_xp(guild_id:int,user_id:int):
+    return add_xp(guild_id,user_id,VOICE_XP_PER_INTERVAL)
