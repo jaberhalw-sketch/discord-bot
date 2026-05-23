@@ -10,6 +10,7 @@ from nmcore.services import security
 from nmcore.services import readiness
 from nmcore.services import reports
 from nmcore.services import guides
+from nmcore.services import post_rewards
 from nmcore.services import full_check
 from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
@@ -458,6 +459,48 @@ def setup(bot):
         e.add_field(name="Punish", value=str(summary["punish_action"]), inline=True)
         await ctx.reply(embed=e)
 
+
+
+
+    @bot.command(name="تفعيل_مكافأة_البوست", aliases=["enable_post_reward"])
+    async def enable_post_reward(ctx, channel_id:int=None, amount:int=5000):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        ch_id = int(channel_id or ctx.channel.id)
+        post_rewards.update_settings(ctx.guild.id, enabled=True, amount=int(amount or 5000), channel_ids=str(ch_id))
+        await ctx.reply(embed=success(
+            "تم تفعيل مكافأة البوست",
+            f"الروم: <#{ch_id}>\nالمبلغ لكل بوست: **{int(amount or 5000):,}**",
+            ctx.author
+        ))
+
+    @bot.command(name="تعطيل_مكافأة_البوست", aliases=["disable_post_reward"])
+    async def disable_post_reward(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        post_rewards.update_settings(ctx.guild.id, enabled=False)
+        await ctx.reply(embed=success("تم تعطيل مكافأة البوست", "ما راح تنصرف مكافآت بوستات جديدة.", ctx.author))
+
+    @bot.command(name="تقرير_البوستات", aliases=["post_report"])
+    async def post_report(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        s = post_rewards.summary(ctx.guild.id, 10)
+        totals = s["totals"]
+        lines = []
+        for r in s["top"]:
+            lines.append(f"`{r['user_id']}` — **{r['posts']}** posts — **{int(r['total']):,}**")
+
+        e = embed("📝 تقرير مكافآت البوستات", "\n".join(lines) if lines else "ما فيه مكافآت بوستات للحين.", "money", ctx.author)
+        e.add_field(name="Total Posts", value=f"{int(totals.get('c') or 0):,}", inline=True)
+        e.add_field(name="Total Paid", value=f"{int(totals.get('total') or 0):,}", inline=True)
+        await ctx.reply(embed=e)
 
 
     @bot.command(name="فتح_البوت", aliases=["open_bot"])
