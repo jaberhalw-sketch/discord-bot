@@ -43,6 +43,7 @@ def new_shoe(decks: int = 6):
 def hand_value(cards):
     total = 0
     aces = 0
+
     for c in cards:
         if c == "A":
             aces += 1
@@ -61,22 +62,22 @@ def hand_value(cards):
 
 def is_soft_17(cards):
     total = 0
-    aces = 0
+    aces_as_eleven = 0
+
     for c in cards:
         if c == "A":
-            aces += 1
             total += 11
+            aces_as_eleven += 1
         elif c in {"J", "Q", "K"}:
             total += 10
         else:
             total += int(c)
 
-    soft_aces = aces
-    while total > 21 and soft_aces:
+    while total > 21 and aces_as_eleven:
         total -= 10
-        soft_aces -= 1
+        aces_as_eleven -= 1
 
-    return total == 17 and soft_aces > 0
+    return total == 17 and aces_as_eleven > 0
 
 
 def is_blackjack(cards):
@@ -112,10 +113,51 @@ def casino_lobby_embed(ctx, amount="100"):
         name="🛡️ قواعد مهمة",
         value="الرهان ينخصم أولًا.\n"
         "التعادل في بلاك جاك يرجع الرهان.\n"
-        "الألعاب موزونة عشان ما تكسر الاقتصاد.",
+        "إذا انتهى وقت اللعبة بدون اختيار، يرجع الرهان تلقائيًا.",
         inline=False
     )
     return e
+
+
+def simulate_blackjack_round(strategy="stand17"):
+    shoe = new_shoe(6)
+
+    def draw():
+        nonlocal shoe
+        if not shoe:
+            shoe = new_shoe(6)
+        return shoe.pop()
+
+    player = [draw(), draw()]
+    dealer = [draw(), draw()]
+
+    if is_blackjack(player) or is_blackjack(dealer):
+        if is_blackjack(player) and is_blackjack(dealer):
+            return "draw"
+        if is_blackjack(player):
+            return "win"
+        return "lose"
+
+    threshold = 17 if strategy == "stand17" else 16
+
+    while hand_value(player) < threshold:
+        player.append(draw())
+
+    pv = hand_value(player)
+    if pv > 21:
+        return "lose"
+
+    while hand_value(dealer) < 17 or is_soft_17(dealer):
+        dealer.append(draw())
+
+    dv = hand_value(dealer)
+    if dv > 21:
+        return "win"
+    if pv > dv:
+        return "win"
+    if pv == dv:
+        return "draw"
+    return "lose"
 
 
 class BlackjackGameView(discord.ui.View):
@@ -124,6 +166,7 @@ class BlackjackGameView(discord.ui.View):
         self.ctx = ctx
         self.amount_text = str(amount)
         self.finished = False
+        self.processing = False
         self.bet = 0
         self.before = 0
         self.bet_tx = ""
@@ -132,6 +175,7 @@ class BlackjackGameView(discord.ui.View):
         self.dealer = []
         self.shoe = []
         self.final_embed = None
+        self.message = None
 
     def draw_card(self):
         if not self.shoe:
@@ -162,7 +206,7 @@ class BlackjackGameView(discord.ui.View):
             reason="Interactive blackjack bet",
             channel_id=self.ctx.channel.id,
             message_id=getattr(self.ctx.message, "id", 0),
-            metadata={"game": "blackjack", "mode": "interactive", "rules": "tie_refund_dealer_hits_soft_17"}
+            metadata={"game": "blackjack", "mode": "interactive", "rules": "tie_refund_dealer_hits_soft_17_timeout_refund"}
         )
 
         if not tx.get("ok"):
@@ -172,7 +216,6 @@ class BlackjackGameView(discord.ui.View):
         self.player = [self.draw_card(), self.draw_card()]
         self.dealer = [self.draw_card(), self.draw_card()]
 
-        # Both blackjack = draw/refund. Dealer blackjack alone = loss.
         if is_blackjack(self.player) or is_blackjack(self.dealer):
             if is_blackjack(self.player) and is_blackjack(self.dealer):
                 await self.finish("draw")
@@ -200,7 +243,7 @@ class BlackjackGameView(discord.ui.View):
             value=fmt_hand(self.dealer, hide_second=not reveal_dealer),
             inline=False
         )
-        e.add_field(name="القواعد", value="الديلر يسحب على Soft 17. أي تعادل = رجوع الرهان.", inline=False)
+        e.add_field(name="القواعد", value="الديلر يسحب على Soft 17. أي تعادل = رجوع الرهان. انتهاء الوقت = رجوع الرهان.", inline=False)
         e.add_field(name="Bet TX", value=f"`{self.bet_tx[:12]}`", inline=True)
         return e
 
@@ -222,7 +265,6 @@ class BlackjackGameView(discord.ui.View):
             elif pv > dv:
                 outcome = "win"
             elif pv == dv:
-                # FIX: Push always refunds bet.
                 outcome = "draw"
             else:
                 outcome = "lose"
@@ -246,6 +288,11 @@ class BlackjackGameView(discord.ui.View):
             title = "🤝 Push / تعادل"
             color = "warn"
             detail = "تعادل، رجعنا لك الرهان."
+        elif outcome == "timeout_refund":
+            payout = self.bet
+            title = "⏳ انتهى وقت بلاك جاك"
+            color = "warn"
+            detail = "انتهى وقت الاختيار، رجعنا لك الرهان تلقائيًا."
         else:
             payout = 0
             title = "💀 خسارة في بلاك جاك"
@@ -292,10 +339,19 @@ class BlackjackGameView(discord.ui.View):
             f"User: {self.ctx.author.mention} (`{self.ctx.author.id}`)\n"
             f"Bet: **{self.bet:,}**\nPayout: **{payout:,}**\nNet: **{net:,}**\n"
             f"Player: {self.player} = {pv}\nDealer: {self.dealer} = {dv}\n"
-            f"Rules: tie_refund=true, dealer_hits_soft_17=true\n"
+            f"Rules: tie_refund=true, dealer_hits_soft_17=true, timeout_refund=true\n"
             f"Bet TX: `{self.bet_tx}`\nPayout TX: `{self.payout_tx or '-'}`",
             color
         )
+
+    async def on_timeout(self):
+        if not self.finished and self.bet > 0 and self.bet_tx:
+            await self.finish("timeout_refund")
+            try:
+                if self.message:
+                    await self.message.edit(embed=self.final_embed, view=self)
+            except Exception:
+                pass
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.ctx.author.id:
@@ -311,23 +367,37 @@ class BlackjackGameView(discord.ui.View):
         if self.finished:
             await interaction.response.send_message(embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user), ephemeral=True)
             return
-
-        self.player.append(self.draw_card())
-        if hand_value(self.player) > 21:
-            await self.finish("lose")
-            await interaction.response.edit_message(embed=self.final_embed, view=self)
+        if self.processing:
+            await interaction.response.send_message(embed=embed("⏳ انتظر", "جاري تنفيذ الحركة السابقة.", "warn", interaction.user), ephemeral=True)
             return
 
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        self.processing = True
+        try:
+            self.player.append(self.draw_card())
+            if hand_value(self.player) > 21:
+                await self.finish("lose")
+                await interaction.response.edit_message(embed=self.final_embed, view=self)
+                return
+
+            await interaction.response.edit_message(embed=self.build_embed(), view=self)
+        finally:
+            self.processing = False
 
     @discord.ui.button(label="Stand / وقف", style=discord.ButtonStyle.primary, emoji="✋")
     async def stand_btn(self, interaction, button):
         if self.finished:
             await interaction.response.send_message(embed=embed("🃏 اللعبة منتهية", "ابدأ لعبة جديدة بأمر `!بلاكجاك amount`.", "warn", interaction.user), ephemeral=True)
             return
+        if self.processing:
+            await interaction.response.send_message(embed=embed("⏳ انتظر", "جاري تنفيذ الحركة السابقة.", "warn", interaction.user), ephemeral=True)
+            return
 
-        await self.finish("stand")
-        await interaction.response.edit_message(embed=self.final_embed, view=self)
+        self.processing = True
+        try:
+            await self.finish("stand")
+            await interaction.response.edit_message(embed=self.final_embed, view=self)
+        finally:
+            self.processing = False
 
     @discord.ui.button(label="Rules", style=discord.ButtonStyle.secondary, emoji="📘")
     async def rules_btn(self, interaction, button):
@@ -337,7 +407,8 @@ class BlackjackGameView(discord.ui.View):
             "اضغط **Stand** عشان توقف وتخلي الديلر يلعب.\n"
             "الديلر يسحب على Soft 17.\n"
             "أي تعادل يرجع الرهان.\n"
-            "إذا تعديت 21 تخسر.",
+            "إذا تعديت 21 تخسر.\n"
+            "إذا انتهى الوقت بدون اختيار، يرجع الرهان.",
             "info",
             interaction.user
         )
@@ -362,6 +433,10 @@ class CasinoView(discord.ui.View):
                 await interaction.response.send_message(embed=e, ephemeral=True)
                 return
             await interaction.response.send_message(embed=e, view=bj)
+            try:
+                bj.message = await interaction.original_response()
+            except Exception:
+                pass
             return
 
         res = play(interaction.guild.id, interaction.user.id, interaction.user.display_name, game, self.amount, interaction.channel.id, 0)
@@ -424,7 +499,8 @@ def setup(bot):
             if not ok:
                 await ctx.reply(embed=e)
                 return
-            await ctx.reply(embed=e, view=view)
+            msg = await ctx.reply(embed=e, view=view)
+            view.message = msg
             return
 
         res = play(ctx.guild.id, ctx.author.id, ctx.author.display_name, game, amount, ctx.channel.id, ctx.message.id)
@@ -475,3 +551,26 @@ def setup(bot):
     @bot.command(name="بلاكجاك", aliases=["bj", "blackjack"])
     async def blackjack(ctx, amount: str):
         await run(ctx, "blackjack", amount)
+
+    @bot.command(name="اختبار_بلاكجاك", aliases=["bj_test", "blackjack_test"])
+    async def blackjack_test(ctx, rounds: int = 5000):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=embed("صلاحية مرفوضة", "هذا الأمر للإدارة فقط.", "bad", ctx.author))
+            return
+
+        rounds = max(100, min(int(rounds or 5000), 50000))
+        counts = {"win": 0, "lose": 0, "draw": 0}
+
+        for _ in range(rounds):
+            counts[simulate_blackjack_round("stand17")] += 1
+
+        win_pct = counts["win"] / rounds * 100
+        lose_pct = counts["lose"] / rounds * 100
+        draw_pct = counts["draw"] / rounds * 100
+
+        e = embed("🧪 اختبار بلاك جاك", f"تم اختبار **{rounds:,}** جولة بدون لمس الفلوس.", "info", ctx.author)
+        e.add_field(name="Win", value=f"{counts['win']:,} ({win_pct:.1f}%)", inline=True)
+        e.add_field(name="Lose", value=f"{counts['lose']:,} ({lose_pct:.1f}%)", inline=True)
+        e.add_field(name="Draw", value=f"{counts['draw']:,} ({draw_pct:.1f}%)", inline=True)
+        e.add_field(name="القواعد", value="6-deck shoe, dealer hits soft 17, ties refund.", inline=False)
+        await ctx.reply(embed=e)
