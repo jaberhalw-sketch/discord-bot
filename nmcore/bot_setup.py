@@ -1,5 +1,6 @@
 import os
 import discord
+from discord.ext import commands
 from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system
 from nmcore.services.levels import message_xp
 from nmcore.services.protection import get_settings, contains_bad, has_link, matched_bad_word
@@ -145,6 +146,76 @@ def setup_bot(bot):
             return False
 
         return True
+
+
+    @bot.event
+    async def on_command_error(ctx, error):
+        if not ctx.guild:
+            return
+
+        if isinstance(error, commands.CommandNotFound):
+            return
+
+        if isinstance(error, commands.CheckFailure):
+            return
+
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.reply(embed=embed(
+                "⚠️ الأمر ناقص",
+                f"ناقص باراميتر: `{error.param.name}`\nاكتب `!مساعدة` للأوامر.",
+                "warn",
+                ctx.author
+            ))
+            return
+
+        if isinstance(error, commands.BadArgument):
+            await ctx.reply(embed=embed(
+                "⚠️ صيغة غلط",
+                "تأكد من المنشن أو الرقم أو طريقة كتابة الأمر.",
+                "warn",
+                ctx.author
+            ))
+            return
+
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.reply(embed=embed(
+                "🔒 صلاحية ناقصة",
+                "ما عندك صلاحية تستخدم هذا الأمر.",
+                "bad",
+                ctx.author
+            ))
+            return
+
+        try:
+            log_event(
+                ctx.guild.id,
+                "command_error",
+                ctx.author.id,
+                ctx.author.display_name,
+                ctx.channel.id,
+                ctx.channel.name,
+                "Command error",
+                f"{type(error).__name__}: {error}"
+            )
+
+            await send_log(
+                bot,
+                ctx.guild,
+                "commands",
+                "❌ Command Error",
+                f"User: {ctx.author.mention} (`{ctx.author.id}`)\nChannel: {ctx.channel.mention}\nCommand: `{ctx.command}`\nError: `{type(error).__name__}: {str(error)[:900]}`",
+                "bad",
+                ctx.author
+            )
+        except Exception:
+            pass
+
+        await ctx.reply(embed=embed(
+            "❌ خطأ في الأمر",
+            f"صار خطأ وتم تسجيله في اللوقات.\n`{type(error).__name__}`",
+            "bad",
+            ctx.author
+        ))
 
     @bot.event
     async def on_command_completion(ctx):
