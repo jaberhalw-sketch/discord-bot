@@ -178,7 +178,7 @@ class BlackjackGameView(discord.ui.View):
             value=fmt_hand(self.dealer, hide_second=not reveal_dealer),
             inline=False
         )
-        e.add_field(name="Rules", value="Dealer peeks blackjack + hits soft 17. التعادل يرجع الرهان.", inline=False)
+        e.add_field(name="Rules", value="Dealer peeks blackjack + hits soft 17. التعادل على 21 فقط يرجع الرهان، باقي التعادلات لصالح الديلر.", inline=False)
         e.add_field(name="Bet TX", value=f"`{self.bet_tx[:12]}`", inline=True)
         return e
 
@@ -201,8 +201,10 @@ class BlackjackGameView(discord.ui.View):
                 outcome = "win"
             elif pv > dv:
                 outcome = "win"
-            elif pv == dv:
+            elif pv == dv and pv == 21:
                 outcome = "draw"
+            elif pv == dv:
+                outcome = "lose"
             else:
                 outcome = "lose"
 
@@ -330,7 +332,7 @@ class BlackjackGameView(discord.ui.View):
             "الديلر يفحص Blackjack من البداية.\n"
             "الديلر يسحب على soft 17، وهذا يقوي الديلر ويخلي اللعبة أعدل.\n"
             "إذا تعديت 21 تخسر.\n"
-            "التعادل يرجع الرهان.",
+            "التعادل على 21 فقط يرجع الرهان، باقي التعادلات لصالح الديلر.",
             "info",
             interaction.user
         )
@@ -413,7 +415,7 @@ class CasinoView(discord.ui.View):
 def casino_menu_embed(ctx, amount):
     e = embed("🎰 كازينو NM", f"اختر اللعبة من الأزرار بالأسفل.\nالرهان الحالي: **{amount}**", "purple", ctx.author)
     e.add_field(name="الألعاب", value="🍀 حظ\n✌️ دبل\n🎰 سلوت\n🪙 وجه\n🃏 بلاك جاك تفاعلي", inline=True)
-    e.add_field(name="ملاحظات", value="بلاك جاك فيه Hit / Stand، والديلر صار أقوى: يفحص Blackjack ويسحب على soft 17.", inline=True)
+    e.add_field(name="ملاحظات", value="بلاك جاك فيه Hit / Stand، والديلر صار أقوى: يفحص Blackjack، يسحب على soft 17، والتعادل العادي للديلر.", inline=True)
     return e
 
 
