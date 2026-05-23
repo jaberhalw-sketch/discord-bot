@@ -2,9 +2,28 @@ import re
 import discord
 from nmcore.ui import embed
 from nmcore.services.activity import log_event
+from nmcore.services.settings import get_lfg_channel_id
 
 
 GAME_CATEGORY_NAME = "🎮 LFG Rooms"
+
+
+def get_lfg_channel(guild):
+    try:
+        channel_id = get_lfg_channel_id(guild.id)
+        if not channel_id:
+            return None
+        return guild.get_channel(int(channel_id))
+    except Exception:
+        return None
+
+
+def in_lfg_channel(ctx):
+    try:
+        return int(ctx.channel.id) == int(LFG_CHANNEL_ID)
+    except Exception:
+        return False
+
 
 
 def parse_lfg_args(args):
@@ -232,10 +251,40 @@ def lfg_help_embed(member=None):
 def setup(bot):
     @bot.command(name="شرح_لعب", aliases=["شرح_lfg", "lfg_help"])
     async def lfg_help(ctx):
-        await ctx.reply(embed=lfg_help_embed(ctx.author))
+        ch = get_lfg_channel(ctx.guild)
+
+        if not ch:
+            await ctx.reply(embed=embed(
+                "❌ روم LFG غير محدد",
+                "حدد روم Looking For Game من الداشبورد: Settings → LFG Channel ID.",
+                "bad",
+                ctx.author
+            ))
+            return
+
+        msg = await ch.send(embed=lfg_help_embed(ctx.author))
+
+        if int(ctx.channel.id) != int(ch.id):
+            await ctx.reply(embed=embed(
+                "✅ تم إرسال شرح اللعب",
+                f"تم إرسال شرح Looking For Game في روم {ch.mention}\n[اضغط هنا للرسالة]({msg.jump_url})",
+                "ok",
+                ctx.author
+            ))
 
     @bot.command(name="لعب", aliases=["lfg", "قيم"])
     async def lfg(ctx, *args):
+        ch = get_lfg_channel(ctx.guild)
+
+        if ch and not in_lfg_channel(ctx):
+            await ctx.reply(embed=embed(
+                "🎮 استخدم روم Looking For Game",
+                f"أوامر التجمعات تشتغل في {ch.mention} فقط.\nاكتب هناك: `!لعب fort 4`",
+                "warn",
+                ctx.author
+            ))
+            return
+
         game, count, note = parse_lfg_args(args)
 
         if not game or not count:
