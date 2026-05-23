@@ -243,6 +243,23 @@ def setup_bot(bot):
             s = get_settings(message.guild.id)
 
             if s.get("enabled") and is_system_enabled(message.guild.id, "protection"):
+                ignored_channels = {
+                    int(x.strip()) for x in str(s.get("ignored_channels") or "").replace("\n", ",").split(",")
+                    if x.strip().isdigit()
+                }
+                whitelist_roles = {
+                    int(x.strip()) for x in str(s.get("whitelist_roles") or "").replace("\n", ",").split(",")
+                    if x.strip().isdigit()
+                }
+
+                if int(message.channel.id) in ignored_channels:
+                    await bot.process_commands(message)
+                    return
+
+                if whitelist_roles and any(int(r.id) in whitelist_roles for r in getattr(message.author, "roles", [])):
+                    await bot.process_commands(message)
+                    return
+
                 words = [w.strip() for w in str(s.get("bad_words") or "").split(",") if w.strip()]
 
                 bad_word = ""
