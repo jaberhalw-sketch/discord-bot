@@ -45,8 +45,8 @@ def page(title, body, guild_id=0):
             ("🧾 Money Tracker",f"/dashboard/money-tracker{q}"),
             ("📝 Post Rewards",f"/dashboard/post-rewards{q}"),
             ("🎰 Casino",f"/dashboard/casino{q}"),
-            ("🛒 Shop",f"/dashboard/shop{q}"),
-            ("🏘️ Real Estate",f"/dashboard/real-estate{q}"),
+            ("🛒 Real Estate Shop",f"/dashboard/shop{q}"),
+            ("🏘️ Real Estate Admin",f"/dashboard/real-estate{q}"),
         ]),
         ("Community", [
             ("📊 Levels",f"/dashboard/levels{q}"),
@@ -67,51 +67,60 @@ def page(title, body, guild_id=0):
     ]
 
     links=""
+    low_title = str(title or "").lower()
     for group, items in nav_groups:
         links += f"<div class='nav-group'>{escape(group)}</div>"
         for t,h in items:
-            active = " active" if title.lower() in t.lower() or (title.lower()=="money tracker" and "money-tracker" in h) else ""
+            active = " active" if low_title and (low_title in t.lower() or t.lower().split(' ',1)[-1] in low_title) else ""
             links += f"<a class='nav-link{active}' href='{h}'>{escape(t)}</a>"
 
     return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{escape(title)}</title>
 <style>
 :root{{
-  --bg:#070b14;--panel:#0f172a;--card:#111827;--card2:#0b1220;--line:#253044;
-  --text:#e5e7eb;--muted:#94a3b8;--brand:#8b5cf6;--brand2:#22d3ee;
+  --bg:#060915;--panel:#0b1020;--panel2:#11182b;--card:#0f172a;--card2:#101827;--line:#243044;
+  --text:#e5e7eb;--muted:#94a3b8;--brand:#8b5cf6;--brand2:#22d3ee;--pink:#ec4899;
   --ok:#4ade80;--bad:#fb7185;--warn:#fbbf24;--blue:#60a5fa;
 }}
 *{{box-sizing:border-box}}
 body{{margin:0;background:
-  radial-gradient(circle at top left,rgba(139,92,246,.18),transparent 32%),
-  radial-gradient(circle at top right,rgba(34,211,238,.12),transparent 28%),
-  var(--bg);color:var(--text);font-family:Inter,Arial,sans-serif}}
+  radial-gradient(circle at 12% 0%,rgba(139,92,246,.30),transparent 34%),
+  radial-gradient(circle at 80% 10%,rgba(34,211,238,.16),transparent 30%),
+  radial-gradient(circle at 55% 100%,rgba(236,72,153,.10),transparent 26%),
+  var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Arial,sans-serif}}
 .wrap{{display:flex;min-height:100vh}}
-.side{{width:305px;background:rgba(15,23,42,.94);padding:18px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid var(--line);backdrop-filter:blur(10px)}}
-.brand{{font-size:23px;font-weight:950;margin-bottom:6px;letter-spacing:.2px}}
-.brand-sub{{font-size:12px;color:var(--muted);margin-bottom:18px}}
-.nav-group{{color:#64748b;text-transform:uppercase;font-size:11px;font-weight:900;letter-spacing:.12em;margin:18px 0 7px}}
-.side a{{display:flex;align-items:center;gap:8px;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:14px;margin:4px 0;border:1px solid transparent}}
-.side a:hover{{background:#1e293b;color:#fff;border-color:#334155;transform:translateX(2px)}}
-.side a.active{{background:linear-gradient(135deg,rgba(139,92,246,.28),rgba(34,211,238,.12));color:#fff;border-color:#475569}}
+.side{{width:315px;background:rgba(8,13,28,.86);padding:18px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid rgba(148,163,184,.16);backdrop-filter:blur(18px)}}
+.brandbox{{border:1px solid rgba(139,92,246,.35);background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(34,211,238,.08));border-radius:22px;padding:14px;margin-bottom:16px}}
+.brand{{font-size:24px;font-weight:950;letter-spacing:-.04em}}
+.brand-sub{{font-size:12px;color:var(--muted);margin-top:4px}}
+.nav-group{{color:#64748b;text-transform:uppercase;font-size:11px;font-weight:950;letter-spacing:.14em;margin:18px 0 7px}}
+.side a{{display:flex;align-items:center;gap:10px;color:#cbd5e1;text-decoration:none;padding:10px 12px;border-radius:15px;margin:4px 0;border:1px solid transparent;transition:.15s ease}}
+.side a:hover{{background:#172033;color:#fff;border-color:#334155;transform:translateX(3px)}}
+.side a.active{{background:linear-gradient(135deg,rgba(139,92,246,.34),rgba(34,211,238,.14));color:#fff;border-color:#475569;box-shadow:0 12px 30px rgba(139,92,246,.10)}}
 .main{{flex:1;padding:28px;min-width:0}}
 .topbar{{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:20px}}
-h1{{margin:0;font-size:30px;letter-spacing:-.03em}}
-.card{{background:linear-gradient(180deg,rgba(17,24,39,.96),rgba(11,18,32,.96));border:1px solid var(--line);border-radius:22px;padding:18px;margin-bottom:16px;box-shadow:0 18px 50px rgba(0,0,0,.26)}}
-.card h3{{margin-top:0;margin-bottom:12px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}
-.stat{{font-size:30px;font-weight:950;letter-spacing:-.04em}}
+h1{{margin:0;font-size:31px;letter-spacing:-.055em}}
+.card{{background:linear-gradient(180deg,rgba(15,23,42,.94),rgba(10,15,29,.94));border:1px solid rgba(148,163,184,.16);border-radius:24px;padding:18px;margin-bottom:16px;box-shadow:0 22px 60px rgba(0,0,0,.30)}}
+.card h3{{margin-top:0;margin-bottom:12px;letter-spacing:-.02em}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px}}
+.stat{{font-size:31px;font-weight:950;letter-spacing:-.055em}}
 .muted{{color:var(--muted)}}
-.pill{{display:inline-flex;align-items:center;gap:6px;border:1px solid #334155;background:#0b1220;border-radius:999px;padding:6px 10px;color:#cbd5e1;font-size:12px}}
+.pill{{display:inline-flex;align-items:center;gap:6px;border:1px solid #334155;background:#0b1220;border-radius:999px;padding:7px 11px;color:#cbd5e1;font-size:12px}}
 .ok{{color:var(--ok)}}.bad{{color:var(--bad)}}.warn{{color:var(--warn)}}.info{{color:var(--blue)}}
-table{{width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border-radius:14px}}
-th{{color:#cbd5e1;background:#0b1220;font-size:12px;text-transform:uppercase;letter-spacing:.06em}}
-td,th{{border-bottom:1px solid var(--line);padding:10px;text-align:left;vertical-align:top}}
-tr:hover td{{background:rgba(148,163,184,.04)}}
-input,select,button,textarea{{padding:10px;border-radius:12px;border:1px solid #334155;background:#020617;color:#fff;box-sizing:border-box}}
+table{{width:100%;border-collapse:separate;border-spacing:0;overflow:hidden;border-radius:16px}}
+th{{color:#cbd5e1;background:#090f1d;font-size:12px;text-transform:uppercase;letter-spacing:.06em}}
+td,th{{border-bottom:1px solid rgba(148,163,184,.12);padding:11px;text-align:left;vertical-align:top}}
+tr:hover td{{background:rgba(148,163,184,.045)}}
+input,select,button,textarea{{padding:11px;border-radius:14px;border:1px solid #334155;background:#020617;color:#fff;box-sizing:border-box}}
 textarea{{font-family:inherit}}
-button,.btn{{background:linear-gradient(135deg,var(--brand),#6d28d9);color:white;text-decoration:none;border:0;display:inline-block;padding:10px 14px;border-radius:13px;font-weight:800;cursor:pointer}}
+button,.btn{{background:linear-gradient(135deg,var(--brand),#6d28d9);color:white;text-decoration:none;border:0;display:inline-block;padding:10px 14px;border-radius:14px;font-weight:850;cursor:pointer;box-shadow:0 12px 28px rgba(139,92,246,.18)}}
 button:hover,.btn:hover{{filter:brightness(1.12)}}
-code{{background:#020617;border:1px solid #1f2937;border-radius:8px;padding:2px 6px;color:#e2e8f0}}
+code{{background:#020617;border:1px solid #1f2937;border-radius:9px;padding:2px 6px;color:#e2e8f0}}
+.avatar{{width:38px;height:38px;border-radius:14px;object-fit:cover;border:1px solid #334155;background:#111827}}
+.avatar-lg{{width:70px;height:70px;border-radius:22px;object-fit:cover;border:1px solid #334155;background:#111827}}
+.userline{{display:flex;align-items:center;gap:10px}}
+.server-grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}}
+.server-card{{display:flex;gap:12px;align-items:center;text-decoration:none;color:var(--text);background:linear-gradient(180deg,rgba(17,24,39,.96),rgba(11,18,32,.96));border:1px solid rgba(148,163,184,.16);border-radius:24px;padding:16px;box-shadow:0 18px 50px rgba(0,0,0,.24)}}
+.server-card:hover{{border-color:rgba(139,92,246,.55);transform:translateY(-2px)}}
 .kpi-good{{border-left:4px solid var(--ok)}}.kpi-warn{{border-left:4px solid var(--warn)}}.kpi-bad{{border-left:4px solid var(--bad)}}.kpi-info{{border-left:4px solid var(--blue)}}
 @media(max-width:900px){{.wrap{{display:block}}.side{{width:100%;height:auto;position:relative}}.main{{padding:18px}}}}
-</style></head><body><div class="wrap"><aside class="side"><div class="brand">NM System V9</div><div class="brand-sub">Unified Control Dashboard</div>{links}</aside><main class="main"><div class="topbar"><h1>{escape(title)}</h1><span class="pill">Guild {int(guild_id) if guild_id else "Default"}</span></div>{body}</main></div></body></html>"""
+</style></head><body><div class="wrap"><aside class="side"><div class="brandbox"><div class="brand">NM System V9</div><div class="brand-sub">Pro Control Dashboard</div></div>{links}</aside><main class="main"><div class="topbar"><h1>{escape(title)}</h1><span class="pill">Guild {int(guild_id) if guild_id else "Select Server"}</span></div>{body}</main></div></body></html>"""
