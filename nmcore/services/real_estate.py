@@ -1,111 +1,105 @@
-import time
-from nmcore.db import db
-from nmcore.services.economy import debit, credit
-from nmcore.services.activity import record
+import discord
+from nmcore.services import real_estate
+from nmcore.services.log_channels import get_log_channel
+from nmcore.ui import embed, coin
 
-PROPERTY_TYPES={
-    "room":{"name":"Small Room","count":20,"price":25000,"rent":1000},
-    "apartment":{"name":"Apartment","count":10,"price":100000,"rent":4000},
-    "office":{"name":"Office","count":5,"price":300000,"rent":18000},
-    "tower":{"name":"Tower","count":2,"price":1000000,"rent":75000},
-    "palace":{"name":"Royal Palace","count":1,"price":3500000,"rent":250000},
-}
 
-def seed(guild_id:int):
-    conn=db(); cur=conn.cursor(); now=int(time.time())
-    for key,info in PROPERTY_TYPES.items():
-        for unit in range(1,info["count"]+1):
-            cur.execute("""INSERT OR IGNORE INTO properties
-            (guild_id,type_key,unit_number,display_name,owner_id,owner_name,level,price,rent,created_at)
-            VALUES (?,?,?,?,0,'',1,?,?,?)""", (int(guild_id),key,unit,f"{info['name']} #{unit}",info["price"],info["rent"],now))
+async def send_action_log(ctx, log_key, title, description, color="info"):
+    try:
+        ch_id = get_log_channel(ctx.guild.id, log_key)
+        if not ch_id:
+            return
+        ch = ctx.guild.get_channel(int(ch_id))
+        if not ch:
+            return
+        await ch.send(embed=embed(title, description, color, ctx.author))
+    except Exception:
+        pass
 
-    # Keep apartment rent synced with the new economy setting.
-    cur.execute("UPDATE properties SET rent=? WHERE guild_id=? AND type_key='apartment'", (4000, int(guild_id)))
-    conn.commit(); conn.close()
 
-def rows(guild_id:int, only_available=False):
-    seed(guild_id)
-    conn=db(); cur=conn.cursor()
-    sql="SELECT * FROM properties WHERE guild_id=?"; params=[int(guild_id)]
-    if only_available:
-        sql+=" AND owner_id=0"
-    sql+=" ORDER BY price ASC,id ASC"
-    cur.execute(sql,params); data=cur.fetchall(); conn.close(); return data
+class MyPropertiesView(discord.ui.View):
+    def __init__(self, ctx):
+        super().__init__(timeout=120)
+        self.ctx = ctx
 
-def my_rows(guild_id:int,user_id:int):
-    seed(guild_id); conn=db(); cur=conn.cursor()
-    cur.execute("SELECT * FROM properties WHERE guild_id=? AND owner_id=? ORDER BY id", (int(guild_id),int(user_id)))
-    data=cur.fetchall(); conn.close(); return data
+    @discord.ui.button(label="استلام الإيجار", style=discord.ButtonStyle.success, emoji="💵")
+    async def collect_rent(self, interaction, button):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message(embed=embed("🚫 غير مسموح", "هذا الزر لصاحب العقارات فقط.", "bad", interaction.user), ephemeral=True)
+            return
 
-def prop_log(guild_id, property_id, action, **kw):
-    conn=db(); cur=conn.cursor()
-    cur.execute("""INSERT INTO property_ledger
-    (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-    (int(guild_id),int(property_id),str(action),int(kw.get("old_owner_id",0) or 0),int(kw.get("new_owner_id",0) or 0),int(kw.get("actor_id",0) or 0),int(kw.get("amount",0) or 0),int(kw.get("level_before",0) or 0),int(kw.get("level_after",0) or 0),int(kw.get("price_before",0) or 0),int(kw.get("price_after",0) or 0),str(kw.get("reason","")),str(kw.get("money_tx_id","")),int(time.time())))
-    conn.commit(); conn.close()
+        res = real_estate.collect_rent(interaction.guild.id, interaction.user.id, interaction.user.display_name)
+        if not res["ok"]:
+            await interaction.response.send_message(embed=embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", interaction.user), ephemeral=True)
+            return
 
-def buy(guild_id:int,user_id:int,user_name:str,property_id:int):
-    seed(guild_id)
-    conn=db(); cur=conn.cursor()
-    cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (int(guild_id),int(property_id)))
-    p=cur.fetchone(); conn.close()
-    if not p: return {"ok":False,"error":"العقار غير موجود."}
-    if int(p["owner_id"] or 0)!=0: return {"ok":False,"error":"العقار مملوك بالفعل."}
-    price=int(p["price"])
-    tx=debit(guild_id,user_id,price,"real_estate_buy",user_name=user_name,source_label=str(property_id),reference_type="property",reference_id=str(property_id),reason=f"Buy {p['display_name']}")
-    if not tx["ok"]: return {"ok":False,"error":"رصيدك ما يكفي."}
-    conn=db(); cur=conn.cursor()
-    cur.execute("UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=? WHERE guild_id=? AND id=?", (int(user_id),str(user_name)[:120],int(time.time()),int(guild_id),int(property_id)))
-    conn.commit(); conn.close()
-    prop_log(guild_id,property_id,"buy_from_system",old_owner_id=0,new_owner_id=user_id,actor_id=user_id,amount=price,price_before=price,price_after=price,reason="Bought from system",money_tx_id=tx["tx_id"])
-    record(guild_id,user_id,user_name,"real_estate","Property bought",p["display_name"],-price)
-    return {"ok":True,"name":p["display_name"],"price":price,"tx_id":tx["tx_id"]}
+        e = embed("💵 تم جمع الإيجار", f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}", "ok", interaction.user)
+        await interaction.response.send_message(embed=e)
 
-def collect_rent(guild_id:int,user_id:int,user_name:str):
-    """
-    Rent accrues every 3 hours. User can claim whenever they want.
-    Each property pays: rent * level * completed 3-hour periods.
-    """
-    props=my_rows(guild_id,user_id)
-    if not props: return {"ok":False,"error":"ما عندك عقارات."}
+    @discord.ui.button(label="فتح المتجر", style=discord.ButtonStyle.secondary, emoji="🏘️")
+    async def open_shop(self, interaction, button):
+        await interaction.response.send_message(embed=embed("🏘️ متجر العقارات", "اكتب `!متجر` لفتح سوق العقارات بالأزرار.", "purple", interaction.user), ephemeral=True)
 
-    now=int(time.time())
-    eligible=[]
-    total=0
 
-    # Legacy safety: old properties with last_rent_claim=0 start counting from now,
-    # to avoid accidental huge payouts after migration.
-    conn=db(); cur=conn.cursor()
-    for p in props:
-        last=int(p["last_rent_claim"] or 0)
-        if last <= 0:
-            cur.execute("UPDATE properties SET last_rent_claim=? WHERE guild_id=? AND id=?", (now,int(guild_id),int(p["id"])))
-            continue
+def property_line(ctx, r):
+    return f"`#{r['id']}` **{r['display_name']}** • {coin(ctx.guild.id, r['price'])} • Rent **{int(r['rent']):,}** • L{int(r['level'])}"
 
-        periods=(now-last)//RENT_COOLDOWN_SECONDS
-        if periods <= 0:
-            continue
 
-        amount=int(p["rent"])*int(p["level"])*int(periods)
-        total += amount
-        eligible.append((p, periods, amount))
+def setup(bot):
+    @bot.command(name="عقارات")
+    async def props(ctx):
+        rows = real_estate.rows(ctx.guild.id, True)[:10]
+        lines = [property_line(ctx, r) for r in rows]
 
-    conn.commit(); conn.close()
+        e = embed("🏘️ العقارات المتاحة", "\n".join(lines) if lines else "لا يوجد عقارات متاحة.", "purple", ctx.author)
 
-    if not eligible:
-        return {"ok":False,"error":"ما تجمع لك إيجار للحين. الإيجار يتجمع كل 3 ساعات."}
+        try:
+            stock_lines = []
+            for s in real_estate.stock_summary(ctx.guild.id):
+                stock_lines.append(f"`{s['type_key']}`: **{int(s['available'] or 0)}/{int(s['total'] or 0)}** متاح")
+            if stock_lines:
+                e.add_field(name="📦 الكمية المحدودة", value="\n".join(stock_lines[:8]), inline=False)
+        except Exception:
+            pass
 
-    tx=credit(guild_id,user_id,total,"real_estate_rent",user_name=user_name,reason=f"Accumulated rent from {len(eligible)} properties")
+        e.add_field(name="شراء سريع", value="استخدم `!متجر` عشان تشتري بالأزرار أو `!شراء_عقار ID`.", inline=False)
+        await ctx.reply(embed=e)
 
-    conn=db(); cur=conn.cursor()
-    for p, periods, amount in eligible:
-        last=int(p["last_rent_claim"] or now)
-        new_last=last + (int(periods)*RENT_COOLDOWN_SECONDS)
-        cur.execute("UPDATE properties SET last_rent_claim=? WHERE guild_id=? AND id=?", (new_last,int(guild_id),int(p["id"])))
-        prop_log(guild_id,int(p["id"]),"rent_collect",old_owner_id=user_id,new_owner_id=user_id,actor_id=user_id,amount=amount,level_before=int(p["level"]),level_after=int(p["level"]),reason=f"{periods} rent periods",money_tx_id=tx["tx_id"])
-    conn.commit(); conn.close()
+    @bot.command(name="شراء_عقار")
+    async def buy(ctx, property_id:int):
+        res = real_estate.buy(ctx.guild.id, ctx.author.id, ctx.author.display_name, property_id)
 
-    record(guild_id,user_id,user_name,"real_estate","Accumulated rent",f"{len(eligible)} properties",total)
-    return {"ok":True,"count":len(eligible),"amount":total,"tx_id":tx["tx_id"]}
+        if not res["ok"]:
+            await ctx.reply(embed=embed("🏘️ فشل شراء العقار", res["error"], "bad", ctx.author))
+            return
 
+        e = embed("🏠 تم شراء العقار", f"**{res['name']}**", "ok", ctx.author)
+        e.add_field(name="السعر", value=coin(ctx.guild.id, res["price"]), inline=True)
+        e.add_field(name="TX", value=f"`{res['tx_id'][:12]}`", inline=True)
+        e.add_field(name="الإيجار", value="يتجمع كل 3 ساعات.", inline=False)
+        await ctx.reply(embed=e)
+
+        await send_action_log(ctx, "economy", "🏠 Property Bought", f"User: {ctx.author.mention} (`{ctx.author.id}`)\nProperty: **{res['name']}** (`{property_id}`)\nPrice: **{res['price']:,}**\nTX: `{res['tx_id']}`", "money")
+
+    @bot.command(name="ايجار")
+    async def rent(ctx):
+        res = real_estate.collect_rent(ctx.guild.id, ctx.author.id, ctx.author.display_name)
+
+        if not res["ok"]:
+            await ctx.reply(embed=embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", ctx.author))
+            return
+
+        e = embed("💵 تم جمع الإيجار", f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}", "ok", ctx.author)
+        e.add_field(name="TX", value=f"`{res['tx_id'][:12]}`", inline=True)
+        await ctx.reply(embed=e)
+
+        await send_action_log(ctx, "economy", "🏘️ Rent Collected", f"User: {ctx.author.mention} (`{ctx.author.id}`)\nProperties: **{res['count']}**\nAmount: **{res['amount']:,}**\nTX: `{res['tx_id']}`", "money")
+
+    @bot.command(name="عقاراتي")
+    async def mine(ctx):
+        rows = real_estate.my_rows(ctx.guild.id, ctx.author.id)
+        lines = [f"`#{r['id']}` **{r['display_name']}** • L{r['level']} • Rent **{int(r['rent']):,}**" for r in rows[:20]]
+
+        e = embed("🏘️ عقاراتك", "\n".join(lines) if lines else "ما عندك عقارات.", "purple", ctx.author)
+        e.add_field(name="الإيجار", value="اضغط الزر أو اكتب `!ايجار`.", inline=False)
+        await ctx.reply(embed=e, view=MyPropertiesView(ctx) if rows else None)
