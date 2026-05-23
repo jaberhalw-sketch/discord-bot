@@ -3,7 +3,7 @@ from flask import Flask, request, redirect, session
 from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
 from nmcore.db import db, init_db
 from nmcore.ui import page
-from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled, get_lfg_channel_id, set_lfg_channel_id
+from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
 from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
@@ -204,20 +204,31 @@ def member_info(bot=None, guild_id=0, user_id=0):
 
 
 def user_chip(bot, guild_id, user_id, name_hint=""):
-    info = member_info(bot, guild_id, user_id)
+    uid = int(user_id or 0)
+    if not uid:
+        return "<span class='muted'>System</span>"
+
+    info = member_info(bot, guild_id, uid)
     name = info["name"]
-    if name == str(user_id) and name_hint:
+
+    if name == str(uid) and name_hint:
         name = str(name_hint)
 
     return f"""
     <div class='userline'>
       <img class='avatar' src='{esc(info["avatar"])}'>
-      <div>
-        <b>{esc(name)}</b><br>
-        <a href='/dashboard/user?guild_id={int(guild_id)}&user_id={int(user_id or 0)}'><code>{int(user_id or 0)}</code></a>
+      <div style='min-width:0'>
+        <b style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:210px'>{esc(name)}</b>
+        <a href='/dashboard/user?guild_id={int(guild_id)}&user_id={uid}'><code>{uid}</code></a>
       </div>
     </div>
     """
+
+
+def status_badge(text):
+    val = str(text or "").lower()
+    cls = "ok" if val in {"active", "ok", "win", "enabled"} else "warn" if val in {"cleared", "draw", "pending"} else "bad" if val in {"lose", "disabled", "bad"} else "info"
+    return f"<span class='pill {cls}'>{esc(text)}</span>"
 
 
 def refresh_session_manageable_guilds(bot=None, force=False):
@@ -1451,35 +1462,13 @@ DASHBOARD_BASE_URL</pre>
             if action == "add_warning" and user_id:
                 from nmcore.services import warnings as warnsvc
                 warnsvc.add_warning(g, user_id, user_name, actor_id, actor_name, reason, "Added from dashboard")
-
-                log_event(
-                    g,
-                    "dashboard_add_warning",
-                    user_id,
-                    user_name,
-                    0,
-                    "",
-                    "Dashboard added warning",
-                    f"Actor={actor_id}, Reason={reason}"
-                )
-
+                log_event(g, "dashboard_add_warning", user_id, user_name, 0, "", "Dashboard added warning", f"Actor={actor_id}, Reason={reason}")
                 return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
 
             if action == "clear_user" and user_id:
                 from nmcore.services import warnings as warnsvc
                 count = warnsvc.clear_user(g, user_id, actor_id, actor_name, reason)
-
-                log_event(
-                    g,
-                    "dashboard_clear_warnings",
-                    user_id,
-                    str(user_id),
-                    0,
-                    "",
-                    "Dashboard cleared warnings",
-                    f"Actor={actor_id}, Count={count}, Reason={reason}"
-                )
-
+                log_event(g, "dashboard_clear_warnings", user_id, str(user_id), 0, "", "Dashboard cleared warnings", f"Actor={actor_id}, Count={count}, Reason={reason}")
                 return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
 
             if action == "clear_warning":
@@ -1499,17 +1488,7 @@ DASHBOARD_BASE_URL</pre>
                         cleared_by_id=?, cleared_by_name=?, clear_reason=? WHERE guild_id=? AND id=?""",
                         (actor_id, actor_name, reason, g, warning_id))
                         conn.commit()
-
-                        log_event(
-                            g,
-                            "dashboard_clear_warning",
-                            int(row["user_id"]),
-                            str(row["user_name"]),
-                            0,
-                            "",
-                            "Dashboard cleared one warning",
-                            f"Actor={actor_id}, WarningID={warning_id}, Reason={reason}"
-                        )
+                        log_event(g, "dashboard_clear_warning", int(row["user_id"]), str(row["user_name"]), 0, "", "Dashboard cleared one warning", f"Actor={actor_id}, WarningID={warning_id}, Reason={reason}")
 
                     conn.close()
 
@@ -1517,6 +1496,7 @@ DASHBOARD_BASE_URL</pre>
 
         uid = request.args.get("user_id", "").strip()
         status = request.args.get("status", "active").strip()
+        reason_q = request.args.get("q", "").strip()
 
         conn = db()
         cur = conn.cursor()
@@ -1532,13 +1512,25 @@ DASHBOARD_BASE_URL</pre>
             q += " AND status=?"
             params.append(status)
 
-        q += " ORDER BY id DESC LIMIT 200"
+        if reason_q:
+            q += " AND reason LIKE ?"
+            params.append(f"%{reason_q}%")
+
+        q += " ORDER BY id DESC LIMIT 350"
         cur.execute(q, params)
         rows = cur.fetchall()
+
+        cur.execute("""SELECT
+        COUNT(*) total,
+        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active,
+        SUM(CASE WHEN status='cleared' THEN 1 ELSE 0 END) cleared
+        FROM warnings WHERE guild_id=?""", (g,))
+        totals = cur.fetchone()
 
         cur.execute("""SELECT user_id, user_name,
         COUNT(*) total,
         SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active_count,
+        SUM(CASE WHEN status='cleared' THEN 1 ELSE 0 END) cleared_count,
         MAX(id) last_id
         FROM warnings WHERE guild_id=?
         GROUP BY user_id, user_name
@@ -1546,15 +1538,21 @@ DASHBOARD_BASE_URL</pre>
         LIMIT 100""", (g,))
         grouped = cur.fetchall()
 
+        cur.execute("""SELECT moderator_id, moderator_name, COUNT(*) c
+        FROM warnings WHERE guild_id=? AND moderator_id != 0
+        GROUP BY moderator_id, moderator_name
+        ORDER BY c DESC LIMIT 10""", (g,))
+        mods = cur.fetchall()
+
         conn.close()
 
         grouped_trs = "".join(
             f"""<tr>
-              <td><code>{r['user_id']}</code></td>
-              <td>{esc(r['user_name'])}</td>
-              <td>{int(r['active_count'] or 0):,}</td>
+              <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
+              <td><span class='pill bad'>{int(r['active_count'] or 0):,}</span></td>
+              <td>{int(r['cleared_count'] or 0):,}</td>
               <td>{int(r['total'] or 0):,}</td>
-              <td><a href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}'>View</a></td>
+              <td><a class='btn' style='background:#334155;box-shadow:none' href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}&status=all'>Open</a></td>
               <td>
                 <form method='post' style='display:inline'>
                   <input type=hidden name=guild_id value='{g}'>
@@ -1566,28 +1564,35 @@ DASHBOARD_BASE_URL</pre>
               </td>
             </tr>"""
             for r in grouped
-        )
+        ) or "<tr><td colspan='6'>No warnings.</td></tr>"
 
         trs = "".join(
             f"""<tr>
-              <td>{r['id']}</td>
-              <td><code>{r['user_id']}</code></td>
-              <td>{esc(r['user_name'])}</td>
+              <td><code>{r['id']}</code></td>
+              <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
               <td>{esc(r['reason'])}</td>
-              <td>{esc(r['status'])}</td>
-              <td>{esc(r['moderator_name'])}</td>
+              <td>{status_badge(r['status'])}</td>
+              <td>{user_chip(bot, g, r['moderator_id'], r['moderator_name'])}</td>
+              <td>{esc(r['clear_reason'] or '')}</td>
               <td>
                 {f"<form method='post' style='display:inline'><input type=hidden name=guild_id value='{g}'><input type=hidden name=action value='clear_warning'><input type=hidden name=warning_id value='{r['id']}'><input type=hidden name=reason value='Cleared one warning from dashboard'><button style='background:#334155'>Clear One</button></form>" if str(r['status']) == 'active' else ''}
               </td>
             </tr>"""
             for r in rows
-        )
+        ) or "<tr><td colspan='7'>No records.</td></tr>"
+
+        mod_trs = "".join(
+            f"<tr><td>{user_chip(bot,g,r['moderator_id'],r['moderator_name'])}</td><td>{int(r['c']):,}</td></tr>"
+            for r in mods
+        ) or "<tr><td colspan='2'>No moderators yet.</td></tr>"
 
         form = f"""
         <div class='card'>
+          <h3>Warnings Control</h3>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(uid)}'>
+            <input name=q placeholder='Search reason' value='{esc(reason_q)}'>
             <select name=status>
               <option value='active' {'selected' if status == 'active' else ''}>Active</option>
               <option value='cleared' {'selected' if status == 'cleared' else ''}>Cleared</option>
@@ -1611,9 +1616,18 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
 
-        body = server_pill_html(g, bot) + form
-        body += f"<div class='card'><h3>Users Warning Summary</h3><table><tr><th>User ID</th><th>Name</th><th>Active</th><th>Total</th><th></th><th>Action</th></tr>{grouped_trs}</table></div>"
-        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th><th>Action</th></tr>{trs}</table></div>"
+        body = server_pill_html(g, bot)
+        body += f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Total Warnings</div><div class='stat'>{int(totals['total'] or 0):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Active</div><div class='stat'>{int(totals['active'] or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Cleared</div><div class='stat'>{int(totals['cleared'] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Users Listed</div><div class='stat'>{len(grouped):,}</div></div>
+        </div>
+        """
+        body += form
+        body += f"<div class='grid'><div class='card'><h3>Users Warning Summary</h3><table><tr><th>User</th><th>Active</th><th>Cleared</th><th>Total</th><th>Open</th><th>Action</th></tr>{grouped_trs}</table></div><div class='card'><h3>Top Moderators</h3><table><tr><th>Moderator</th><th>Warnings</th></tr>{mod_trs}</table></div></div>"
+        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Reason</th><th>Status</th><th>By</th><th>Clear Reason</th><th>Action</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
 
@@ -1644,12 +1658,12 @@ DASHBOARD_BASE_URL</pre>
         ) or "<tr><td colspan='3'>No shop purchases yet.</td></tr>"
 
         buyer_rows = "".join(
-            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{esc(r.get('user_name') or '')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
+            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
             for r in shop.get("top_buyers", [])
-        ) or "<tr><td colspan='4'>No buyers yet.</td></tr>"
+        ) or "<tr><td colspan='3'>No buyers yet.</td></tr>"
 
         spender_rows = "".join(
-            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{int(r.get('spent') or 0):,}</td><td>{int(r.get('received') or 0):,}</td><td>{int(r.get('net') or 0):,}</td></tr>"
+            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0)}</td><td>{int(r.get('spent') or 0):,}</td><td>{int(r.get('received') or 0):,}</td><td>{int(r.get('net') or 0):,}</td></tr>"
             for r in users.get("top_spenders", [])
         ) or "<tr><td colspan='4'>No ledger data yet.</td></tr>"
 
@@ -1693,7 +1707,7 @@ DASHBOARD_BASE_URL</pre>
 
           <div class='card'>
             <h3>Top Shop Buyers</h3>
-            <table><tr><th>User</th><th>Name</th><th>Purchases</th><th>Total</th></tr>{buyer_rows}</table>
+            <table><tr><th>User</th><th>Purchases</th><th>Total</th></tr>{buyer_rows}</table>
           </div>
         </div>
 
@@ -2227,7 +2241,6 @@ DASHBOARD_BASE_URL</pre>
 
         cur.execute("SELECT COUNT(*) c FROM log_events WHERE guild_id=?", (g,))
         total_logs = int(cur.fetchone()["c"] or 0)
-
         conn.close()
 
         log_map = all_log_channels(g)
@@ -2243,6 +2256,7 @@ DASHBOARD_BASE_URL</pre>
 
         form = f"""
         <div class='card'>
+          <h3>Logs Filter</h3>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=event_type placeholder='event_type' value='{esc(event_type)}'>
@@ -2255,18 +2269,17 @@ DASHBOARD_BASE_URL</pre>
         """
 
         trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['channel_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
+            f"<tr><td><code>{r['id']}</code></td><td>{status_badge(r['event_type'])}</td><td>{user_chip(bot,g,r['user_id'],r['user_name'])}</td><td>{esc(r['channel_name'])}<br><code>{int(r['channel_id'] or 0)}</code></td><td><b>{esc(r['title'])}</b><br><span class='muted'>{esc(r['details'])}</span></td></tr>"
             for r in rows
-        )
+        ) or "<tr><td colspan='5'>No logs.</td></tr>"
 
         body = server_pill_html(g, bot)
-        body += f"<div class='grid'><div class='card'><div class='muted'>Total DB Logs</div><div class='stat'>{total_logs:,}</div></div><div class='card'><div class='muted'>Mapped Log Rooms</div><div class='stat'>{sum(1 for x in log_map.values() if int(x or 0)):,}/{len(LOG_CHANNELS)}</div></div></div>"
+        body += f"<div class='grid'><div class='card kpi-info'><div class='muted'>Total DB Logs</div><div class='stat'>{total_logs:,}</div></div><div class='card'><div class='muted'>Mapped Log Rooms</div><div class='stat'>{sum(1 for x in log_map.values() if int(x or 0)):,}/{len(LOG_CHANNELS)}</div></div><div class='card kpi-good'><div class='muted'>Auto Refresh</div><div class='stat'>15s</div></div></div>"
         body += f"<div class='card'><h3>Discord Log Rooms Mapping</h3><table><tr><th>Key</th><th>Room Name</th><th>Current</th><th>ID</th></tr>{log_channel_rows}</table><br><a class='btn' href='/dashboard/settings?guild_id={g}'>Edit Mapping</a></div>"
         body += form
         body += f"<div class='card'><h3>Event Types</h3>{chips or '<span class=muted>No logs yet.</span>'}</div>"
-        body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>User</th><th>Name</th><th>Channel</th><th>Title</th><th>Details</th></tr>{trs}</table></div>"
+        body += f"<div class='card'><h3>Recent Logs</h3><table><tr><th>ID</th><th>Type</th><th>User</th><th>Channel</th><th>Event</th></tr>{trs}</table></div>"
         return page("Logs", body, g)
-
     @app.route("/dashboard/live")
     def live_page():
         d = require_login()
@@ -2315,7 +2328,6 @@ DASHBOARD_BASE_URL</pre>
 
         cur.execute("SELECT COUNT(*) c FROM live_activity WHERE guild_id=?", (g,))
         total = cur.fetchone()
-
         conn.close()
 
         chips = "".join(
@@ -2324,23 +2336,24 @@ DASHBOARD_BASE_URL</pre>
         )
 
         type_trs = "".join(
-            f"<tr><td>{esc(r['activity_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
+            f"<tr><td>{status_badge(r['activity_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
             for r in types
-        )
+        ) or "<tr><td colspan='3'>No activity.</td></tr>"
 
         actor_trs = "".join(
-            f"<tr><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
+            f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
             for r in actors
-        )
+        ) or "<tr><td colspan='3'>No actors.</td></tr>"
 
         trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['activity_type'])}</td><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td><td>{int(r['amount']):,}</td></tr>"
+            f"<tr><td><code>{r['id']}</code></td><td>{status_badge(r['activity_type'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td><b>{esc(r['title'])}</b><br><span class='muted'>{esc(r['details'])}</span></td><td>{int(r['amount']):,}</td></tr>"
             for r in rows
-        )
+        ) or "<tr><td colspan='5'>No live activity.</td></tr>"
 
         body = server_pill_html(g, bot)
         body += f"""
         <div class='card'>
+          <h3>Live Activity Filter</h3>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=activity_type placeholder='activity_type' value='{esc(activity_type)}'>
@@ -2351,15 +2364,15 @@ DASHBOARD_BASE_URL</pre>
           </form>
         </div>
         <div class='grid'>
-          <div class='card'><div class='muted'>Live Rows</div><div class='stat'>{int(total['c'] or 0):,}</div></div>
+          <div class='card kpi-info'><div class='muted'>Live Rows</div><div class='stat'>{int(total['c'] or 0):,}</div></div>
           <div class='card'><div class='muted'>Activity Types</div><div class='stat'>{len(types):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Auto Refresh</div><div class='stat'>8s</div></div>
         </div>
         """
-        body += f"<div class='card'><h3>Live Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'}</div>"
-        body += f"<div class='grid'><div class='card'><h3>Activity Summary</h3><table><tr><th>Type</th><th>Rows</th><th>Amount</th></tr>{type_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Name</th><th>Rows</th><th>Amount</th></tr>{actor_trs}</table></div></div>"
-        body += f"<div class='card'><table><tr><th>ID</th><th>Type</th><th>Actor</th><th>Name</th><th>Title</th><th>Details</th><th>Amount</th></tr>{trs}</table></div>"
+        body += f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'}</div>"
+        body += f"<div class='grid'><div class='card'><h3>Activity Summary</h3><table><tr><th>Type</th><th>Rows</th><th>Amount</th></tr>{type_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Rows</th><th>Amount</th></tr>{actor_trs}</table></div></div>"
+        body += f"<div class='card'><h3>Live Feed</h3><table><tr><th>ID</th><th>Type</th><th>Actor</th><th>Event</th><th>Amount</th></tr>{trs}</table></div>"
         return page("Live Activity", body, g)
-
     @app.route("/dashboard/settings", methods=["GET", "POST"])
     def settings_page():
         d = require_login()
@@ -2404,7 +2417,7 @@ DASHBOARD_BASE_URL</pre>
             if "coin_name" in request.form:
                 set_coin_name(g, request.form.get("coin_name"))
 
-            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id", "lfg_channel_id"]:
+            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id"]:
                 if key in request.form:
                     update_channel(g, key, int(request.form.get(key) or 0))
 
@@ -2419,7 +2432,6 @@ DASHBOARD_BASE_URL</pre>
         commands_channel_id = int(gs.get("commands_channel_id") or 0)
         gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
         logs_channel_id = int(gs.get("logs_channel_id") or 0)
-        lfg_channel_id = get_lfg_channel_id(g)
         log_map = all_log_channels(g)
         pr = post_rewards.get_settings(g)
 
@@ -2466,18 +2478,6 @@ DASHBOARD_BASE_URL</pre>
             <button>Save Post Reward</button>
           </form>
           <p class='muted'><a href='/dashboard/post-rewards?guild_id={g}'>Open Post Rewards Report</a></p>
-        </div>
-
-        <div class='card kpi-info'>
-          <h3>Looking For Game Channel</h3>
-          <p class='muted'>حدد روم التجمعات من الداشبورد بدل ما يكون ID ثابت في الكود.</p>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <label>LFG Channel ID</label><br>
-            <input name=lfg_channel_id value='{lfg_channel_id}' placeholder='مثال: 1504066361876418703' style='width:320px'>
-            <button>Save LFG Channel</button>
-          </form>
-          <p class='muted'>بعد الحفظ: <code>!شرح_لعب</code> يرسل الشرح هناك، و <code>!لعب</code> يشتغل هناك فقط.</p>
         </div>
 
         <div class='card kpi-warn'>
@@ -2871,35 +2871,54 @@ DASHBOARD_BASE_URL</pre>
             except Exception:
                 amount = 0
 
-            reason = request.form.get("reason", "").strip() or f"Dashboard user action {action}"
+            reason = request.form.get("reason").strip() if request.form.get("reason") else f"Dashboard user action {action}"
 
             if uid_int and action in {"give", "take", "set"}:
-                if action == "give" and amount > 0:
-                    economy_service.credit(g, uid_int, amount, "dashboard_user_give", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
-                elif action == "take" and amount > 0:
-                    economy_service.debit(g, uid_int, amount, "dashboard_user_take", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
-                elif action == "set" and amount >= 0:
-                    economy_service.set_balance(g, uid_int, amount, "dashboard_user_set_balance", user_name=str(uid_int), actor_id=actor_id, actor_name=actor_name, reason=reason)
+                info = member_info(bot, g, uid_int)
+                uname = info["name"] if info["name"] != str(uid_int) else str(uid_int)
 
-                log_event(g, f"dashboard_user_{action}", uid_int, str(uid_int), 0, "", f"Dashboard user {action}", f"Actor={actor_id}, Amount={amount}, Reason={reason}")
+                if action == "give" and amount > 0:
+                    economy_service.credit(g, uid_int, amount, "dashboard_user_give", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
+                elif action == "take" and amount > 0:
+                    economy_service.debit(g, uid_int, amount, "dashboard_user_take", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
+                elif action == "set" and amount >= 0:
+                    economy_service.set_balance(g, uid_int, amount, "dashboard_user_set_balance", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
+
+                log_event(g, f"dashboard_user_{action}", uid_int, uname, 0, "", f"Dashboard user {action}", f"Actor={actor_id}, Amount={amount}, Reason={reason}")
 
             return redirect(f"/dashboard/user?guild_id={g}&user_id={uid_int}")
 
         uid = request.args.get("user_id", "").strip()
 
         if not uid.isdigit():
-            return page("User Lookup", server_pill_html(g, bot) + f"<div class='card'><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
+            return page("User Lookup", server_pill_html(g, bot) + f"<div class='card'><h3>User Lookup</h3><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
 
         uid = int(uid)
+        info = member_info(bot, g, uid)
 
         conn = db()
         cur = conn.cursor()
-
         cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, uid))
         bal = cur.fetchone()
 
         cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (g, uid))
         lvl = cur.fetchone()
+
+        cur.execute("""SELECT
+        COUNT(*) rows,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COALESCE(SUM(amount),0) net
+        FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, uid))
+        money = cur.fetchone()
+
+        cur.execute("""SELECT source_type, COUNT(*) c,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COALESCE(SUM(amount),0) net
+        FROM money_ledger WHERE guild_id=? AND user_id=?
+        GROUP BY source_type ORDER BY c DESC LIMIT 25""", (g, uid))
+        sources = cur.fetchall()
 
         cur.execute("SELECT * FROM money_ledger WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
         ledger = cur.fetchall()
@@ -2912,20 +2931,25 @@ DASHBOARD_BASE_URL</pre>
 
         conn.close()
 
+        source_trs = "".join(
+            f"<tr><td>{status_badge(r['source_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td></tr>"
+            for r in sources
+        ) or "<tr><td colspan='5'>No source data.</td></tr>"
+
         ledger_trs = "".join(
-            f"<tr><td>{r['tx_id'][:10]}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{status_badge(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
             for r in ledger
-        )
+        ) or "<tr><td colspan='6'>No money history.</td></tr>"
 
         warn_trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td><td>{esc(r['moderator_name'])}</td></tr>"
+            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['reason'])}</td><td>{status_badge(r['status'])}</td><td>{user_chip(bot,g,r['moderator_id'],r['moderator_name'])}</td></tr>"
             for r in warns
-        )
+        ) or "<tr><td colspan='4'>No warnings.</td></tr>"
 
         prop_trs = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{int(r['rent']):,}</td></tr>"
+            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{int(r['rent']):,}</td></tr>"
             for r in props
-        )
+        ) or "<tr><td colspan='4'>No properties.</td></tr>"
 
         body = server_pill_html(g, bot) + f"""
         <div class='card'>
@@ -2933,13 +2957,28 @@ DASHBOARD_BASE_URL</pre>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id value='{uid}' placeholder='User ID'>
             <button>Search</button>
+            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}&user_id={uid}'>Money Profile</a>
+            <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}&user_id={uid}&status=all'>Warnings</a>
           </form>
         </div>
 
+        <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap'>
+          <div class='userline'>
+            <img class='avatar-lg' src='{esc(info["avatar"])}'>
+            <div>
+              <div class='muted'>User Profile</div>
+              <div style='font-size:26px;font-weight:950'>{esc(info["name"])}</div>
+              <code>{uid}</code>
+            </div>
+          </div>
+        </div>
+
         <div class='grid'>
-          <div class='card'><div class='muted'>User ID</div><div class='stat'><code>{uid}</code></div></div>
-          <div class='card'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
-          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div></div>
+          <div class='card kpi-info'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
+          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div><div class='muted'>XP {int(lvl['xp'] if lvl else 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Gained</div><div class='stat'>{int(money['gained'] or 0):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Spent/Lost</div><div class='stat'>{int(money['spent'] or 0):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(money['net'] or 0):,}</div></div>
           <div class='card'><div class='muted'>Warnings</div><div class='stat'>{len(warns):,}</div></div>
           <div class='card'><div class='muted'>Properties</div><div class='stat'>{len(props):,}</div></div>
         </div>
@@ -2957,6 +2996,7 @@ DASHBOARD_BASE_URL</pre>
           </form>
         </div>
 
+        <div class='card'><h3>Money Sources</h3><table><tr><th>Source</th><th>Rows</th><th>Gained</th><th>Spent</th><th>Net</th></tr>{source_trs}</table></div>
         <div class='card'><h3>Money History</h3><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{ledger_trs}</table></div>
         <div class='card'><h3>Warnings</h3><table><tr><th>ID</th><th>Reason</th><th>Status</th><th>By</th></tr>{warn_trs}</table></div>
         <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th></tr>{prop_trs}</table></div>
