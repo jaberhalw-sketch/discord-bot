@@ -46,6 +46,7 @@ def page(title, body, guild_id=0):
             ("💰 Economy",f"/dashboard/economy{q}"),
             ("🧾 Money Tracker",f"/dashboard/money-tracker{q}"),
             ("📝 Post Rewards",f"/dashboard/post-rewards{q}"),
+            ("🚀 Boosts",f"/dashboard/boosts{q}"),
             ("🎰 Casino",f"/dashboard/casino{q}"),
             ("🛒 Real Estate Shop",f"/dashboard/shop{q}"),
             ("🏘️ Real Estate Admin",f"/dashboard/real-estate{q}"),
