@@ -98,4 +98,3 @@ def play(guild_id:int,user_id:int,user_name:str,game:str,bet_text,channel_id=0,m
 
     after=get_balance(guild_id,user_id)
     return {"ok":True,"game":game,"bet":bet,"before":before,"after":after,"outcome":outcome,"payout":payout,"net":after-before,"detail":detail,"bet_tx":bet_tx.get("tx_id"),"payout_tx":payout_tx.get("tx_id") if payout_tx else ""}
-
