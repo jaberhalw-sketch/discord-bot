@@ -8,6 +8,7 @@ from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
 from nmcore.services import security
+from nmcore.services import full_check
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -1322,6 +1323,66 @@ DASHBOARD_BASE_URL</pre>
         body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th><th>By</th><th>Action</th></tr>{trs}</table></div>"
 
         return page("Warnings", body, g)
+
+    @app.route("/dashboard/full-check")
+    def full_check_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        guild_obj = None
+        for bg in bot.guilds:
+            if int(bg.id) == int(g):
+                guild_obj = bg
+                break
+
+        if not guild_obj:
+            return page("Full Check", server_pill_html(g, bot) + "<div class='card'><h3>Bot is not connected to this guild.</h3></div>", g)
+
+        report = full_check.run_full_check(guild_obj)
+
+        check_rows = "".join(
+            f"<tr><td>{'✅' if c['ok'] else '❌'}</td><td>{esc(c['category'])}</td><td>{esc(c['name'])}</td><td><code>{esc(c['detail'])}</code></td></tr>"
+            for c in report["checks"]
+        )
+
+        fail_rows = "".join(
+            f"<tr><td>{esc(c['category'])}</td><td>{esc(c['name'])}</td><td><code>{esc(c['detail'])}</code></td></tr>"
+            for c in report["failed"]
+        ) or "<tr><td colspan='3'>✅ No core issues detected.</td></tr>"
+
+        color_class = "ok" if report["score"] >= 90 else "warn" if report["score"] >= 75 else "bad"
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>Score</div><div class='stat {color_class}'>{report['score']}/100</div></div>
+          <div class='card'><div class='muted'>Status</div><div class='stat {color_class}'>{esc(report['label'])}</div></div>
+          <div class='card'><div class='muted'>Passed</div><div class='stat'>{len(report['passed'])}/{len(report['checks'])}</div></div>
+          <div class='card'><div class='muted'>Logs Mapping</div><div class='stat'>{report['logs']['mapped']}/{report['logs']['total']}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Needs Fix</h3>
+          <table><tr><th>Category</th><th>Check</th><th>Details</th></tr>{fail_rows}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Database</h3>
+          <p>Path: <code>{esc(report['db']['path'])}</code></p>
+          <p>Size: <code>{esc(report['db']['size_text'])}</code></p>
+          <p>Persistent /data: <b>{'✅' if report['db']['persistent'] else '❌'}</b></p>
+        </div>
+
+        <div class='card'>
+          <h3>All Checks</h3>
+          <table><tr><th>Status</th><th>Category</th><th>Check</th><th>Details</th></tr>{check_rows}</table>
+        </div>
+        """
+        return page("Full Check", body, g)
+
+
 
     @app.route("/dashboard/commands")
     def commands_page():
