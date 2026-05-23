@@ -574,3 +574,4 @@ def setup(bot):
         e.add_field(name="Draw", value=f"{counts['draw']:,} ({draw_pct:.1f}%)", inline=True)
         e.add_field(name="القواعد", value="6-deck shoe, dealer hits soft 17, ties refund.", inline=False)
         await ctx.reply(embed=e)
+
