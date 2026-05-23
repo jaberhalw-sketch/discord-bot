@@ -126,6 +126,157 @@ def filter_manageable_to_bot_guilds(manageable, bot=None):
     return [g for g in manageable if str(g.get("id", "")).isdigit() and int(g["id"]) in ids]
 
 
+def discord_user_avatar(user, size=128):
+    try:
+        uid = str(user.get("id") or "")
+        avatar = user.get("avatar")
+        if uid and avatar:
+            ext = "gif" if str(avatar).startswith("a_") else "png"
+            return f"https://cdn.discordapp.com/avatars/{uid}/{avatar}.{ext}?size={int(size)}"
+    except Exception:
+        pass
+    return "https://cdn.discordapp.com/embed/avatars/0.png"
+
+
+def discord_guild_icon(g, size=128):
+    try:
+        gid = str(g.get("id") or "")
+        icon = g.get("icon")
+        if gid and icon:
+            ext = "gif" if str(icon).startswith("a_") else "png"
+            return f"https://cdn.discordapp.com/icons/{gid}/{icon}.{ext}?size={int(size)}"
+    except Exception:
+        pass
+    return ""
+
+
+def bot_guild_icon(bot=None, guild_id=0):
+    try:
+        gid_int = int(guild_id or 0)
+        if bot and getattr(bot, "guilds", None):
+            for g in bot.guilds:
+                if int(g.id) == gid_int and getattr(g, "icon", None):
+                    return g.icon.url
+    except Exception:
+        pass
+
+    for g in session.get("discord_guilds", []):
+        try:
+            if int(g.get("id", 0)) == int(guild_id or 0):
+                return discord_guild_icon(g)
+        except Exception:
+            pass
+
+    return ""
+
+
+def member_info(bot=None, guild_id=0, user_id=0):
+    """
+    Best-effort display info for dashboard tables:
+    name + avatar if member is cached in the bot guild.
+    """
+    uid = int(user_id or 0)
+    data = {
+        "id": uid,
+        "name": str(uid) if uid else "-",
+        "avatar": "https://cdn.discordapp.com/embed/avatars/0.png",
+        "mention": f"<@{uid}>" if uid else "-",
+    }
+
+    try:
+        gid_int = int(guild_id or 0)
+        if bot and getattr(bot, "guilds", None):
+            guild = None
+            for g in bot.guilds:
+                if int(g.id) == gid_int:
+                    guild = g
+                    break
+
+            if guild:
+                m = guild.get_member(uid)
+                if m:
+                    data["name"] = m.display_name
+                    data["avatar"] = m.display_avatar.url
+    except Exception:
+        pass
+
+    return data
+
+
+def user_chip(bot, guild_id, user_id, name_hint=""):
+    info = member_info(bot, guild_id, user_id)
+    name = info["name"]
+    if name == str(user_id) and name_hint:
+        name = str(name_hint)
+
+    return f"""
+    <div class='userline'>
+      <img class='avatar' src='{esc(info["avatar"])}'>
+      <div>
+        <b>{esc(name)}</b><br>
+        <a href='/dashboard/user?guild_id={int(guild_id)}&user_id={int(user_id or 0)}'><code>{int(user_id or 0)}</code></a>
+      </div>
+    </div>
+    """
+
+
+def refresh_session_manageable_guilds(bot=None, force=False):
+    """
+    Refresh Discord guild permissions so old sessions cannot keep dashboard access
+    after Administrator is removed.
+    """
+    token = session.get("discord_access_token")
+    if not token:
+        return
+
+    now = int(time.time())
+    last = int(session.get("guilds_refreshed_at") or 0)
+
+    if not force and now - last < 60:
+        return
+
+    try:
+        guilds = discord_api_get("/users/@me/guilds", token)
+        manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
+        session["discord_guilds"] = manageable
+        session["guilds_refreshed_at"] = now
+
+        current = session.get("guild_id")
+        allowed = {int(g["id"]) for g in manageable if str(g.get("id", "")).isdigit()}
+
+        if current and int(current) not in allowed:
+            session.pop("guild_id", None)
+
+        session.modified = True
+    except Exception:
+        pass
+
+
+def has_dashboard_access(bot=None, guild_id=0):
+    try:
+        gid_int = int(guild_id or 0)
+    except Exception:
+        return False
+
+    if not gid_int:
+        return False
+
+    allowed = {
+        int(g["id"])
+        for g in session.get("discord_guilds", [])
+        if str(g.get("id", "")).isdigit()
+    }
+
+    if gid_int not in allowed:
+        return False
+
+    ids = bot_guild_ids(bot)
+    if ids and gid_int not in ids:
+        return False
+
+    return True
+
+
 def dashboard_access_denied_html():
     denied = session.pop("access_denied_gid", 0)
     if not denied:
@@ -171,6 +322,8 @@ def require_login():
 
 
 def gid(bot=None):
+    refresh_session_manageable_guilds(bot)
+
     allowed = allowed_guild_ids()
 
     raw = (
@@ -185,20 +338,21 @@ def gid(bot=None):
     except Exception:
         selected = 0
 
-    if selected and selected in allowed:
+    if selected and selected in allowed and has_dashboard_access(bot, selected):
         session["guild_id"] = selected
         return selected
 
-    if selected and selected not in allowed:
+    if selected:
         session["access_denied_gid"] = selected
         session.pop("guild_id", None)
         return 0
 
-    if allowed:
-        first = sorted(allowed)[0]
-        session["guild_id"] = first
-        return first
+    for candidate in sorted(allowed):
+        if has_dashboard_access(bot, candidate):
+            session["guild_id"] = candidate
+            return candidate
 
+    session.pop("guild_id", None)
     return 0
 
 
@@ -208,45 +362,67 @@ def guild_selector_html(active_gid):
     if not guilds:
         return """
         <div class='card'>
-          <b>No manageable Discord servers found.</b><br>
-          You need Owner or Administrator permission, and the bot must be inside that server.
-          <br><br>
+          <h3 class='bad'>No accessible servers</h3>
+          <p>You need Owner or Administrator permission, and the bot must be inside that server.</p>
           <a class='btn' href='/logout'>Logout</a>
         </div>
         """
 
-    options = "".join(
-        f"<option value='{esc(g['id'])}' {'selected' if int(g['id']) == int(active_gid or 0) else ''}>{esc(g.get('name', 'Unknown'))}</option>"
-        for g in guilds
-        if str(g.get("id", "")).isdigit()
-    )
+    cards = ""
+    for g in guilds:
+        if not str(g.get("id", "")).isdigit():
+            continue
+
+        gid_raw = int(g["id"])
+        icon = discord_guild_icon(g)
+        icon_html = f"<img class='avatar-lg' src='{esc(icon)}'>" if icon else "<div class='avatar-lg' style='display:grid;place-items:center;font-size:28px'>🛡️</div>"
+        owner_badge = "Owner" if g.get("owner") else "Administrator"
+
+        cards += f"""
+        <a class='server-card' href='/dashboard?guild_id={gid_raw}'>
+          {icon_html}
+          <div style='min-width:0'>
+            <div style='font-size:18px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{esc(g.get('name','Unknown'))}</div>
+            <div class='muted'>{owner_badge} • <code>{gid_raw}</code></div>
+            <div style='margin-top:8px'><span class='pill'>Open Dashboard</span></div>
+          </div>
+        </a>
+        """
 
     return f"""
     <div class='card'>
-      <form method='get' action='/dashboard'>
-        <label>Server</label>
-        <select name='guild_id'>{options}</select>
-        <button>Open</button>
-        <a class='btn' href='/logout' style='background:#334155;margin-left:8px'>Logout</a>
-      </form>
+      <h3>Servers you can manage</h3>
+      <p class='muted'>Only servers where you are Owner/Administrator and the bot is inside are shown.</p>
+      <div class='server-grid'>{cards}</div>
+      <br>
+      <a class='btn' style='background:#334155' href='/logout'>Logout</a>
     </div>
     """
-
-
-
 
 def server_pill_html(active_gid, bot=None):
     if not active_gid:
         return ""
+
     name = bot_guild_name(bot, active_gid)
+    icon = bot_guild_icon(bot, active_gid)
+    icon_html = f"<img class='avatar' src='{esc(icon)}'>" if icon else "<div class='avatar' style='display:grid;place-items:center'>🛡️</div>"
+
     return f"""
-    <div style='display:flex;align-items:center;gap:10px;margin:-8px 0 18px;flex-wrap:wrap'>
-      <span class='muted'>Server</span>
-      <b>{esc(name)}</b>
-      <code>{esc(active_gid)}</code>
-      <a class='btn' style='background:#334155;padding:8px 11px;box-shadow:none' href='/dashboard'>Change</a>
+    <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:12px;margin:-8px 0 18px;flex-wrap:wrap'>
+      <div class='userline'>
+        {icon_html}
+        <div>
+          <div class='muted'>Current Server</div>
+          <b>{esc(name)}</b> <code>{esc(active_gid)}</code>
+        </div>
+      </div>
+      <div style='display:flex;gap:8px;flex-wrap:wrap'>
+        <a class='btn' style='background:#334155;box-shadow:none' href='/dashboard'>Switch Server</a>
+        <a class='btn' style='background:#334155;box-shadow:none' href='/dashboard/full-check?guild_id={int(active_gid)}'>Full Check</a>
+      </div>
     </div>
     """
+
 def create_app(bot=None):
     app = Flask(__name__)
     app.secret_key = DASHBOARD_SECRET_KEY
@@ -394,20 +570,33 @@ DASHBOARD_BASE_URL</pre>
 
         user = dashboard_user()
         g_name = bot_guild_name(bot, g)
-        body = guild_selector_html(g) + f"""
-        <div class='card'>
-          <div class='muted'>Logged in as</div>
-          <b>{esc(user.get('global_name') or user.get('username'))}</b>
-          <code>{esc(user.get('id'))}</code>
+        user_avatar = discord_user_avatar(user)
+        user_name = user.get('global_name') or user.get('username') or 'Dashboard User'
+
+        body = f"""
+        <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap'>
+          <div class='userline'>
+            <img class='avatar-lg' src='{esc(user_avatar)}'>
+            <div>
+              <div class='muted'>Logged in as</div>
+              <div style='font-size:24px;font-weight:950'>{esc(user_name)}</div>
+              <code>{esc(user.get('id'))}</code>
+            </div>
+          </div>
+          <div>
+            <a class='btn' href='/dashboard/money-tracker?guild_id={g}'>Open Money Tracker</a>
+            <a class='btn' style='background:#334155' href='/dashboard/security?guild_id={g}'>Security</a>
+          </div>
         </div>
+        """ + guild_selector_html(g) + f"""
 
         <div class='grid'>
-          <div class='card'><div class='muted'>Guild</div><div class='stat'>{esc(g_name)}</div><div class='muted'><code>{g}</code></div></div>
+          <div class='card kpi-info'><div class='muted'>Guild</div><div class='stat'>{esc(g_name)}</div><div class='muted'><code>{g}</code></div></div>
           <div class='card'><div class='muted'>Coin</div><div class='stat'>{esc(get_coin_name(g))}</div></div>
           <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(eco['c'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Total Money</div><div class='stat'>{int(eco['total'] or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Total Money</div><div class='stat'>{int(eco['total'] or 0):,}</div></div>
           <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(led['c'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Warnings</div><div class='stat'>{active:,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Warnings</div><div class='stat'>{active:,}</div></div>
         </div>
         """
         return page("Dashboard Overview", body, g)
@@ -649,10 +838,10 @@ DASHBOARD_BASE_URL</pre>
 
         conn = db()
         cur = conn.cursor()
-
         cur.execute(q, params)
         rows = cur.fetchall()
 
+        # Overall source summary.
         cur.execute("""SELECT source_type, COUNT(*) c,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
         COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
@@ -668,6 +857,41 @@ DASHBOARD_BASE_URL</pre>
         FROM money_ledger WHERE guild_id=?""", (g,))
         totals = cur.fetchone()
 
+        # User profile if searching a user.
+        profile = None
+        profile_sources = []
+        profile_recent = []
+        profile_balance = 0
+        if uid.isdigit():
+            user_id_int = int(uid)
+
+            cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, user_id_int))
+            balrow = cur.fetchone()
+            profile_balance = int(balrow["balance"] or 0) if balrow else 0
+
+            cur.execute("""SELECT
+            COUNT(*) rows,
+            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
+            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
+            COALESCE(SUM(amount),0) net,
+            COALESCE(MAX(created_at),0) last_tx
+            FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, user_id_int))
+            profile = cur.fetchone()
+
+            cur.execute("""SELECT source_type, COUNT(*) rows,
+            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
+            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
+            COALESCE(SUM(amount),0) net
+            FROM money_ledger
+            WHERE guild_id=? AND user_id=?
+            GROUP BY source_type ORDER BY rows DESC LIMIT 20""", (g, user_id_int))
+            profile_sources = cur.fetchall()
+
+            cur.execute("""SELECT * FROM money_ledger
+            WHERE guild_id=? AND user_id=?
+            ORDER BY id DESC LIMIT 50""", (g, user_id_int))
+            profile_recent = cur.fetchall()
+
         cur.execute("""SELECT user_id,
         COALESCE(SUM(amount),0) net,
         COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
@@ -676,6 +900,15 @@ DASHBOARD_BASE_URL</pre>
         FROM money_ledger WHERE guild_id=?
         GROUP BY user_id ORDER BY received DESC LIMIT 10""", (g,))
         top_received = cur.fetchall()
+
+        cur.execute("""SELECT user_id,
+        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
+        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
+        COALESCE(SUM(amount),0) net,
+        COUNT(*) rows
+        FROM money_ledger WHERE guild_id=?
+        GROUP BY user_id ORDER BY spent DESC LIMIT 10""", (g,))
+        top_spent = cur.fetchall()
 
         cur.execute("""SELECT actor_id, actor_name, COUNT(*) c,
         COALESCE(SUM(ABS(amount)),0) volume
@@ -696,22 +929,28 @@ DASHBOARD_BASE_URL</pre>
         )
 
         received_trs = "".join(
-            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['received']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
+            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['received']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
             for r in top_received
         )
 
+        spent_trs = "".join(
+            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['spent']):,}</td><td>{int(r['received']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            for r in top_spent
+        )
+
         actor_trs = "".join(
-            f"<tr><td><code>{r['actor_id']}</code></td><td>{esc(r['actor_name'])}</td><td>{int(r['volume']):,}</td><td>{int(r['c']):,}</td></tr>"
+            f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['volume']):,}</td><td>{int(r['c']):,}</td></tr>"
             for r in top_actors
         )
 
         trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td><code>{r['actor_id']}</code></td></tr>"
+            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{user_chip(bot,g,r['user_id'],r['user_name'])}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name']) if int(r['actor_id'] or 0) else '-'}</td></tr>"
             for r in rows
         )
 
         form = f"""
         <div class='card'>
+          <h3>Search / Filter Money Ledger</h3>
           <form>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(uid)}'>
@@ -732,17 +971,63 @@ DASHBOARD_BASE_URL</pre>
         """
 
         body = server_pill_html(g, bot) + form
+
+        if profile and uid.isdigit():
+            info = member_info(bot, g, int(uid))
+            profile_source_trs = "".join(
+                f"<tr><td>{esc(r['source_type'])}</td><td>{int(r['rows']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['lost']):,}</td><td>{int(r['net']):,}</td></tr>"
+                for r in profile_sources
+            ) or "<tr><td colspan='5'>No data.</td></tr>"
+
+            profile_recent_trs = "".join(
+                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
+                for r in profile_recent
+            ) or "<tr><td colspan='6'>No data.</td></tr>"
+
+            body += f"""
+            <div class='card' style='display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap'>
+              <div class='userline'>
+                <img class='avatar-lg' src='{esc(info["avatar"])}'>
+                <div>
+                  <div class='muted'>Money Profile</div>
+                  <div style='font-size:25px;font-weight:950'>{esc(info["name"])}</div>
+                  <code>{int(uid)}</code>
+                </div>
+              </div>
+              <a class='btn' href='/dashboard/user?guild_id={g}&user_id={int(uid)}'>Open Full User Lookup</a>
+            </div>
+
+            <div class='grid'>
+              <div class='card kpi-info'><div class='muted'>Current Balance</div><div class='stat'>{profile_balance:,}</div></div>
+              <div class='card kpi-good'><div class='muted'>Total Gained</div><div class='stat'>{int(profile['gained'] or 0):,}</div></div>
+              <div class='card kpi-bad'><div class='muted'>Total Lost / Spent</div><div class='stat'>{int(profile['lost'] or 0):,}</div></div>
+              <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(profile['net'] or 0):,}</div></div>
+              <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(profile['rows'] or 0):,}</div></div>
+            </div>
+
+            <div class='card'>
+              <h3>Sources for this user</h3>
+              <table><tr><th>Source</th><th>Rows</th><th>Gained</th><th>Lost</th><th>Net</th></tr>{profile_source_trs}</table>
+            </div>
+
+            <div class='card'>
+              <h3>Recent transactions for this user</h3>
+              <table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{profile_recent_trs}</table>
+            </div>
+            """
+
         body += f"""
         <div class='grid'>
           <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(totals['rows'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Money In</div><div class='stat'>{int(totals['money_in'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Money Out</div><div class='stat'>{int(totals['money_out'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Net</div><div class='stat'>{int(totals['net'] or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Money In</div><div class='stat'>{int(totals['money_in'] or 0):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Money Out</div><div class='stat'>{int(totals['money_out'] or 0):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(totals['net'] or 0):,}</div></div>
         </div>
         """
         body += f"<div class='card'><h3>Quick Source Filters</h3>{chips}</div>"
         body += f"<div class='card'><h3>Source Summary</h3><table><tr><th>Source</th><th>Rows</th><th>In</th><th>Out</th><th>Net</th></tr>{source_trs}</table></div>"
-        body += f"<div class='grid'><div class='card'><h3>Top Received</h3><table><tr><th>User</th><th>In</th><th>Out</th><th>Net</th><th>Rows</th><th></th></tr>{received_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Name</th><th>Volume</th><th>Rows</th></tr>{actor_trs}</table></div></div>"
+        body += f"<div class='grid'><div class='card'><h3>Top Received</h3><table><tr><th>User</th><th>In</th><th>Out</th><th>Net</th><th>Rows</th></tr>{received_trs}</table></div><div class='card'><h3>Top Spent / Lost</h3><table><tr><th>User</th><th>Spent</th><th>Received</th><th>Net</th><th>Rows</th></tr>{spent_trs}</table></div></div>"
+        body += f"<div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Volume</th><th>Rows</th></tr>{actor_trs}</table></div>"
         body += f"<div class='card'><h3>Ledger Rows</h3><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th><th>Actor</th></tr>{trs}</table></div>"
         return page("Money Tracker", body, g)
 
