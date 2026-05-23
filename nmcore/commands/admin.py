@@ -1,10 +1,10 @@
-import os
 import discord
-from nmcore.config import DB_FILE
+from nmcore.config import DASHBOARD_BASE_URL, DB_FILE
 from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
 from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
-from nmcore.services.diagnostics import system_status, memory_status, log_mapping_status
+from nmcore.services.diagnostics import system_status
+from nmcore.services import antiraid, memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
 
 
@@ -99,7 +99,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!تجهيز_اللوقات` `!حالة_الحماية` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -136,7 +136,7 @@ def setup(bot):
 
     @bot.command(name="داشبورد", aliases=["dashboard", "لوحة"])
     async def dashboard_link(ctx):
-        base = (os.getenv("DASHBOARD_BASE_URL", "") or "").rstrip("/")
+        base = (DASHBOARD_BASE_URL or "").rstrip("/")
         if not base:
             await ctx.reply(embed=error("رابط الداشبورد غير مضبوط", "تأكد من متغير DASHBOARD_BASE_URL في Railway.", ctx.author))
             return
@@ -172,7 +172,7 @@ def setup(bot):
         checks.append(f"{yes_no(perms.get('manage_messages'))} Manage Messages")
         checks.append(f"{yes_no(perms.get('embed_links'))} Embed Links")
 
-        base = (os.getenv("DASHBOARD_BASE_URL", "") or "").rstrip("/")
+        base = (DASHBOARD_BASE_URL or "").rstrip("/")
         dash_link = f"{base}/dashboard/settings?guild_id={ctx.guild.id}" if base else "DASHBOARD_BASE_URL not set"
 
         e = embed(
@@ -184,6 +184,39 @@ def setup(bot):
         e.add_field(name="Dashboard Settings", value=dash_link, inline=False)
         e.add_field(name="DB", value=f"`{mem['db_file']}`\nSize: `{mem['db_size_text']}`", inline=False)
 
+        await ctx.reply(embed=e)
+
+
+
+    @bot.command(name="حالة_الحماية", aliases=["protection_status", "antiraid_status"])
+    async def protection_status(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+
+        ar = antiraid.get_settings(ctx.guild.id)
+        summary = antiraid.settings_summary(ctx.guild.id)
+
+        lines = [
+            f"{yes_no(ar.get('enabled'))} Anti-Raid Enabled",
+            f"{yes_no(ar.get('anti_kick'))} Anti Kick",
+            f"{yes_no(ar.get('anti_ban'))} Anti Ban",
+            f"{yes_no(ar.get('anti_role_delete'))} Anti Role Delete",
+            f"{yes_no(ar.get('anti_role_update'))} Anti Role Edit",
+            f"{yes_no(ar.get('dangerous_role_protection'))} Dangerous Role Permissions",
+            f"{yes_no(ar.get('anti_member_role_update'))} Anti Member Role Edit",
+            f"{yes_no(ar.get('anti_channel_create'))} Anti Channel Create",
+            f"{yes_no(ar.get('anti_channel_delete'))} Anti Channel Delete",
+            f"{yes_no(ar.get('anti_channel_update'))} Anti Channel Edit",
+            f"{yes_no(ar.get('anti_webhook_create'))} Anti Webhook Create",
+            f"{yes_no(ar.get('anti_webhook_update'))} Anti Webhook Update",
+            f"{yes_no(ar.get('anti_webhook_delete'))} Anti Webhook Delete",
+            f"{yes_no(ar.get('anti_bot_add'))} Anti Bot Add",
+        ]
+
+        e = embed("🛡️ حالة الحماية / Anti-Raid", "\n".join(lines), "info", ctx.author)
+        e.add_field(name="Threshold", value=f"{summary['threshold']} actions / {summary['window']}s", inline=True)
+        e.add_field(name="Punish", value=str(summary["punish_action"]), inline=True)
         await ctx.reply(embed=e)
 
 
