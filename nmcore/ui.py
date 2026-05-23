@@ -20,6 +20,14 @@ def embed(title, desc="", color="info", member=None):
     e.set_footer(text=f"{BOT_BRAND} • V9 Unified")
     return e
 
+def success(title, desc="", member=None):
+    return embed(title, desc, "ok", member)
+
+
+def error(title, desc="", member=None):
+    return embed(title, desc, "bad", member)
+
+
 def page(title, body, guild_id=0):
     q=f"?guild_id={int(guild_id)}" if guild_id else ""
     nav=[
