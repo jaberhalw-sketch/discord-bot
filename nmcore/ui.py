@@ -35,7 +35,7 @@ def page(title, body, guild_id=0):
         ("🎰 Casino",f"/dashboard/casino{q}"),("📊 Levels",f"/dashboard/levels{q}"),("🏘️ Real Estate",f"/dashboard/real-estate{q}"),
         ("⚠️ Warnings",f"/dashboard/warnings{q}"),("🛡️ Protection",f"/dashboard/protection{q}"),("🧨 Security",f"/dashboard/security{q}"),("📜 Logs",f"/dashboard/logs{q}"),
         ("🎁 Giveaways",f"/dashboard/giveaways{q}"),("🛒 Shop",f"/dashboard/shop{q}"),("🟢 Live",f"/dashboard/live{q}"),
-        ("👤 User Lookup",f"/dashboard/user{q}"),("📘 Command Center",f"/dashboard/commands{q}"),("🧩 Setup",f"/dashboard/setup{q}"),("⚙️ Settings",f"/dashboard/settings{q}"),("🩺 Health",f"/dashboard/health{q}")
+        ("👤 User Lookup",f"/dashboard/user{q}"),("📘 Command Center",f"/dashboard/commands{q}"),("🧪 Full Check",f"/dashboard/full-check{q}"),("🧩 Setup",f"/dashboard/setup{q}"),("⚙️ Settings",f"/dashboard/settings{q}"),("🩺 Health",f"/dashboard/health{q}")
     ]
     links="".join(f"<a href='{h}'>{escape(t)}</a>" for t,h in nav)
     return f"""<!doctype html><html><head><meta charset="utf-8"><title>{escape(title)}</title>
