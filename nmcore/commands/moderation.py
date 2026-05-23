@@ -80,6 +80,58 @@ def setup(bot):
 
         await ctx.reply(embed=e)
 
+
+    @bot.command(name="مسح_تحذير")
+    @commands.has_permissions(manage_messages=True)
+    async def clear_one_warning(ctx, warning_id:int, *, reason="cleared single warning"):
+        from nmcore.db import db
+
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT * FROM warnings WHERE guild_id=? AND id=?",
+            (ctx.guild.id, int(warning_id))
+        )
+        row = cur.fetchone()
+
+        if not row:
+            conn.close()
+            await ctx.reply(embed=error("غير موجود", f"ما لقيت تحذير رقم `{warning_id}`.", ctx.author))
+            return
+
+        if str(row["status"]) != "active":
+            conn.close()
+            await ctx.reply(embed=embed("⚠️ التحذير ممسوح من قبل", f"Warning ID: `{warning_id}`", "warn", ctx.author))
+            return
+
+        cur.execute(
+            "UPDATE warnings SET status='cleared', cleared_by_id=?, cleared_by_name=?, cleared_reason=?, cleared_at=strftime('%s','now') WHERE guild_id=? AND id=?",
+            (ctx.author.id, ctx.author.display_name, reason, ctx.guild.id, int(warning_id))
+        )
+        conn.commit()
+        conn.close()
+
+        log_event(
+            ctx.guild.id,
+            "warning_cleared_single",
+            int(row["user_id"]),
+            str(row["user_name"]),
+            ctx.channel.id,
+            ctx.channel.name,
+            "Single warning cleared",
+            f"WarningID={warning_id}, By={ctx.author.id}, Reason={reason}"
+        )
+
+        await ctx.reply(embed=success("تم مسح التحذير", f"تم مسح التحذير رقم `{warning_id}` مع حفظه في التاريخ.", ctx.author))
+
+        await send_mod_log(
+            ctx,
+            "✅ Single Warning Cleared",
+            f"Warning ID: `{warning_id}`\nUser ID: `{row['user_id']}`\nBy: {ctx.author.mention} (`{ctx.author.id}`)\nReason: {reason}",
+            "ok"
+        )
+
+
     @bot.command(name="مسح_تحذيرات")
     @commands.has_permissions(manage_messages=True)
     async def clear(ctx, member:discord.Member, *, reason="cleared"):
