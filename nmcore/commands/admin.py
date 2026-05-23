@@ -1,7 +1,7 @@
 import os
 import discord
 from nmcore.config import DB_FILE
-from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel
+from nmcore.services.settings import set_system_enabled, all_toggles, set_coin_name, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
 from nmcore.services.activity import log_event
 from nmcore.services.log_channels import LOG_CHANNELS, set_log_channel, get_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
@@ -9,6 +9,7 @@ from nmcore.services import antiraid
 from nmcore.services import security
 from nmcore.services import readiness
 from nmcore.services import reports
+from nmcore.services import guides
 from nmcore.services import full_check
 from nmcore.services.diagnostics import memory_status, log_mapping_status
 from nmcore.ui import embed, success, error
@@ -105,7 +106,7 @@ def setup(bot):
 
 **⚙️ Admin**
 `!قفل economy` `!فتح economy` `!اعداد_عملة NAME`
-`!تجهيز_اللوقات` `!تقرير_الأرباح` `!تقرير_المشتريات` `!فحص_كامل` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
+`!فتح_البوت` `!قفل_التطوير on/off` `!ارسال_الشروحات` `!تجهيز_اللوقات` `!تقرير_الأرباح` `!تقرير_المشتريات` `!فحص_كامل` `!تقرير_النظام` `!تقرير_الاقتصاد` `!تقرير_الكازينو` `!تقرير_الحماية` `!جاهزية_البوت` `!حالة_الحماية` `!تقرير_الأمان` `!حالة_الإعداد` `!حالة_النظام` `!فحص_الصلاحيات` `!اختبار_اللوقات` `!داشبورد`
 """
         await ctx.reply(embed=embed("📘 NM System Command Center", text, "purple", ctx.author))
 
@@ -456,6 +457,50 @@ def setup(bot):
         e.add_field(name="Threshold", value=f"{summary['threshold']} actions / {summary['window']}s", inline=True)
         e.add_field(name="Punish", value=str(summary["punish_action"]), inline=True)
         await ctx.reply(embed=e)
+
+
+
+    @bot.command(name="فتح_البوت", aliases=["open_bot"])
+    async def open_bot(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+        set_dev_mode_enabled(ctx.guild.id, False)
+        await ctx.reply(embed=success("تم فتح البوت للجميع", "الأوامر الآن شغالة لكل الأعضاء حسب صلاحيات الرومات والأنظمة.", ctx.author))
+
+    @bot.command(name="قفل_التطوير", aliases=["dev_mode"])
+    async def dev_mode_cmd(ctx, mode:str="on"):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+        enabled = str(mode).lower() not in {"0", "off", "false", "no", "فتح", "open"}
+        set_dev_mode_enabled(ctx.guild.id, enabled)
+        await ctx.reply(embed=embed("🚧 Dev Mode", f"Dev Mode is now: **{'ON' if enabled else 'OFF'}**", "warn" if enabled else "ok", ctx.author))
+
+    @bot.command(name="شرح_الاقتصاد")
+    async def economy_guide_cmd(ctx):
+        await ctx.reply(embed=guides.economy_guide_embed(ctx.guild.id))
+
+    @bot.command(name="شرح_القمار")
+    async def gambling_guide_cmd(ctx):
+        await ctx.reply(embed=guides.gambling_guide_embed(ctx.guild.id))
+
+    @bot.command(name="شرح_البوت")
+    async def bot_guide_cmd(ctx):
+        await ctx.reply(embed=embed(
+            "📘 شرح NM System",
+            "استخدم `!شرح_الاقتصاد` لأوامر الاقتصاد والعقارات.\nاستخدم `!شرح_القمار` لأوامر القمار.\nاستخدم `!مساعدة` لعرض الأوامر العامة.",
+            "info",
+            ctx.author
+        ))
+
+    @bot.command(name="ارسال_الشروحات")
+    async def send_guides_cmd(ctx):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=error("صلاحية مرفوضة", "تحتاج صلاحية Administrator.", ctx.author))
+            return
+        sent = await guides.send_all_due_guides(ctx.bot, force=True)
+        await ctx.reply(embed=success("تم إرسال الشروحات", f"عدد الرسائل المرسلة: **{sent}**", ctx.author))
 
 
     @bot.command(name="تجهيز_اللوقات", aliases=["setup_logs", "لوقات"])
