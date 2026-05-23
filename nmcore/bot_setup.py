@@ -505,3 +505,4 @@ def setup_bot(bot):
 
         log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
         await send_log(bot, member.guild, "voice", title, details, "info", member)
+
