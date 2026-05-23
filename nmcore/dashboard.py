@@ -2775,7 +2775,7 @@ DASHBOARD_BASE_URL</pre>
                             guild_obj = bg
                             break
                     if guild_obj:
-                        boost_rewards.sync_guild(guild_obj)
+                        boost_rewards.sync_guild_boosters(guild_obj)
                 except Exception:
                     pass
                 return redirect(f"/dashboard/boosts?guild_id={g}")
@@ -2787,7 +2787,7 @@ DASHBOARD_BASE_URL</pre>
                     guild_obj = bg
                     break
             if guild_obj:
-                boost_rewards.sync_guild(guild_obj)
+                boost_rewards.sync_guild_boosters(guild_obj)
         except Exception:
             pass
 
@@ -2828,9 +2828,9 @@ DASHBOARD_BASE_URL</pre>
           <form method=post style='margin-top:12px'>
             <input type=hidden name=guild_id value='{g}'>
             <input type=hidden name=action value='sync_boosters'>
-            <button style='background:#334155'>Sync Active Boosters</button>
+            <button style='background:#334155'>Sync Active Boosters From Discord</button>
           </form>
-          <p class='muted'>Boost count starts from messages detected after installing the system. Active boosters are synced from Discord cache.</p>
+          <p class='muted'>Active boosters are synced from Discord Server Boost data/member premium_since. Exact historical boost counts start from boost messages detected after installing tracking.</p>
         </div>
         <div class='card'><h3>Boosters</h3><table><tr><th>User</th><th>Status</th><th>Boost Count</th><th>Rewards</th><th>First</th><th>Last</th></tr>{booster_rows}</table></div>
         <div class='card'><h3>Recent Boost Events</h3><table><tr><th>ID</th><th>User</th><th>Reward</th><th>TX</th><th>Message</th><th>Type</th></tr>{recent_rows}</table></div>
