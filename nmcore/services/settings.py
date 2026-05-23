@@ -40,6 +40,16 @@ def ensure_guild(guild_id:int, guild_name:str=""):
         cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_channel_id INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_category_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_delete_empty_minutes INTEGER DEFAULT 10")
+    except Exception:
+        pass
     for k,v in SYSTEM_DEFAULTS.items():
         cur.execute("""INSERT OR IGNORE INTO system_toggles (guild_id,system_key,enabled,updated_at)
         VALUES (?,?,?,?)""", (gid,k,1 if v else 0,now))
@@ -93,7 +103,7 @@ def get_guild_settings(guild_id:int)->dict:
     return dict(row) if row else {}
 
 def update_channel(guild_id:int, key:str, value:int):
-    if key not in {"commands_channel_id","gambling_channel_id","logs_channel_id","lfg_channel_id"}:
+    if key not in {"commands_channel_id","gambling_channel_id","logs_channel_id","lfg_channel_id","lfg_category_id","lfg_delete_empty_minutes"}:
         return
     ensure_guild(guild_id)
     conn=db(); cur=conn.cursor()
@@ -149,6 +159,16 @@ def set_dev_mode_enabled(guild_id:int, enabled:bool):
         cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_channel_id INTEGER DEFAULT 0")
     except Exception:
         pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_category_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    try:
+        cur.execute("ALTER TABLE guild_settings ADD COLUMN lfg_delete_empty_minutes INTEGER DEFAULT 10")
+    except Exception:
+        pass
     cur.execute("UPDATE guild_settings SET dev_mode_enabled=?, updated_at=? WHERE guild_id=?", (1 if enabled else 0,int(time.time()),int(guild_id)))
     conn.commit(); conn.close()
 
@@ -160,3 +180,21 @@ def get_lfg_channel_id(guild_id:int)->int:
 
 def set_lfg_channel_id(guild_id:int, channel_id:int):
     update_channel(guild_id, "lfg_channel_id", int(channel_id or 0))
+
+
+def get_lfg_settings(guild_id:int)->dict:
+    ensure_guild(guild_id)
+    gs = get_guild_settings(guild_id)
+    return {
+        "lfg_channel_id": int(gs.get("lfg_channel_id") or 0),
+        "lfg_category_id": int(gs.get("lfg_category_id") or 0),
+        "lfg_delete_empty_minutes": int(gs.get("lfg_delete_empty_minutes") or 10),
+    }
+
+def update_lfg_settings(guild_id:int, *, channel_id=None, category_id=None, delete_empty_minutes=None):
+    if channel_id is not None:
+        update_channel(guild_id, "lfg_channel_id", int(channel_id or 0))
+    if category_id is not None:
+        update_channel(guild_id, "lfg_category_id", int(category_id or 0))
+    if delete_empty_minutes is not None:
+        update_channel(guild_id, "lfg_delete_empty_minutes", max(0, int(delete_empty_minutes or 0)))
