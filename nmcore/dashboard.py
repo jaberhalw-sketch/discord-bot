@@ -1,3192 +1,735 @@
-import os, time, html, json, urllib.parse, urllib.request, urllib.error
-from flask import Flask, request, redirect, session
-from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
-from nmcore.db import db, init_db
-from nmcore.ui import page
-from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
-from nmcore.services import real_estate
-from nmcore.services import economy as economy_service
+import os
+import asyncio
+import discord
+from discord.ext import commands
+from nmcore.services.settings import ensure_guild, command_system, is_system_enabled, channel_restriction_for_system, is_dev_mode_enabled
+from nmcore.services.levels import message_xp, add_voice_xp, voice_xp_interval
+from nmcore.services.protection import get_settings, check_message, is_ignored_channel, is_whitelisted_member
+from nmcore.services.activity import log_event
+from nmcore.services import warnings as warnsvc
+from nmcore.services.log_channels import get_log_channel
 from nmcore.services import antiraid
-from nmcore.services import security
-from nmcore.services import full_check
-from nmcore.services import reports
-from nmcore.services import post_rewards
+from nmcore.services import guides
+from nmcore.config import LEVEL_COOLDOWN_SECONDS
+from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways, lfg, game_roles
+from nmcore.ui import embed
 from nmcore.services import boost_rewards
-from nmcore.services import shop as shop_service
-from nmcore.services import giveaways as giveaway_service
-from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
-from nmcore.services.diagnostics import system_status
-from nmcore.services.warnings import summary as warn_summary
-from nmcore.services.protection import get_settings as prot_get, update_settings as prot_update, get_default_bad_words, matched_bad_word, contains_bad, has_link, check_message
-from nmcore.services.activity import log_event, record
-
-DISCORD_API = "https://discord.com/api/v10"
-ADMINISTRATOR_BIT = 0x8
+from nmcore.services import post_rewards
 
 
-def esc(x):
-    return html.escape(str(x or ""))
+DEFAULT_DEV_OWNER_IDS = {"881722045031915521"}
 
 
-def oauth_config():
-    return {
-        "client_id": os.getenv("DISCORD_CLIENT_ID", "").strip(),
-        "client_secret": os.getenv("DISCORD_CLIENT_SECRET", "").strip(),
-        "base_url": os.getenv("DASHBOARD_BASE_URL", "").rstrip("/"),
-    }
+def dev_mode_enabled() -> bool:
+    return os.getenv("NM_DEV_MODE", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 
-def redirect_uri():
-    cfg = oauth_config()
-    return f"{cfg['base_url']}/auth/discord/callback"
+def dev_owner_ids() -> set[int]:
+    raw = os.getenv("NM_OWNER_IDS", "").strip()
+    parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()] if raw else []
+    ids = set()
 
+    for p in parts:
+        if p.isdigit():
+            ids.add(int(p))
 
-def oauth_ready():
-    cfg = oauth_config()
-    return bool(cfg["client_id"] and cfg["client_secret"] and cfg["base_url"])
-
-
-def discord_api_get(path, token):
-    req = urllib.request.Request(
-        DISCORD_API + path,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "NM-System-V9-Dashboard"
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def exchange_code_for_token(code):
-    cfg = oauth_config()
-    data = urllib.parse.urlencode({
-        "client_id": cfg["client_id"],
-        "client_secret": cfg["client_secret"],
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri(),
-    }).encode("utf-8")
-
-    req = urllib.request.Request(
-        DISCORD_API + "/oauth2/token",
-        data=data,
-        method="POST",
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "NM-System-V9-Dashboard"
-        }
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def is_admin_guild(g):
-    try:
-        if bool(g.get("owner")):
-            return True
-        perms = int(g.get("permissions") or 0)
-        return bool(perms & ADMINISTRATOR_BIT)
-    except Exception:
-        return False
-
-
-def bot_guild_ids(bot=None):
-    try:
-        if bot and getattr(bot, "guilds", None):
-            return {int(g.id) for g in bot.guilds}
-    except Exception:
-        pass
-    return set()
-
-
-def bot_guild_name(bot=None, guild_id=0):
-    try:
-        gid_int = int(guild_id or 0)
-        if bot and getattr(bot, "guilds", None):
-            for g in bot.guilds:
-                if int(g.id) == gid_int:
-                    return g.name
-    except Exception:
-        pass
-
-    for g in session.get("discord_guilds", []):
-        try:
-            if int(g.get("id", 0)) == int(guild_id or 0):
-                return g.get("name") or str(guild_id)
-        except Exception:
-            pass
-
-    return str(guild_id or "")
-
-
-def filter_manageable_to_bot_guilds(manageable, bot=None):
-    ids = bot_guild_ids(bot)
     if not ids:
-        return manageable
-    return [g for g in manageable if str(g.get("id", "")).isdigit() and int(g["id"]) in ids]
+        ids = {int(x) for x in DEFAULT_DEV_OWNER_IDS if x.isdigit()}
+
+    return ids
 
 
-def discord_user_avatar(user, size=128):
+def is_dev_owner(user_id:int) -> bool:
+    return int(user_id or 0) in dev_owner_ids()
+
+
+def fmt_dt(dt):
     try:
-        uid = str(user.get("id") or "")
-        avatar = user.get("avatar")
-        if uid and avatar:
-            ext = "gif" if str(avatar).startswith("a_") else "png"
-            return f"https://cdn.discordapp.com/avatars/{uid}/{avatar}.{ext}?size={int(size)}"
+        return f"<t:{int(dt.timestamp())}:F> (<t:{int(dt.timestamp())}:R>)"
     except Exception:
-        pass
-    return "https://cdn.discordapp.com/embed/avatars/0.png"
+        return "Unknown"
 
 
-def discord_guild_icon(g, size=128):
+def role_list(member):
     try:
-        gid = str(g.get("id") or "")
-        icon = g.get("icon")
-        if gid and icon:
-            ext = "gif" if str(icon).startswith("a_") else "png"
-            return f"https://cdn.discordapp.com/icons/{gid}/{icon}.{ext}?size={int(size)}"
+        roles = [r.mention for r in member.roles if r.name != "@everyone"]
+        return "\n".join(roles[:30]) if roles else "No roles"
     except Exception:
-        pass
-    return ""
+        return "Unknown"
 
 
-def bot_guild_icon(bot=None, guild_id=0):
+async def send_log(bot, guild, log_key, title, description="", color="info", member=None):
     try:
-        gid_int = int(guild_id or 0)
-        if bot and getattr(bot, "guilds", None):
-            for g in bot.guilds:
-                if int(g.id) == gid_int and getattr(g, "icon", None):
-                    return g.icon.url
-    except Exception:
-        pass
+        ch_id = get_log_channel(guild.id, log_key)
+        if not ch_id:
+            return
 
-    for g in session.get("discord_guilds", []):
-        try:
-            if int(g.get("id", 0)) == int(guild_id or 0):
-                return discord_guild_icon(g)
-        except Exception:
-            pass
+        ch = guild.get_channel(int(ch_id))
+        if not ch:
+            return
 
-    return ""
-
-
-def member_info(bot=None, guild_id=0, user_id=0):
-    """
-    Best-effort display info for dashboard tables:
-    name + avatar if member is cached in the bot guild.
-    """
-    uid = int(user_id or 0)
-    data = {
-        "id": uid,
-        "name": str(uid) if uid else "-",
-        "avatar": "https://cdn.discordapp.com/embed/avatars/0.png",
-        "mention": f"<@{uid}>" if uid else "-",
-    }
-
-    try:
-        gid_int = int(guild_id or 0)
-        if bot and getattr(bot, "guilds", None):
-            guild = None
-            for g in bot.guilds:
-                if int(g.id) == gid_int:
-                    guild = g
-                    break
-
-            if guild:
-                m = guild.get_member(uid)
-                if m:
-                    data["name"] = m.display_name
-                    data["avatar"] = m.display_avatar.url
-    except Exception:
-        pass
-
-    return data
-
-
-def user_chip(bot, guild_id, user_id, name_hint=""):
-    uid = int(user_id or 0)
-    if not uid:
-        return "<span class='muted'>System</span>"
-
-    info = member_info(bot, guild_id, uid)
-    name = info["name"]
-
-    if name == str(uid) and name_hint:
-        name = str(name_hint)
-
-    return f"""
-    <div class='userline'>
-      <img class='avatar' src='{esc(info["avatar"])}'>
-      <div style='min-width:0'>
-        <b style='white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;max-width:210px'>{esc(name)}</b>
-        <a href='/dashboard/user?guild_id={int(guild_id)}&user_id={uid}'><code>{uid}</code></a>
-      </div>
-    </div>
-    """
-
-
-def status_badge(text):
-    val = str(text or "").lower()
-    cls = "ok" if val in {"active", "ok", "win", "enabled"} else "warn" if val in {"cleared", "draw", "pending"} else "bad" if val in {"lose", "disabled", "bad"} else "info"
-    return f"<span class='pill {cls}'>{esc(text)}</span>"
-
-
-def refresh_session_manageable_guilds(bot=None, force=False):
-    """
-    Refresh Discord guild permissions so old sessions cannot keep dashboard access
-    after Administrator is removed.
-    """
-    token = session.get("discord_access_token")
-    if not token:
-        return
-
-    now = int(time.time())
-    last = int(session.get("guilds_refreshed_at") or 0)
-
-    if not force and now - last < 60:
-        return
-
-    try:
-        guilds = discord_api_get("/users/@me/guilds", token)
-        manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
-        session["discord_guilds"] = manageable
-        session["guilds_refreshed_at"] = now
-
-        current = session.get("guild_id")
-        allowed = {int(g["id"]) for g in manageable if str(g.get("id", "")).isdigit()}
-
-        if current and int(current) not in allowed:
-            session.pop("guild_id", None)
-
-        session.modified = True
+        await ch.send(embed=embed(title, description, color, member))
     except Exception:
         pass
 
 
-def has_dashboard_access(bot=None, guild_id=0):
+async def audit_reason(guild, action, target_id):
     try:
-        gid_int = int(guild_id or 0)
+        async for entry in guild.audit_logs(limit=8, action=action):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(target_id):
+                return entry.user, entry.reason or "No reason"
     except Exception:
-        return False
-
-    if not gid_int:
-        return False
-
-    allowed = {
-        int(g["id"])
-        for g in session.get("discord_guilds", [])
-        if str(g.get("id", "")).isdigit()
-    }
-
-    if gid_int not in allowed:
-        return False
-
-    ids = bot_guild_ids(bot)
-    if ids and gid_int not in ids:
-        return False
-
-    return True
+        pass
+    return None, "Unknown / No audit permission"
 
 
-def dashboard_access_denied_html():
-    denied = session.pop("access_denied_gid", 0)
-    if not denied:
-        return ""
-    return f"""
-    <div class='card'>
-      <h3 class='bad'>Dashboard access denied</h3>
-      <p>You cannot open this server dashboard.</p>
-      <p class='muted'>Reason: the bot is not in this guild, or you do not have Owner/Administrator permission.</p>
-      <p>Requested Guild ID: <code>{esc(denied)}</code></p>
-    </div>
-    """
-
-
-def dashboard_user():
-    return session.get("discord_user") or {}
-
-
-def dashboard_actor():
-    u = dashboard_user()
+async def detect_leave_type(member):
+    # Ban check first
     try:
-        actor_id = int(u.get("id") or 0)
+        async for entry in member.guild.audit_logs(limit=8, action=discord.AuditLogAction.ban):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(member.id):
+                return "ban", entry.user, entry.reason or "No reason"
     except Exception:
-        actor_id = 0
-    actor_name = u.get("global_name") or u.get("username") or "Dashboard"
-    return actor_id, actor_name
+        pass
+
+    # Kick check
+    try:
+        async for entry in member.guild.audit_logs(limit=8, action=discord.AuditLogAction.kick):
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(member.id):
+                return "kick", entry.user, entry.reason or "No reason"
+    except Exception:
+        pass
+
+    return "left", None, "Left by themselves"
 
 
-def allowed_guild_ids():
-    return {
-        int(g["id"])
-        for g in session.get("discord_guilds", [])
-        if str(g.get("id", "")).isdigit()
-    }
 
-
-def require_login():
-    if session.get("discord_user") and session.get("discord_access_token"):
+async def get_latest_audit(guild, action, target_id=None):
+    try:
+        async for entry in guild.audit_logs(limit=6, action=action):
+            if target_id is None:
+                return entry
+            if entry.target and int(getattr(entry.target, "id", 0)) == int(target_id):
+                return entry
+    except Exception:
         return None
-
-    session.clear()
-    return redirect("/login")
+    return None
 
 
-def gid(bot=None):
-    refresh_session_manageable_guilds(bot)
-
-    allowed = allowed_guild_ids()
-
-    raw = (
-        request.args.get("guild_id")
-        or request.form.get("guild_id")
-        or session.get("guild_id")
-        or 0
-    )
-
+async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason=""):
     try:
-        selected = int(raw or 0)
-    except Exception:
-        selected = 0
+        settings = antiraid.get_settings(guild.id)
 
-    if selected and selected in allowed and has_dashboard_access(bot, selected):
-        session["guild_id"] = selected
-        return selected
+        if not antiraid.feature_enabled(settings, action_type):
+            return
 
-    if selected:
-        session["access_denied_gid"] = selected
-        session.pop("guild_id", None)
-        return 0
+        if not executor or executor.bot:
+            return
 
-    for candidate in sorted(allowed):
-        if has_dashboard_access(bot, candidate):
-            session["guild_id"] = candidate
-            return candidate
+        member = guild.get_member(int(executor.id))
+        if antiraid.is_trusted(settings, member):
+            return
 
-    session.pop("guild_id", None)
-    return 0
+        state = antiraid.record_action(guild.id, executor.id, action_type, settings)
 
+        log_event(
+            guild.id,
+            f"antiraid_{action_type}",
+            executor.id,
+            str(executor),
+            0,
+            "",
+            f"Anti-Raid watched: {action_type}",
+            f"Target={target_text}, Count={state['count']}/{state['threshold']}, Reason={reason}"
+        )
 
-def guild_selector_html(active_gid):
-    guilds = session.get("discord_guilds", [])
+        await send_log(
+            bot,
+            guild,
+            "server",
+            f"🛡️ Anti-Raid: {action_type}",
+            f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
+            f"Target: {target_text}\n"
+            f"Count: `{state['count']}/{state['threshold']}` in `{state['window']}s`\n"
+            f"Reason: `{reason or '-'}`",
+            "warn"
+        )
 
-    if not guilds:
-        return """
-        <div class='card'>
-          <h3 class='bad'>No accessible servers</h3>
-          <p>You need Owner or Administrator permission, and the bot must be inside that server.</p>
-          <a class='btn' href='/logout'>Logout</a>
-        </div>
-        """
+        if state.get("triggered"):
+            punishment = await antiraid.punish_member(member, settings)
 
-    cards = ""
-    for g in guilds:
-        if not str(g.get("id", "")).isdigit():
-            continue
+            log_event(
+                guild.id,
+                f"antiraid_triggered_{action_type}",
+                executor.id,
+                str(executor),
+                0,
+                "",
+                f"Anti-Raid triggered: {action_type}",
+                f"Target={target_text}, Punishment={punishment}"
+            )
 
-        gid_raw = int(g["id"])
-        icon = discord_guild_icon(g)
-        icon_html = f"<img class='avatar-lg' src='{esc(icon)}'>" if icon else "<div class='avatar-lg' style='display:grid;place-items:center;font-size:28px'>🛡️</div>"
-        owner_badge = "Owner" if g.get("owner") else "Administrator"
-
-        cards += f"""
-        <a class='server-card' href='/dashboard?guild_id={gid_raw}'>
-          {icon_html}
-          <div style='min-width:0'>
-            <div style='font-size:18px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis'>{esc(g.get('name','Unknown'))}</div>
-            <div class='muted'>{owner_badge} • <code>{gid_raw}</code></div>
-            <div style='margin-top:8px'><span class='pill'>Open Dashboard</span></div>
-          </div>
-        </a>
-        """
-
-    return f"""
-    <div class='card'>
-      <h3>Servers you can manage</h3>
-      <p class='muted'>Only servers where you are Owner/Administrator and the bot is inside are shown.</p>
-      <div class='server-grid'>{cards}</div>
-      <br>
-      <a class='btn' style='background:#334155' href='/logout'>Logout</a>
-    </div>
-    """
-
-def server_pill_html(active_gid, bot=None):
-    if not active_gid:
-        return ""
-
-    name = bot_guild_name(bot, active_gid)
-    icon = bot_guild_icon(bot, active_gid)
-    icon_html = f"<img class='avatar' src='{esc(icon)}'>" if icon else "<div class='avatar' style='display:grid;place-items:center'>🛡️</div>"
-
-    return f"""
-    <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:12px;margin:-8px 0 18px;flex-wrap:wrap'>
-      <div class='userline'>
-        {icon_html}
-        <div>
-          <div class='muted'>Current Server</div>
-          <b>{esc(name)}</b> <code>{esc(active_gid)}</code>
-        </div>
-      </div>
-      <div style='display:flex;gap:8px;flex-wrap:wrap'>
-        <a class='btn' style='background:#334155;box-shadow:none' href='/dashboard'>Switch Server</a>
-        <a class='btn' style='background:#334155;box-shadow:none' href='/dashboard/full-check?guild_id={int(active_gid)}'>Full Check</a>
-      </div>
-    </div>
-    """
-
-def create_app(bot=None):
-    app = Flask(__name__)
-    app.secret_key = DASHBOARD_SECRET_KEY
-    init_db()
-
-    @app.before_request
-    def refresh_bot_guilds():
+            await send_log(
+                bot,
+                guild,
+                "server",
+                f"🚨 Anti-Raid Triggered: {action_type}",
+                f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
+                f"Target: {target_text}\n"
+                f"Punishment: `{punishment}`",
+                "bad"
+            )
+    except Exception as e:
         try:
-            if bot and getattr(bot, "guilds", None):
-                for g in bot.guilds:
-                    ensure_guild(g.id, g.name)
+            log_event(guild.id, "antiraid_error", 0, "", 0, "", "Anti-Raid error", f"{type(e).__name__}: {e}")
         except Exception:
             pass
 
-    @app.route("/")
-    def root():
-        return redirect("/dashboard")
 
-    @app.route("/login")
-    def login():
-        if session.get("discord_user") and session.get("discord_access_token"):
-            return redirect("/dashboard")
 
-        if session.get("discord_user") or session.get("discord_access_token"):
-            session.clear()
 
-        if not oauth_ready():
-            cfg = oauth_config()
-            body = f"""
-            <div class='card'>
-              <h2 class='bad'>Discord Login is not configured</h2>
-              <p>Add these Railway Variables:</p>
-              <pre>DISCORD_CLIENT_ID
-DISCORD_CLIENT_SECRET
-DASHBOARD_BASE_URL</pre>
-              <p>Current:</p>
-              <ul>
-                <li>DISCORD_CLIENT_ID: {'✅' if cfg['client_id'] else '❌'}</li>
-                <li>DISCORD_CLIENT_SECRET: {'✅' if cfg['client_secret'] else '❌'}</li>
-                <li>DASHBOARD_BASE_URL: {'✅' if cfg['base_url'] else '❌'}</li>
-              </ul>
-            </div>
-            """
-            return page("NM System Login", body, 0)
+_GUIDE_LOOP_STARTED = False
 
-        body = """
-        <div class='card' style='max-width:560px'>
-          <h2>Login with Discord</h2>
-          <p class='muted'>Only server Owners or Administrators can open their server dashboard.</p>
-          <a class='btn' href='/auth/discord'>🔐 Continue with Discord</a>
-        </div>
-        """
-        return page("NM System Login", body, 0)
+async def guide_background_loop(bot):
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            await guides.send_all_due_guides(bot, force=False)
+        except Exception:
+            pass
+        await asyncio.sleep(10 * 60)
 
-    @app.route("/auth/discord")
-    def auth_discord():
-        if not oauth_ready():
-            return redirect("/login")
 
-        cfg = oauth_config()
-        params = urllib.parse.urlencode({
-            "client_id": cfg["client_id"],
-            "redirect_uri": redirect_uri(),
-            "response_type": "code",
-            "scope": "identify guilds",
-            "prompt": "consent",
-        })
 
-        return redirect(f"{DISCORD_API}/oauth2/authorize?{params}")
 
-    @app.route("/auth/discord/callback")
-    def auth_callback():
-        if not oauth_ready():
-            return redirect("/login")
 
-        code = request.args.get("code", "")
-        if not code:
-            return "Missing Discord OAuth code", 400
+async def voice_xp_background_loop(bot):
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            for guild in list(bot.guilds):
+                if not is_system_enabled(guild.id, "levels"):
+                    continue
+
+                for channel in getattr(guild, "voice_channels", []):
+                    for member in getattr(channel, "members", []):
+                        if member.bot:
+                            continue
+                        if not getattr(member, "voice", None):
+                            continue
+                        if member.voice.self_deaf or member.voice.deaf:
+                            continue
+
+                        res = add_voice_xp(guild.id, member.id)
+                        if res and res[2]:
+                            try:
+                                log_event(guild.id, "voice_level_up", member.id, member.display_name, channel.id, channel.name, "Voice level up", f"Level {res[1]}")
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
+        await asyncio.sleep(voice_xp_interval())
+
+
+
+def setup_bot(bot):
+    global _GUIDE_LOOP_STARTED
+    if not _GUIDE_LOOP_STARTED:
+        _GUIDE_LOOP_STARTED = True
+        try:
+            bot.loop.create_task(guide_background_loop(bot))
+            bot.loop.create_task(voice_xp_background_loop(bot))
+        except Exception:
+            pass
+
+    economy.setup(bot)
+    casino.setup(bot)
+    levels.setup(bot)
+    real_estate.setup(bot)
+    moderation.setup(bot)
+    admin.setup(bot)
+    shop.setup(bot)
+    giveaways.setup(bot)
+    lfg.setup(bot)
+    game_roles.setup(bot)
+
+    @bot.check
+    async def global_toggle_check(ctx):
+        if not ctx.guild or not ctx.command:
+            return True
+
+        ensure_guild(ctx.guild.id, ctx.guild.name)
+
+        # Bot owner bypass:
+        # Owner can use every command in any room even if dev mode, system toggles,
+        # or channel restrictions would block normal users.
+        if is_dev_owner(ctx.author.id):
+            return True
+
+        if is_dev_mode_enabled(ctx.guild.id) and not is_dev_owner(ctx.author.id):
+            await ctx.reply(embed=embed(
+                "🚧 البوت قيد التطوير",
+                "حاليًا أوامر NM System مقفلة للتجربة والتطوير. بتشتغل للجميع بعد ما يجهز النظام.",
+                "warn",
+                ctx.author
+            ))
+            return False
+
+        sys = command_system(ctx.command.name)
+
+        if not is_system_enabled(ctx.guild.id, sys):
+            await ctx.reply(embed=embed(
+                "🔒 النظام مقفل",
+                f"نظام `{sys}` مقفل من الداشبورد.",
+                "warn",
+                ctx.author
+            ))
+            return False
+
+        required_channel_id = channel_restriction_for_system(ctx.guild.id, sys)
+        if required_channel_id and int(ctx.channel.id) != int(required_channel_id):
+            await ctx.reply(embed=embed(
+                "📍 الروم غير صحيح",
+                f"هذا الأمر مخصص للروم الصحيح فقط: <#{required_channel_id}>",
+                "warn",
+                ctx.author
+            ))
+            return False
+
+        return True
+
+
+    @bot.event
+    async def on_command_error(ctx, error):
+        if not ctx.guild:
+            return
+
+        if isinstance(error, commands.CommandNotFound):
+            return
+
+        if isinstance(error, commands.CheckFailure):
+            return
+
+        if isinstance(error, commands.MissingRequiredArgument):
+            await ctx.reply(embed=embed(
+                "⚠️ الأمر ناقص",
+                f"ناقص باراميتر: `{error.param.name}`\nاكتب `!مساعدة` للأوامر.",
+                "warn",
+                ctx.author
+            ))
+            return
+
+        if isinstance(error, commands.BadArgument):
+            await ctx.reply(embed=embed(
+                "⚠️ صيغة غلط",
+                "تأكد من المنشن أو الرقم أو طريقة كتابة الأمر.",
+                "warn",
+                ctx.author
+            ))
+            return
+
+        if isinstance(error, commands.MissingPermissions):
+            await ctx.reply(embed=embed(
+                "🔒 صلاحية ناقصة",
+                "ما عندك صلاحية تستخدم هذا الأمر.",
+                "bad",
+                ctx.author
+            ))
+            return
 
         try:
-            token_data = exchange_code_for_token(code)
-            access_token = token_data.get("access_token")
+            log_event(
+                ctx.guild.id,
+                "command_error",
+                ctx.author.id,
+                ctx.author.display_name,
+                ctx.channel.id,
+                ctx.channel.name,
+                "Command error",
+                f"{type(error).__name__}: {error}"
+            )
 
-            if not access_token:
-                session.clear()
-                return "Discord OAuth did not return access token", 400
+            await send_log(
+                bot,
+                ctx.guild,
+                "commands",
+                "❌ Command Error",
+                f"User: {ctx.author.mention} (`{ctx.author.id}`)\nChannel: {ctx.channel.mention}\nCommand: `{ctx.command}`\nError: `{type(error).__name__}: {str(error)[:900]}`",
+                "bad",
+                ctx.author
+            )
+        except Exception:
+            pass
 
-            user = discord_api_get("/users/@me", access_token)
-            guilds = discord_api_get("/users/@me/guilds", access_token)
-            manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
+        await ctx.reply(embed=embed(
+            "❌ خطأ في الأمر",
+            f"صار خطأ وتم تسجيله في اللوقات.\n`{type(error).__name__}`",
+            "bad",
+            ctx.author
+        ))
 
-            session.clear()
-            session["discord_access_token"] = access_token
-            session["discord_user"] = {
-                "id": user.get("id"),
-                "username": user.get("username"),
-                "global_name": user.get("global_name"),
-                "avatar": user.get("avatar"),
-            }
-            session["discord_guilds"] = manageable
+    @bot.event
+    async def on_command_completion(ctx):
+        if ctx.guild and ctx.command:
+            log_event(ctx.guild.id, "command_used", ctx.author.id, ctx.author.display_name, ctx.channel.id, ctx.channel.name, ctx.command.name, ctx.message.content[:500])
+            await send_log(
+                bot,
+                ctx.guild,
+                "commands",
+                "⌨️ Command Used",
+                f"User: {ctx.author.mention} (`{ctx.author.id}`)\nChannel: {ctx.channel.mention}\nCommand: `{ctx.command.name}`\nContent: `{ctx.message.content[:800]}`",
+                "info",
+                ctx.author
+            )
 
-            if manageable:
-                session["guild_id"] = int(manageable[0]["id"])
+    @bot.event
+    async def on_message(message):
+        if not message.guild or message.author.bot:
+            await bot.process_commands(message)
+            return
 
-            session.modified = True
-            return redirect("/dashboard")
+        ensure_guild(message.guild.id, message.guild.name)
 
-        except urllib.error.HTTPError as e:
-            session.clear()
-            try:
-                detail = e.read().decode("utf-8")
-            except Exception:
-                detail = str(e)
-            return f"Discord OAuth failed: {esc(detail)}", 400
+        # Track Discord server boosts and post rewards before other processing.
+        try:
+            msg_type = str(getattr(message, "type", "")).lower()
+            if "premium" in msg_type or "boost" in msg_type:
+                boost_rewards.record_boost_message(message)
+        except Exception:
+            pass
+
+        try:
+            post_rewards.reward_message(message)
+        except Exception:
+            pass
+
+        try:
+            s = get_settings(message.guild.id)
+
+            if s.get("enabled") and is_system_enabled(message.guild.id, "protection"):
+                if is_ignored_channel(s, message.channel.id):
+                    await bot.process_commands(message)
+                    return
+
+                if is_whitelisted_member(s, message.author):
+                    await bot.process_commands(message)
+                    return
+
+                result = check_message(message, s)
+
+                if result.get("blocked"):
+                    if bool(s.get("delete_messages")):
+                        try:
+                            await message.delete()
+                        except Exception:
+                            pass
+
+                    kind = result.get("kind") or "protection"
+                    reason = result.get("reason") or "Protection violation"
+                    matched = result.get("matched") or ""
+                    details = result.get("details") or ""
+
+                    if result.get("warning"):
+                        warnsvc.add_warning(
+                            message.guild.id,
+                            message.author.id,
+                            message.author.display_name,
+                            bot.user.id if bot.user else 0,
+                            str(bot.user) if bot.user else "NM System",
+                            reason,
+                            message.content[:1000]
+                        )
+
+                    log_event(
+                        message.guild.id,
+                        f"protection_{kind}",
+                        message.author.id,
+                        message.author.display_name,
+                        message.channel.id,
+                        message.channel.name,
+                        f"Protection blocked: {kind}",
+                        message.content[:500],
+                        {"matched": matched, "details": details, "warning": bool(result.get("warning"))}
+                    )
+
+                    await send_log(
+                        bot,
+                        message.guild,
+                        "protection",
+                        f"🛡️ Protection Blocked: {kind}",
+                        f"User: {message.author.mention} (`{message.author.id}`)\n"
+                        f"Channel: {message.channel.mention}\n"
+                        f"Action: {'deleted + warning' if result.get('warning') else 'deleted'}\n"
+                        f"Reason: `{reason}`\n"
+                        f"Matched: `{matched or '-'}`\n"
+                        f"Details: `{details or '-'}`\n"
+                        f"Message: `{message.content[:800]}`",
+                        "bad" if result.get("warning") else "warn",
+                        message.author
+                    )
+
+                    try:
+                        e = embed(
+                            "🛡️ حماية السيرفر",
+                            f"{message.author.mention}\nتم حذف الرسالة.\n**السبب:** {reason}",
+                            "bad" if result.get("warning") else "warn",
+                            message.author
+                        )
+                        e.add_field(name="الإجراء", value="حذف الرسالة + تحذير" if result.get("warning") else "حذف الرسالة", inline=True)
+                        e.add_field(name="النظام", value=f"Protection / {kind}", inline=True)
+                        await message.channel.send(embed=e, delete_after=8)
+                    except Exception:
+                        pass
+
+                    return
 
         except Exception as e:
-            session.clear()
-            return f"Discord OAuth error: {esc(type(e).__name__)}: {esc(e)}", 500
-
-    @app.route("/logout")
-    def logout():
-        session.clear()
-        return redirect("/login")
-
-    @app.route("/dashboard")
-    def home():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        if not g:
-            return page("Dashboard Overview", dashboard_access_denied_html() + guild_selector_html(0), 0)
-
-        ensure_guild(g)
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(balance),0) total FROM balances WHERE guild_id=?", (g,))
-        eco = cur.fetchone()
-        cur.execute("SELECT COUNT(*) c FROM money_ledger WHERE guild_id=?", (g,))
-        led = cur.fetchone()
-        active, cleared = warn_summary(g)
-        conn.close()
-
-        user = dashboard_user()
-        g_name = bot_guild_name(bot, g)
-        user_avatar = discord_user_avatar(user)
-        user_name = user.get('global_name') or user.get('username') or 'Dashboard User'
-
-        body = f"""
-        <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap'>
-          <div class='userline'>
-            <img class='avatar-lg' src='{esc(user_avatar)}'>
-            <div>
-              <div class='muted'>Logged in as</div>
-              <div style='font-size:24px;font-weight:950'>{esc(user_name)}</div>
-              <code>{esc(user.get('id'))}</code>
-            </div>
-          </div>
-          <div>
-            <a class='btn' href='/dashboard/money-tracker?guild_id={g}'>Open Money Tracker</a>
-            <a class='btn' style='background:#334155' href='/dashboard/security?guild_id={g}'>Security</a>
-          </div>
-        </div>
-        """ + guild_selector_html(g) + f"""
-
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Guild</div><div class='stat'>{esc(g_name)}</div><div class='muted'><code>{g}</code></div></div>
-          <div class='card'><div class='muted'>Coin</div><div class='stat'>{esc(get_coin_name(g))}</div></div>
-          <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(eco['c'] or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Total Money</div><div class='stat'>{int(eco['total'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(led['c'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Warnings</div><div class='stat'>{active:,}</div></div>
-        </div>
-        """
-        return page("Dashboard Overview", body, g)
-
-    @app.route("/dashboard/economy", methods=["GET", "POST"])
-    def economy_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
             try:
-                target_user_id = int(request.form.get("user_id") or 0)
-            except Exception:
-                target_user_id = 0
-
-            try:
-                amount = int(str(request.form.get("amount") or "0").replace(",", ""))
-            except Exception:
-                amount = 0
-
-            reason = request.form.get("reason", "").strip() or f"Dashboard {action}"
-
-            if action in {"give", "take", "set"} and target_user_id and amount >= 0:
-                if action == "give" and amount > 0:
-                    tx = economy_service.credit(
-                        g,
-                        target_user_id,
-                        amount,
-                        "dashboard_give",
-                        user_name=str(target_user_id),
-                        actor_id=actor_id,
-                        actor_name=actor_name,
-                        source_label="dashboard",
-                        reason=reason
-                    )
-                elif action == "take" and amount > 0:
-                    tx = economy_service.debit(
-                        g,
-                        target_user_id,
-                        amount,
-                        "dashboard_take",
-                        user_name=str(target_user_id),
-                        actor_id=actor_id,
-                        actor_name=actor_name,
-                        source_label="dashboard",
-                        reason=reason
-                    )
-                elif action == "set":
-                    tx = economy_service.set_balance(
-                        g,
-                        target_user_id,
-                        amount,
-                        "dashboard_set_balance",
-                        user_name=str(target_user_id),
-                        actor_id=actor_id,
-                        actor_name=actor_name,
-                        source_label="dashboard",
-                        reason=reason
-                    )
-                else:
-                    tx = {"ok": False, "error": "invalid_amount"}
-
                 log_event(
-                    g,
-                    f"dashboard_{action}_money",
-                    target_user_id,
-                    str(target_user_id),
-                    0,
-                    "",
-                    f"Dashboard {action} money",
-                    f"Actor={actor_id}, Amount={amount}, OK={tx.get('ok')}, Reason={reason}"
+                    message.guild.id,
+                    "runtime_error",
+                    message.author.id,
+                    message.author.display_name,
+                    message.channel.id,
+                    message.channel.name,
+                    "Protection error",
+                    f"{type(e).__name__}: {e}"
                 )
-
-                return redirect(f"/dashboard/economy?guild_id={g}")
-
-            if action in {"give_all", "take_all"} and amount > 0:
-                conn = db()
-                cur = conn.cursor()
-                cur.execute("SELECT user_id FROM balances WHERE guild_id=?", (g,))
-                users = [int(r["user_id"]) for r in cur.fetchall()]
-                conn.close()
-
-                ok_count = 0
-                fail_count = 0
-
-                for uid in users:
-                    if action == "give_all":
-                        tx = economy_service.credit(
-                            g,
-                            uid,
-                            amount,
-                            "dashboard_give_all",
-                            user_name=str(uid),
-                            actor_id=actor_id,
-                            actor_name=actor_name,
-                            source_label="dashboard",
-                            reason=reason
-                        )
-                    else:
-                        tx = economy_service.debit(
-                            g,
-                            uid,
-                            amount,
-                            "dashboard_take_all",
-                            user_name=str(uid),
-                            actor_id=actor_id,
-                            actor_name=actor_name,
-                            source_label="dashboard",
-                            reason=reason
-                        )
-
-                    if tx.get("ok"):
-                        ok_count += 1
-                    else:
-                        fail_count += 1
-
-                log_event(
-                    g,
-                    f"dashboard_{action}",
-                    actor_id,
-                    actor_name,
-                    0,
-                    "",
-                    f"Dashboard bulk money action",
-                    f"Action={action}, Amount={amount}, OK={ok_count}, Failed={fail_count}, Reason={reason}"
-                )
-
-                return redirect(f"/dashboard/economy?guild_id={g}")
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT user_id,balance,updated_at FROM balances WHERE guild_id=? ORDER BY balance DESC LIMIT 100", (g,))
-        rows = cur.fetchall()
-
-        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(balance),0) total FROM balances WHERE guild_id=?", (g,))
-        stats = cur.fetchone()
-        conn.close()
-
-        trs = "".join(
-            f"<tr><td><code>{r['user_id']}</code></td><td>{int(r['balance']):,}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'>View</a></td></tr>"
-            for r in rows
-        )
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Economy Users</div><div class='stat'>{int(stats['c'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Total Money</div><div class='stat'>{int(stats['total'] or 0):,}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>Dashboard Money Control</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID'>
-            <input name=amount type=number min=0 placeholder='Amount'>
-            <input name=reason placeholder='Reason' style='min-width:260px'>
-            <button name=action value='give'>Give</button>
-            <button name=action value='take' style='background:#dc2626'>Take</button>
-            <button name=action value='set' style='background:#334155'>Set Balance</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Bulk Money Control</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=amount type=number min=1 placeholder='Amount'>
-            <input name=reason placeholder='Reason' style='min-width:260px'>
-            <button name=action value='give_all'>Give All</button>
-            <button name=action value='take_all' style='background:#dc2626'>Take All</button>
-          </form>
-          <p class='muted'>Bulk applies only to users already in the balances table.</p>
-        </div>
-
-        <div class='card'>
-          <h3>Top Balances</h3>
-          <table><tr><th>User ID</th><th>Balance</th><th></th></tr>{trs}</table>
-        </div>
-        """
-
-        return page("Economy", body, g)
-
-    @app.route("/dashboard/money-tracker")
-    def money_tracker():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        uid = request.args.get("user_id", "").strip()
-        source = request.args.get("source", "").strip()
-        actor_id = request.args.get("actor_id", "").strip()
-        min_amount = request.args.get("min_amount", "").strip()
-        max_amount = request.args.get("max_amount", "").strip()
-        direction = request.args.get("direction", "").strip()
-        limit_raw = request.args.get("limit", "250").strip()
+            except Exception:
+                pass
 
         try:
-            limit = max(25, min(int(limit_raw or 250), 1000))
-        except Exception:
-            limit = 250
-
-        q = "SELECT * FROM money_ledger WHERE guild_id=?"
-        params = [g]
-
-        if uid.isdigit():
-            q += " AND user_id=?"
-            params.append(int(uid))
-
-        if actor_id.isdigit():
-            q += " AND actor_id=?"
-            params.append(int(actor_id))
-
-        if source:
-            q += " AND source_type LIKE ?"
-            params.append(f"{source}%")
-
-        if direction == "in":
-            q += " AND amount > 0"
-        elif direction == "out":
-            q += " AND amount < 0"
-
-        if min_amount.lstrip("-").isdigit():
-            q += " AND ABS(amount) >= ?"
-            params.append(abs(int(min_amount)))
-
-        if max_amount.lstrip("-").isdigit():
-            q += " AND ABS(amount) <= ?"
-            params.append(abs(int(max_amount)))
-
-        q += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(q, params)
-        rows = cur.fetchall()
-
-        # Overall source summary.
-        cur.execute("""SELECT source_type, COUNT(*) c,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? GROUP BY source_type ORDER BY c DESC LIMIT 30""", (g,))
-        source_rows = cur.fetchall()
-
-        cur.execute("""SELECT
-        COUNT(*) rows,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) money_in,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) money_out,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=?""", (g,))
-        totals = cur.fetchone()
-
-        # User profile if searching a user.
-        profile = None
-        profile_sources = []
-        profile_recent = []
-        profile_balance = 0
-        if uid.isdigit():
-            user_id_int = int(uid)
-
-            cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, user_id_int))
-            balrow = cur.fetchone()
-            profile_balance = int(balrow["balance"] or 0) if balrow else 0
-
-            cur.execute("""SELECT
-            COUNT(*) rows,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
-            COALESCE(SUM(amount),0) net,
-            COALESCE(MAX(created_at),0) last_tx
-            FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, user_id_int))
-            profile = cur.fetchone()
-
-            cur.execute("""SELECT source_type, COUNT(*) rows,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
-            COALESCE(SUM(amount),0) net
-            FROM money_ledger
-            WHERE guild_id=? AND user_id=?
-            GROUP BY source_type ORDER BY rows DESC LIMIT 20""", (g, user_id_int))
-            profile_sources = cur.fetchall()
-
-            cur.execute("""SELECT * FROM money_ledger
-            WHERE guild_id=? AND user_id=?
-            ORDER BY id DESC LIMIT 50""", (g, user_id_int))
-            profile_recent = cur.fetchall()
-
-        cur.execute("""SELECT user_id,
-        COALESCE(SUM(amount),0) net,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COUNT(*) rows
-        FROM money_ledger WHERE guild_id=?
-        GROUP BY user_id ORDER BY received DESC LIMIT 10""", (g,))
-        top_received = cur.fetchall()
-
-        cur.execute("""SELECT user_id,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
-        COALESCE(SUM(amount),0) net,
-        COUNT(*) rows
-        FROM money_ledger WHERE guild_id=?
-        GROUP BY user_id ORDER BY spent DESC LIMIT 10""", (g,))
-        top_spent = cur.fetchall()
-
-        cur.execute("""SELECT actor_id, actor_name, COUNT(*) c,
-        COALESCE(SUM(ABS(amount)),0) volume
-        FROM money_ledger WHERE guild_id=? AND actor_id != 0
-        GROUP BY actor_id, actor_name ORDER BY volume DESC LIMIT 10""", (g,))
-        top_actors = cur.fetchall()
-
-        conn.close()
-
-        chips = "".join(
-            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/money-tracker?guild_id={g}&source={esc(r['source_type'])}'>{esc(r['source_type'])} ({int(r['c'])})</a>"
-            for r in source_rows
-        )
-
-        source_trs = "".join(
-            f"<tr><td>{esc(r['source_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took']):,}</td><td>{int(r['net']):,}</td></tr>"
-            for r in source_rows
-        )
-
-        received_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['received']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
-            for r in top_received
-        )
-
-        spent_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['spent']):,}</td><td>{int(r['received']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
-            for r in top_spent
-        )
-
-        actor_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['volume']):,}</td><td>{int(r['c']):,}</td></tr>"
-            for r in top_actors
-        )
-
-        trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{user_chip(bot,g,r['user_id'],r['user_name'])}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name']) if int(r['actor_id'] or 0) else '-'}</td></tr>"
-            for r in rows
-        )
-
-        form = f"""
-        <div class='card'>
-          <h3>Search / Filter Money Ledger</h3>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
-            <input name=actor_id placeholder='Actor ID' value='{esc(actor_id)}'>
-            <input name=source placeholder='source_type مثل casino / salary' value='{esc(source)}'>
-            <select name=direction>
-              <option value='' {'selected' if direction == '' else ''}>All</option>
-              <option value='in' {'selected' if direction == 'in' else ''}>Money In</option>
-              <option value='out' {'selected' if direction == 'out' else ''}>Money Out</option>
-            </select>
-            <input name=min_amount placeholder='Min abs' value='{esc(min_amount)}' style='width:90px'>
-            <input name=max_amount placeholder='Max abs' value='{esc(max_amount)}' style='width:90px'>
-            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-        """
-
-        body = server_pill_html(g, bot) + form
-
-        if profile and uid.isdigit():
-            info = member_info(bot, g, int(uid))
-            profile_source_trs = "".join(
-                f"<tr><td>{esc(r['source_type'])}</td><td>{int(r['rows']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['lost']):,}</td><td>{int(r['net']):,}</td></tr>"
-                for r in profile_sources
-            ) or "<tr><td colspan='5'>No data.</td></tr>"
-
-            profile_recent_trs = "".join(
-                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
-                for r in profile_recent
-            ) or "<tr><td colspan='6'>No data.</td></tr>"
-
-            body += f"""
-            <div class='card' style='display:flex;justify-content:space-between;gap:18px;align-items:center;flex-wrap:wrap'>
-              <div class='userline'>
-                <img class='avatar-lg' src='{esc(info["avatar"])}'>
-                <div>
-                  <div class='muted'>Money Profile</div>
-                  <div style='font-size:25px;font-weight:950'>{esc(info["name"])}</div>
-                  <code>{int(uid)}</code>
-                </div>
-              </div>
-              <a class='btn' href='/dashboard/user?guild_id={g}&user_id={int(uid)}'>Open Full User Lookup</a>
-            </div>
-
-            <div class='grid'>
-              <div class='card kpi-info'><div class='muted'>Current Balance</div><div class='stat'>{profile_balance:,}</div></div>
-              <div class='card kpi-good'><div class='muted'>Total Gained</div><div class='stat'>{int(profile['gained'] or 0):,}</div></div>
-              <div class='card kpi-bad'><div class='muted'>Total Lost / Spent</div><div class='stat'>{int(profile['lost'] or 0):,}</div></div>
-              <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(profile['net'] or 0):,}</div></div>
-              <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(profile['rows'] or 0):,}</div></div>
-            </div>
-
-            <div class='card'>
-              <h3>Sources for this user</h3>
-              <table><tr><th>Source</th><th>Rows</th><th>Gained</th><th>Lost</th><th>Net</th></tr>{profile_source_trs}</table>
-            </div>
-
-            <div class='card'>
-              <h3>Recent transactions for this user</h3>
-              <table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{profile_recent_trs}</table>
-            </div>
-            """
-
-        body += f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Ledger Rows</div><div class='stat'>{int(totals['rows'] or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Money In</div><div class='stat'>{int(totals['money_in'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Money Out</div><div class='stat'>{int(totals['money_out'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(totals['net'] or 0):,}</div></div>
-        </div>
-        """
-        body += f"<div class='card'><h3>Quick Source Filters</h3>{chips}</div>"
-        body += f"<div class='card'><h3>Source Summary</h3><table><tr><th>Source</th><th>Rows</th><th>In</th><th>Out</th><th>Net</th></tr>{source_trs}</table></div>"
-        body += f"<div class='grid'><div class='card'><h3>Top Received</h3><table><tr><th>User</th><th>In</th><th>Out</th><th>Net</th><th>Rows</th></tr>{received_trs}</table></div><div class='card'><h3>Top Spent / Lost</h3><table><tr><th>User</th><th>Spent</th><th>Received</th><th>Net</th><th>Rows</th></tr>{spent_trs}</table></div></div>"
-        body += f"<div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Volume</th><th>Rows</th></tr>{actor_trs}</table></div>"
-        body += f"<div class='card'><h3>Ledger Rows</h3><table><tr><th>TX</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Label</th><th>Reason</th><th>Actor</th></tr>{trs}</table></div>"
-        return page("Money Tracker", body, g)
-
-    @app.route("/dashboard/casino")
-    def casino_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        user_filter = request.args.get("user_id", "").strip()
-        game_filter = request.args.get("game", "").strip()
-
-        conn = db()
-        cur = conn.cursor()
-
-        where = "WHERE guild_id=? AND source_type LIKE 'casino_%'"
-        params = [g]
-
-        if user_filter.isdigit():
-            where += " AND user_id=?"
-            params.append(int(user_filter))
-
-        if game_filter:
-            where += " AND source_label=?"
-            params.append(game_filter)
-
-        cur.execute(f"""SELECT source_label, COUNT(*) c,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger {where}
-        GROUP BY source_label ORDER BY c DESC""", params)
-        game_rows = cur.fetchall()
-
-        cur.execute(f"""SELECT user_id,
-        COALESCE(SUM(amount),0) net,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COUNT(*) rows
-        FROM money_ledger
-        {where}
-        GROUP BY user_id
-        ORDER BY net ASC
-        LIMIT 10""", params)
-        biggest_losers = cur.fetchall()
-
-        cur.execute(f"""SELECT user_id,
-        COALESCE(SUM(amount),0) net,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) wagered,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COUNT(*) rows
-        FROM money_ledger
-        {where}
-        GROUP BY user_id
-        ORDER BY net DESC
-        LIMIT 10""", params)
-        biggest_winners = cur.fetchall()
-
-        cur.execute(f"""SELECT
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COUNT(*) rows,
-        COUNT(DISTINCT user_id) users
-        FROM money_ledger {where}""", params)
-        total = cur.fetchone()
-
-        cur.execute(f"""SELECT * FROM money_ledger {where}
-        ORDER BY id DESC LIMIT 100""", params)
-        recent = cur.fetchall()
-
-        conn.close()
-
-        took = int(total["took"] or 0)
-        paid = int(total["paid"] or 0)
-        net = took - paid
-
-        game_trs = "".join(
-            f"<tr><td><a href='/dashboard/casino?guild_id={g}&game={esc(r['source_label'])}'>{esc(r['source_label'])}</a></td><td>{int(r['c']):,}</td><td>{int(r['took']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took'] or 0)-int(r['paid'] or 0):,}</td></tr>"
-            for r in game_rows
-        )
-
-        loser_trs = "".join(
-            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
-            for r in biggest_losers
-        )
-
-        winner_trs = "".join(
-            f"<tr><td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td><td>{int(r['net']):,}</td><td>{int(r['wagered']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['rows']):,}</td></tr>"
-            for r in biggest_winners
-        )
-
-        recent_trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td><code>{r['user_id']}</code></td><td>{esc(r['source_label'])}</td><td>{int(r['amount']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(r['reason'])}</td></tr>"
-            for r in recent
-        )
-
-        body = server_pill_html(g, bot) + f"""
-<div class='card'>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' value='{esc(user_filter)}'>
-            <input name=game placeholder='Game/source_label' value='{esc(game_filter)}'>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/casino?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-        <div class='grid'>
-          <div class='card'><div class='muted'>Casino Took</div><div class='stat'>{took:,}</div></div>
-          <div class='card'><div class='muted'>Casino Paid</div><div class='stat'>{paid:,}</div></div>
-          <div class='card'><div class='muted'>Casino Net</div><div class='stat'>{net:,}</div></div>
-          <div class='card'><div class='muted'>Players</div><div class='stat'>{int(total['users'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Rows</div><div class='stat'>{int(total['rows'] or 0):,}</div></div>
-        </div>
-        <div class='card'><h3>By Game</h3><table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>House Net</th></tr>{game_trs}</table></div>
-        <div class='grid'>
-          <div class='card'><h3>Biggest Winners</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{winner_trs}</table></div>
-          <div class='card'><h3>Biggest Losers</h3><table><tr><th>User</th><th>Net</th><th>Wagered</th><th>Paid</th><th>Rows</th></tr>{loser_trs}</table></div>
-        </div>
-        <div class='card'><h3>Recent Casino Ledger</h3><table><tr><th>TX</th><th>User</th><th>Game</th><th>Amount</th><th>Balance After</th><th>Reason</th></tr>{recent_trs}</table></div>
-        """
-        return page("Casino", body, g)
-
-    @app.route("/dashboard/levels", methods=["GET", "POST"])
-    def levels_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
-            try:
-                user_id = int(request.form.get("user_id") or 0)
-            except Exception:
-                user_id = 0
-
-            try:
-                xp = int(request.form.get("xp") or 0)
-            except Exception:
-                xp = 0
-
-            try:
-                level = int(request.form.get("level") or 1)
-            except Exception:
-                level = 1
-
-            if user_id and action in {"set", "add_xp", "reset"}:
-                conn = db()
-                cur = conn.cursor()
-
-                cur.execute("INSERT OR IGNORE INTO levels (guild_id,user_id,xp,level,updated_at) VALUES (?,?,0,1,strftime('%s','now'))", (g, user_id))
-
-                if action == "set":
-                    cur.execute("UPDATE levels SET xp=?, level=?, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (max(0, xp), max(1, level), g, user_id))
-                elif action == "add_xp":
-                    cur.execute("UPDATE levels SET xp=xp+?, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (max(0, xp), g, user_id))
-                elif action == "reset":
-                    cur.execute("UPDATE levels SET xp=0, level=1, updated_at=strftime('%s','now') WHERE guild_id=? AND user_id=?", (g, user_id))
-
-                conn.commit()
-                conn.close()
-
-                log_event(g, f"dashboard_levels_{action}", user_id, str(user_id), 0, "", f"Dashboard levels {action}", f"Actor={actor_id}, XP={xp}, Level={level}")
-
-            return redirect(f"/dashboard/levels?guild_id={g}")
-
-        uid = request.args.get("user_id", "").strip()
-
-        conn = db()
-        cur = conn.cursor()
-
-        q = "SELECT * FROM levels WHERE guild_id=?"
-        params = [g]
-
-        if uid.isdigit():
-            q += " AND user_id=?"
-            params.append(int(uid))
-
-        q += " ORDER BY level DESC,xp DESC LIMIT 150"
-
-        cur.execute(q, params)
-        rows = cur.fetchall()
-
-        cur.execute("SELECT COUNT(*) c, COALESCE(SUM(xp),0) total_xp, COALESCE(AVG(level),0) avg_level, COALESCE(MAX(level),1) max_level FROM levels WHERE guild_id=?", (g,))
-        stats = cur.fetchone()
-
-        conn.close()
-        trs = "".join(
-            f"""<tr>
-              <td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td>
-              <td>{int(r['level'])}</td>
-              <td>{int(r['xp']):,}</td>
-              <td>
-                <form method='post' style='display:inline-grid;grid-template-columns:120px 80px 80px 70px 80px;gap:6px'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=user_id value='{r['user_id']}'>
-                  <input name=xp value='{int(r['xp'])}' type=number min=0>
-                  <input name=level value='{int(r['level'])}' type=number min=1>
-                  <button name=action value='set'>Set</button>
-                  <button name=action value='add_xp' style='background:#334155'>Add XP</button>
-                  <button name=action value='reset' style='background:#dc2626'>Reset</button>
-                </form>
-              </td>
-            </tr>"""
-            for r in rows
-        )
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Level Users</div><div class='stat'>{int(stats['c'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Total XP</div><div class='stat'>{int(stats['total_xp'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Average Level</div><div class='stat'>{float(stats['avg_level'] or 0):.1f}</div></div>
-          <div class='card'><div class='muted'>Max Level</div><div class='stat'>{int(stats['max_level'] or 1):,}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>Level Admin Control</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' required>
-            <input name=xp type=number min=0 placeholder='XP'>
-            <input name=level type=number min=1 placeholder='Level'>
-            <button name=action value='set'>Set XP/Level</button>
-            <button name=action value='add_xp' style='background:#334155'>Add XP</button>
-            <button name=action value='reset' style='background:#dc2626'>Reset</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/levels?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-
-        <div class='card'><h3>Levels</h3><table><tr><th>User</th><th>Level</th><th>XP</th><th>Actions</th></tr>{trs}</table></div>
-        """
-        return page("Levels", body, g)
-
-    @app.route("/dashboard/real-estate", methods=["GET", "POST"])
-    def real_estate_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        real_estate.seed(g)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
-            try:
-                property_id = int(request.form.get("property_id") or 0)
-            except Exception:
-                property_id = 0
-
-            try:
-                owner_id = int(request.form.get("owner_id") or 0)
-            except Exception:
-                owner_id = 0
-
-            owner_name = request.form.get("owner_name", "").strip() or str(owner_id or "")
-            reason = request.form.get("reason", "").strip() or f"Dashboard real estate {action}"
-
-            conn = db()
-            cur = conn.cursor()
-
-            if action in {"set_owner", "clear_owner", "edit_property"} and property_id:
-                cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (g, property_id))
-                prop = cur.fetchone()
-
-                if prop:
-                    if action == "set_owner":
-                        cur.execute(
-                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
-                            (owner_id, owner_name[:120], int(time.time()), g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_set_owner", int(prop["owner_id"] or 0), owner_id, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
-
-                    elif action == "clear_owner":
-                        cur.execute(
-                            "UPDATE properties SET owner_id=0, owner_name='' WHERE guild_id=? AND id=?",
-                            (g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_clear_owner", int(prop["owner_id"] or 0), 0, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
-
-                    elif action == "edit_property":
-                        try:
-                            price = max(0, int(request.form.get("price") or prop["price"]))
-                            rent = max(0, int(request.form.get("rent") or prop["rent"]))
-                            level = max(1, int(request.form.get("level") or prop["level"]))
-                        except Exception:
-                            price, rent, level = int(prop["price"]), int(prop["rent"]), int(prop["level"])
-
-                        cur.execute(
-                            "UPDATE properties SET price=?, rent=?, level=? WHERE guild_id=? AND id=?",
-                            (price, rent, level, g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_edit_property", int(prop["owner_id"] or 0), int(prop["owner_id"] or 0), actor_id, 0, int(prop["level"]), level, int(prop["price"]), price, reason, ""))
-
-                    conn.commit()
-
-                    log_event(
-                        g,
-                        f"dashboard_real_estate_{action}",
-                        owner_id or int(prop["owner_id"] or 0),
-                        owner_name,
-                        0,
-                        "",
-                        f"Dashboard real estate {action}",
-                        f"Actor={actor_id}, Property={property_id}, Reason={reason}"
-                    )
-
-            conn.close()
-            return redirect(f"/dashboard/real-estate?guild_id={g}")
-
-        owner_filter = request.args.get("owner_id", "").strip()
-        only_available = request.args.get("available", "").strip() == "1"
-
-        rows = real_estate.rows(g)
-
-        if owner_filter.isdigit():
-            rows = [r for r in rows if int(r["owner_id"] or 0) == int(owner_filter)]
-
-        if only_available:
-            rows = [r for r in rows if int(r["owner_id"] or 0) == 0]
-
-        rows = rows[:300]
-
-        trs = "".join(
-            f"""<tr>
-              <td>{r['id']}</td>
-              <td>{esc(r['display_name'])}</td>
-              <td>{r['owner_id'] or '-'}</td>
-              <td>{esc(r['owner_name'] or '')}</td>
-              <td>{int(r['price']):,}</td>
-              <td>{int(r['rent']):,}</td>
-              <td>{r['level']}</td>
-              <td>
-                <form method='post' style='display:grid;grid-template-columns:110px 110px 80px 80px 70px 120px;gap:6px;min-width:620px'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=property_id value='{r['id']}'>
-                  <input name=owner_id placeholder='Owner ID'>
-                  <input name=owner_name placeholder='Name'>
-                  <input name=price value='{int(r['price'])}' type=number min=0>
-                  <input name=rent value='{int(r['rent'])}' type=number min=0>
-                  <input name=level value='{int(r['level'])}' type=number min=1>
-                  <input name=reason placeholder='Reason'>
-                  <button name=action value='set_owner'>Set Owner</button>
-                  <button name=action value='clear_owner' style='background:#dc2626'>Clear</button>
-                  <button name=action value='edit_property' style='background:#334155'>Edit</button>
-                </form>
-              </td>
-            </tr>"""
-            for r in rows
-        )
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='card'>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=owner_id placeholder='Owner ID' value='{esc(owner_filter)}'>
-            <label><input type=checkbox name=available value=1 {'checked' if only_available else ''}> Available only</label>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/real-estate?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-        <div class='card'>
-          <h3>Real Estate Admin Control</h3>
-          <table>
-            <tr><th>ID</th><th>Name</th><th>Owner</th><th>Owner Name</th><th>Price</th><th>Rent</th><th>Level</th><th>Actions</th></tr>
-            {trs}
-          </table>
-        </div>
-        """
-        return page("Real Estate", body, g)
-
-    @app.route("/dashboard/warnings", methods=["GET", "POST"])
-    def warnings_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
-            try:
-                user_id = int(request.form.get("user_id") or 0)
-            except Exception:
-                user_id = 0
-
-            user_name = request.form.get("user_name", "").strip() or str(user_id or "")
-            reason = request.form.get("reason", "").strip() or "Dashboard action"
-
-            if action == "add_warning" and user_id:
-                from nmcore.services import warnings as warnsvc
-                warnsvc.add_warning(g, user_id, user_name, actor_id, actor_name, reason, "Added from dashboard")
-                log_event(g, "dashboard_add_warning", user_id, user_name, 0, "", "Dashboard added warning", f"Actor={actor_id}, Reason={reason}")
-                return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
-
-            if action == "clear_user" and user_id:
-                from nmcore.services import warnings as warnsvc
-                count = warnsvc.clear_user(g, user_id, actor_id, actor_name, reason)
-                log_event(g, "dashboard_clear_warnings", user_id, str(user_id), 0, "", "Dashboard cleared warnings", f"Actor={actor_id}, Count={count}, Reason={reason}")
-                return redirect(f"/dashboard/warnings?guild_id={g}&user_id={user_id}&status=all")
-
-            if action == "clear_warning":
-                try:
-                    warning_id = int(request.form.get("warning_id") or 0)
-                except Exception:
-                    warning_id = 0
-
-                if warning_id:
-                    conn = db()
-                    cur = conn.cursor()
-                    cur.execute("SELECT * FROM warnings WHERE guild_id=? AND id=?", (g, warning_id))
-                    row = cur.fetchone()
-
-                    if row and str(row["status"]) == "active":
-                        cur.execute("""UPDATE warnings SET status='cleared', cleared_at=strftime('%s','now'),
-                        cleared_by_id=?, cleared_by_name=?, clear_reason=? WHERE guild_id=? AND id=?""",
-                        (actor_id, actor_name, reason, g, warning_id))
-                        conn.commit()
-                        log_event(g, "dashboard_clear_warning", int(row["user_id"]), str(row["user_name"]), 0, "", "Dashboard cleared one warning", f"Actor={actor_id}, WarningID={warning_id}, Reason={reason}")
-
-                    conn.close()
-
-                return redirect(f"/dashboard/warnings?guild_id={g}&status=all")
-
-        uid = request.args.get("user_id", "").strip()
-        status = request.args.get("status", "active").strip()
-        reason_q = request.args.get("q", "").strip()
-
-        conn = db()
-        cur = conn.cursor()
-
-        q = "SELECT * FROM warnings WHERE guild_id=?"
-        params = [g]
-
-        if uid.isdigit():
-            q += " AND user_id=?"
-            params.append(int(uid))
-
-        if status in {"active", "cleared"}:
-            q += " AND status=?"
-            params.append(status)
-
-        if reason_q:
-            q += " AND reason LIKE ?"
-            params.append(f"%{reason_q}%")
-
-        q += " ORDER BY id DESC LIMIT 350"
-        cur.execute(q, params)
-        rows = cur.fetchall()
-
-        cur.execute("""SELECT
-        COUNT(*) total,
-        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active,
-        SUM(CASE WHEN status='cleared' THEN 1 ELSE 0 END) cleared
-        FROM warnings WHERE guild_id=?""", (g,))
-        totals = cur.fetchone()
-
-        cur.execute("""SELECT user_id, user_name,
-        COUNT(*) total,
-        SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) active_count,
-        SUM(CASE WHEN status='cleared' THEN 1 ELSE 0 END) cleared_count,
-        MAX(id) last_id
-        FROM warnings WHERE guild_id=?
-        GROUP BY user_id, user_name
-        ORDER BY active_count DESC, total DESC
-        LIMIT 100""", (g,))
-        grouped = cur.fetchall()
-
-        cur.execute("""SELECT moderator_id, moderator_name, COUNT(*) c
-        FROM warnings WHERE guild_id=? AND moderator_id != 0
-        GROUP BY moderator_id, moderator_name
-        ORDER BY c DESC LIMIT 10""", (g,))
-        mods = cur.fetchall()
-
-        conn.close()
-
-        grouped_trs = "".join(
-            f"""<tr>
-              <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
-              <td><span class='pill bad'>{int(r['active_count'] or 0):,}</span></td>
-              <td>{int(r['cleared_count'] or 0):,}</td>
-              <td>{int(r['total'] or 0):,}</td>
-              <td><a class='btn' style='background:#334155;box-shadow:none' href='/dashboard/warnings?guild_id={g}&user_id={r['user_id']}&status=all'>Open</a></td>
-              <td>
-                <form method='post' style='display:inline'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=action value='clear_user'>
-                  <input type=hidden name=user_id value='{r['user_id']}'>
-                  <input type=hidden name=reason value='Cleared from dashboard'>
-                  <button style='background:#334155'>Clear Active</button>
-                </form>
-              </td>
-            </tr>"""
-            for r in grouped
-        ) or "<tr><td colspan='6'>No warnings.</td></tr>"
-
-        trs = "".join(
-            f"""<tr>
-              <td><code>{r['id']}</code></td>
-              <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
-              <td>{esc(r['reason'])}</td>
-              <td>{status_badge(r['status'])}</td>
-              <td>{user_chip(bot, g, r['moderator_id'], r['moderator_name'])}</td>
-              <td>{esc(r['clear_reason'] or '')}</td>
-              <td>
-                {f"<form method='post' style='display:inline'><input type=hidden name=guild_id value='{g}'><input type=hidden name=action value='clear_warning'><input type=hidden name=warning_id value='{r['id']}'><input type=hidden name=reason value='Cleared one warning from dashboard'><button style='background:#334155'>Clear One</button></form>" if str(r['status']) == 'active' else ''}
-              </td>
-            </tr>"""
-            for r in rows
-        ) or "<tr><td colspan='7'>No records.</td></tr>"
-
-        mod_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['moderator_id'],r['moderator_name'])}</td><td>{int(r['c']):,}</td></tr>"
-            for r in mods
-        ) or "<tr><td colspan='2'>No moderators yet.</td></tr>"
-
-        form = f"""
-        <div class='card'>
-          <h3>Warnings Control</h3>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id placeholder='User ID' value='{esc(uid)}'>
-            <input name=q placeholder='Search reason' value='{esc(reason_q)}'>
-            <select name=status>
-              <option value='active' {'selected' if status == 'active' else ''}>Active</option>
-              <option value='cleared' {'selected' if status == 'cleared' else ''}>Cleared</option>
-              <option value='all' {'selected' if status == 'all' else ''}>All</option>
-            </select>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Add Warning From Dashboard</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='add_warning'>
-            <input name=user_id placeholder='User ID' required>
-            <input name=user_name placeholder='Name optional'>
-            <input name=reason placeholder='Reason' style='min-width:320px' required>
-            <button>Add Warning</button>
-          </form>
-        </div>
-        """
-
-        body = server_pill_html(g, bot)
-        body += f"""
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Total Warnings</div><div class='stat'>{int(totals['total'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Active</div><div class='stat'>{int(totals['active'] or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Cleared</div><div class='stat'>{int(totals['cleared'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Users Listed</div><div class='stat'>{len(grouped):,}</div></div>
-        </div>
-        """
-        body += form
-        body += f"<div class='grid'><div class='card'><h3>Users Warning Summary</h3><table><tr><th>User</th><th>Active</th><th>Cleared</th><th>Total</th><th>Open</th><th>Action</th></tr>{grouped_trs}</table></div><div class='card'><h3>Top Moderators</h3><table><tr><th>Moderator</th><th>Warnings</th></tr>{mod_trs}</table></div></div>"
-        body += f"<div class='card'><h3>Warning Records</h3><table><tr><th>ID</th><th>User</th><th>Reason</th><th>Status</th><th>By</th><th>Clear Reason</th><th>Action</th></tr>{trs}</table></div>"
-
-        return page("Warnings", body, g)
-
-    @app.route("/dashboard/analytics")
-    def analytics_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        money = reports.money_summary(g)
-        casino = reports.casino_summary(g)
-        shop = reports.shop_summary(g)
-        pnl = reports.profit_loss_summary(g)
-        users = reports.user_finance_summary(g, 12)
-
-        def money_fmt(v):
-            return f"{int(v or 0):,}"
-
-        game_rows = "".join(
-            f"<tr><td>{esc(r.get('source_label') or 'unknown')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('took') or 0):,}</td><td>{int(r.get('paid') or 0):,}</td><td>{int(r.get('took') or 0)-int(r.get('paid') or 0):,}</td></tr>"
-            for r in casino.get("games", [])
-        ) or "<tr><td colspan='5'>No casino data yet.</td></tr>"
-
-        item_rows = "".join(
-            f"<tr><td><code>{esc(r.get('item_key') or '')}</code></td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
-            for r in shop.get("top_items", [])
-        ) or "<tr><td colspan='3'>No shop purchases yet.</td></tr>"
-
-        buyer_rows = "".join(
-            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{int(r.get('c') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
-            for r in shop.get("top_buyers", [])
-        ) or "<tr><td colspan='3'>No buyers yet.</td></tr>"
-
-        spender_rows = "".join(
-            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0)}</td><td>{int(r.get('spent') or 0):,}</td><td>{int(r.get('received') or 0):,}</td><td>{int(r.get('net') or 0):,}</td></tr>"
-            for r in users.get("top_spenders", [])
-        ) or "<tr><td colspan='4'>No ledger data yet.</td></tr>"
-
-        recent_purchase_rows = "".join(
-            f"<tr><td>{r.get('id')}</td><td><a href='/dashboard/user?guild_id={g}&user_id={r.get('user_id')}'><code>{r.get('user_id')}</code></a></td><td>{esc(r.get('item_key') or '')}</td><td>{int(r.get('price') or 0):,}</td><td><code>{esc(str(r.get('money_tx_id') or ''))[:12]}</code></td></tr>"
-            for r in shop.get("recent", [])
-        ) or "<tr><td colspan='5'>No recent purchases.</td></tr>"
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Total Balances</div><div class='stat'>{money_fmt(money.get('total_balance'))}</div></div>
-          <div class='card kpi-good'><div class='muted'>Money In</div><div class='stat'>{money_fmt(money.get('money_in'))}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Money Out</div><div class='stat'>{money_fmt(money.get('money_out'))}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Ledger Net</div><div class='stat'>{money_fmt(money.get('net'))}</div></div>
-        </div>
-
-        <div class='grid'>
-          <div class='card kpi-good'><div class='muted'>Tracked Server Profit</div><div class='stat'>{money_fmt(pnl.get('server_profit'))}</div><p class='muted'>Casino house net + shop sales</p></div>
-          <div class='card'><div class='muted'>Casino House Net</div><div class='stat'>{money_fmt(pnl.get('casino_house_net'))}</div></div>
-          <div class='card'><div class='muted'>Shop Sales</div><div class='stat'>{money_fmt(pnl.get('shop_sales'))}</div></div>
-          <div class='card'><div class='muted'>Shop Purchases</div><div class='stat'>{money_fmt(shop.get('purchases'))}</div></div>
-        </div>
-
-        <div class='grid'>
-          <div class='card'>
-            <h3>Casino Profit / Loss by Game</h3>
-            <table><tr><th>Game</th><th>Rows</th><th>Took</th><th>Paid</th><th>House Net</th></tr>{game_rows}</table>
-          </div>
-
-          <div class='card'>
-            <h3>Top Shop Items</h3>
-            <table><tr><th>Item</th><th>Purchases</th><th>Total Sales</th></tr>{item_rows}</table>
-          </div>
-        </div>
-
-        <div class='grid'>
-          <div class='card'>
-            <h3>Top Spenders</h3>
-            <table><tr><th>User</th><th>Spent</th><th>Received</th><th>Net</th></tr>{spender_rows}</table>
-          </div>
-
-          <div class='card'>
-            <h3>Top Shop Buyers</h3>
-            <table><tr><th>User</th><th>Purchases</th><th>Total</th></tr>{buyer_rows}</table>
-          </div>
-        </div>
-
-        <div class='card'>
-          <h3>Recent Purchases</h3>
-          <table><tr><th>ID</th><th>User</th><th>Item</th><th>Price</th><th>TX</th></tr>{recent_purchase_rows}</table>
-        </div>
-        """
-        return page("Analytics", body, g)
-
-
-
-    @app.route("/dashboard/full-check")
-    def full_check_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        guild_obj = None
-        for bg in bot.guilds:
-            if int(bg.id) == int(g):
-                guild_obj = bg
-                break
-
-        if not guild_obj:
-            return page("Full Check", server_pill_html(g, bot) + "<div class='card'><h3>Bot is not connected to this guild.</h3></div>", g)
-
-        report = full_check.run_full_check(guild_obj)
-
-        check_rows = "".join(
-            f"<tr><td>{'✅' if c['ok'] else '❌'}</td><td>{esc(c['category'])}</td><td>{esc(c['name'])}</td><td><code>{esc(c['detail'])}</code></td></tr>"
-            for c in report["checks"]
-        )
-
-        fail_rows = "".join(
-            f"<tr><td>{esc(c['category'])}</td><td>{esc(c['name'])}</td><td><code>{esc(c['detail'])}</code></td></tr>"
-            for c in report["failed"]
-        ) or "<tr><td colspan='3'>✅ No core issues detected.</td></tr>"
-
-        color_class = "ok" if report["score"] >= 90 else "warn" if report["score"] >= 75 else "bad"
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Score</div><div class='stat {color_class}'>{report['score']}/100</div></div>
-          <div class='card'><div class='muted'>Status</div><div class='stat {color_class}'>{esc(report['label'])}</div></div>
-          <div class='card'><div class='muted'>Passed</div><div class='stat'>{len(report['passed'])}/{len(report['checks'])}</div></div>
-          <div class='card'><div class='muted'>Logs Mapping</div><div class='stat'>{report['logs']['mapped']}/{report['logs']['total']}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>Needs Fix</h3>
-          <table><tr><th>Category</th><th>Check</th><th>Details</th></tr>{fail_rows}</table>
-        </div>
-
-        <div class='card'>
-          <h3>Database</h3>
-          <p>Path: <code>{esc(report['db']['path'])}</code></p>
-          <p>Size: <code>{esc(report['db']['size_text'])}</code></p>
-          <p>Persistent /data: <b>{'✅' if report['db']['persistent'] else '❌'}</b></p>
-        </div>
-
-        <div class='card'>
-          <h3>All Checks</h3>
-          <table><tr><th>Status</th><th>Category</th><th>Check</th><th>Details</th></tr>{check_rows}</table>
-        </div>
-        """
-        return page("Full Check", body, g)
-
-
-
-    @app.route("/dashboard/commands")
-    def commands_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'>
-            <h3>Admin Reports</h3>
-            <p><code>!تقرير_النظام</code></p>
-            <p><code>!تقرير_الاقتصاد</code></p>
-            <p><code>!تقرير_الكازينو</code></p>
-            <p><code>!تقرير_الحماية</code></p>
-            <p><code>!تقرير_الأمان</code></p>
-            <p><code>!جاهزية_البوت</code></p>
-          </div>
-
-          <div class='card'>
-            <h3>Setup / Logs</h3>
-            <p><code>!تجهيز_اللوقات</code></p>
-            <p><code>!اختبار_اللوقات</code></p>
-            <p><code>!فحص_الصلاحيات</code></p>
-            <p><code>!حالة_الإعداد</code></p>
-            <p><code>!حالة_الحماية</code></p>
-          </div>
-
-          <div class='card'>
-            <h3>Economy</h3>
-            <p><code>!رصيدي</code></p>
-            <p><code>!راتب</code></p>
-            <p><code>!تحويل @user amount</code></p>
-            <p><code>!الغني</code></p>
-            <p><code>!اعطاءفلوس @user amount</code></p>
-            <p><code>!سحبفلوس @user amount</code></p>
-          </div>
-
-          <div class='card'>
-            <h3>Casino</h3>
-            <p><code>!حظ amount</code></p>
-            <p><code>!دبل amount</code></p>
-            <p><code>!سلوت amount</code></p>
-            <p><code>!وجه amount</code></p>
-            <p><code>!بلاكجاك amount</code></p>
-          </div>
-
-          <div class='card'>
-            <h3>Warnings</h3>
-            <p><code>!تحذير @user reason</code></p>
-            <p><code>!تحذيرات @user</code></p>
-            <p><code>!مسح_تحذير ID</code></p>
-            <p><code>!مسح_تحذيرات @user</code></p>
-          </div>
-
-          <div class='card'>
-            <h3>Other Systems</h3>
-            <p><code>!لفلي</code> / <code>!ترتيب</code></p>
-            <p><code>!عقارات</code> / <code>!شراء_عقار ID</code> / <code>!ايجار</code></p>
-            <p><code>!متجر</code> / <code>!شراء item_key</code> / <code>!صندوق 1000</code></p>
-            <p><code>!قيف</code> / <code>!دخول_قيف ID</code></p>
-          </div>
-        </div>
-        """
-        return page("Command Center", body, g)
-
-
-
-    @app.route("/dashboard/security")
-    def security_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        guild_obj = None
-        for bg in bot.guilds:
-            if int(bg.id) == int(g):
-                guild_obj = bg
-                break
-
-        if not guild_obj:
-            return page("Security", server_pill_html(g, bot) + "<div class='card'><h3>Bot is not connected to this guild.</h3></div>", g)
-
-        report = security.risk_report(guild_obj)
-        events = security.recent_security_events(g, 120)
-
-        def ok_bad(v):
-            return "✅" if v else "❌"
-
-        perm_rows = "".join(
-            f"<tr><td>{esc(v['label'])}</td><td>{ok_bad(v['ok'])}</td></tr>"
-            for k, v in report["permissions"].items()
-        )
-
-        role_rows = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['name'])}</td><td>{r['members']}</td><td>{'✅' if r['managed'] else '❌'}</td><td>{esc(', '.join(r['permissions']))}</td></tr>"
-            for r in report["roles"][:80]
-        )
-
-        event_rows = "".join(
-            f"<tr><td>{r['id']}</td><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
-            for r in events
-        )
-
-        issues = "".join(f"<li>{esc(x)}</li>" for x in report["issues"]) or "<li>No major issues detected.</li>"
-
-        color_class = "ok" if report["score"] >= 85 else "warn" if report["score"] >= 65 else "bad"
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Security Score</div><div class='stat {color_class}'>{report['score']}/100</div></div>
-          <div class='card'><div class='muted'>Risk Level</div><div class='stat {color_class}'>{esc(report['label'])}</div></div>
-          <div class='card'><div class='muted'>Active Warnings</div><div class='stat'>{report['counts']['active_warnings']:,}</div></div>
-          <div class='card'><div class='muted'>Anti-Raid Events</div><div class='stat'>{report['counts']['antiraid_events']:,}</div></div>
-          <div class='card'><div class='muted'>Protection Events</div><div class='stat'>{report['counts']['protection_events']:,}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>Security Issues / Recommendations</h3>
-          <ul>{issues}</ul>
-          <a class='btn' href='/dashboard/protection?guild_id={g}'>Open Protection Controls</a>
-          <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}'>Open Logs</a>
-        </div>
-
-        <div class='grid'>
-          <div class='card'>
-            <h3>Bot Permissions</h3>
-            <table><tr><th>Permission</th><th>Status</th></tr>{perm_rows}</table>
-          </div>
-
-          <div class='card'>
-            <h3>Anti-Raid Settings</h3>
-            <p>Enabled: <b>{ok_bad(report['antiraid'].get('enabled'))}</b></p>
-            <p>Threshold: <code>{int(report['antiraid'].get('threshold') or 3)} actions / {int(report['antiraid'].get('window') or 60)}s</code></p>
-            <p>Punishment: <code>{esc(report['antiraid'].get('punish_action') or 'log_only')}</code></p>
-            <p>Trusted Users: <code>{esc(report['antiraid'].get('trusted_users') or '-')}</code></p>
-            <p>Trusted Roles: <code>{esc(report['antiraid'].get('trusted_roles') or '-')}</code></p>
-          </div>
-        </div>
-
-        <div class='card'>
-          <h3>Dangerous Roles</h3>
-          <p class='muted'>Roles with high-risk permissions. This helps you know which roles should be trusted carefully.</p>
-          <table><tr><th>ID</th><th>Name</th><th>Members</th><th>Managed</th><th>Dangerous Permissions</th></tr>{role_rows}</table>
-        </div>
-
-        <div class='card'>
-          <h3>Recent Security Events</h3>
-          <table><tr><th>ID</th><th>Type</th><th>User</th><th>Name</th><th>Title</th><th>Details</th></tr>{event_rows}</table>
-        </div>
-        """
-        return page("Security", body, g)
-
-
-
-    @app.route("/dashboard/protection", methods=["GET", "POST"])
-    def protection_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        test_result = ""
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-
-            if action == "reset_bad_words":
-                prot_update(g, {"bad_words": get_default_bad_words()})
-                return redirect(f"/dashboard/protection?guild_id={g}")
-
-            if action == "save_antiraid":
-                def as_int(name, default=0):
-                    try:
-                        return int(request.form.get(name) or default)
-                    except Exception:
-                        return default
-
-                antiraid.update_settings(g, {
-                    "enabled": 1 if request.form.get("ar_enabled") else 0,
-                    "anti_kick": 1 if request.form.get("anti_kick") else 0,
-                    "anti_ban": 1 if request.form.get("anti_ban") else 0,
-                    "anti_role_delete": 1 if request.form.get("anti_role_delete") else 0,
-                    "anti_role_update": 1 if request.form.get("anti_role_update") else 0,
-                    "anti_member_role_update": 1 if request.form.get("anti_member_role_update") else 0,
-                    "anti_channel_create": 1 if request.form.get("anti_channel_create") else 0,
-                    "anti_channel_delete": 1 if request.form.get("anti_channel_delete") else 0,
-                    "anti_channel_update": 1 if request.form.get("anti_channel_update") else 0,
-                    "anti_webhook_create": 1 if request.form.get("anti_webhook_create") else 0,
-                    "anti_bot_add": 1 if request.form.get("anti_bot_add") else 0,
-                    "threshold": as_int("ar_threshold", 3),
-                    "window": as_int("ar_window", 60),
-                    "punish_action": request.form.get("punish_action", "remove_roles"),
-                    "trusted_users": request.form.get("trusted_users", ""),
-                    "trusted_roles": request.form.get("trusted_roles", ""),
-                })
-                return redirect(f"/dashboard/protection?guild_id={g}")
-
-            if action == "test_message":
-                s_test = prot_get(g)
-                raw = request.form.get("test_text", "")
-
-                class DummyAuthor:
-                    id = 0
-                    display_name = "Dashboard Test"
-                    roles = []
-
-                class DummyChannel:
-                    id = 0
-                    name = "dashboard-test"
-
-                class DummyGuild:
-                    id = g
-
-                class DummyMessage:
-                    content = raw
-                    author = DummyAuthor()
-                    channel = DummyChannel()
-                    guild = DummyGuild()
-                    mentions = []
-                    role_mentions = []
-
-                result = check_message(DummyMessage(), s_test)
-                test_result = f"""
-                <div class='card'>
-                  <h3>Protection Test Result</h3>
-                  <p>Blocked: <b class='{'bad' if result.get('blocked') else 'ok'}'>{'YES' if result.get('blocked') else 'NO'}</b></p>
-                  <p>Warning: <b class='{'warn' if result.get('warning') else 'ok'}'>{'YES' if result.get('warning') else 'NO'}</b></p>
-                  <p>Kind: <code>{esc(result.get('kind') or '-')}</code></p>
-                  <p>Reason: <code>{esc(result.get('reason') or '-')}</code></p>
-                  <p>Matched: <code>{esc(result.get('matched') or '-')}</code></p>
-                  <p>Details: <code>{esc(result.get('details') or '-')}</code></p>
-                </div>
-                """
-            else:
-                def as_int(name, default=0):
-                    try:
-                        return int(request.form.get(name) or default)
-                    except Exception:
-                        return default
-
-                data = {
-                    "enabled": 1 if request.form.get("enabled") else 0,
-                    "bad_words_enabled": 1 if request.form.get("bad_words_enabled") else 0,
-                    "links_enabled": 1 if request.form.get("links_enabled") else 0,
-                    "spam_enabled": 1 if request.form.get("spam_enabled") else 0,
-                    "mass_mention_enabled": 1 if request.form.get("mass_mention_enabled") else 0,
-                    "delete_messages": 1 if request.form.get("delete_messages") else 0,
-                    "caps_enabled": 1 if request.form.get("caps_enabled") else 0,
-                    "duplicate_enabled": 1 if request.form.get("duplicate_enabled") else 0,
-                    "invite_block_enabled": 1 if request.form.get("invite_block_enabled") else 0,
-                    "max_newlines_enabled": 1 if request.form.get("max_newlines_enabled") else 0,
-                    "bad_words": request.form.get("bad_words", ""),
-                    "ignored_channels": request.form.get("ignored_channels", ""),
-                    "whitelist_roles": request.form.get("whitelist_roles", ""),
-                    "link_whitelist": request.form.get("link_whitelist", ""),
-                    "spam_threshold": as_int("spam_threshold", 6),
-                    "spam_window": as_int("spam_window", 8),
-                    "mention_threshold": as_int("mention_threshold", 6),
-                    "caps_percent": as_int("caps_percent", 85),
-                    "caps_min_length": as_int("caps_min_length", 18),
-                    "duplicate_threshold": as_int("duplicate_threshold", 4),
-                    "duplicate_window": as_int("duplicate_window", 15),
-                    "max_newlines": as_int("max_newlines", 12),
-                }
-                prot_update(g, data)
-                return redirect(f"/dashboard/protection?guild_id={g}")
-
-        s = prot_get(g)
-        ar = antiraid.get_settings(g)
-
-        bad_words_raw = str(s.get("bad_words") or "")
-        bad_count = len([w for w in bad_words_raw.split(",") if w.strip()])
-        ignored_count = len([w for w in str(s.get("ignored_channels") or "").replace("\n", ",").split(",") if w.strip()])
-        whitelist_count = len([w for w in str(s.get("whitelist_roles") or "").replace("\n", ",").split(",") if w.strip()])
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("""SELECT * FROM log_events
-        WHERE guild_id=? AND (event_type LIKE 'protection_%' OR event_type LIKE 'antiraid_%')
-        ORDER BY id DESC LIMIT 100""", (g,))
-        events = cur.fetchall()
-
-        cur.execute("""SELECT * FROM warnings
-        WHERE guild_id=? AND moderator_name LIKE '%NM System%'
-        ORDER BY id DESC LIMIT 80""", (g,))
-        auto_warnings = cur.fetchall()
-        conn.close()
-
-        event_trs = "".join(
-            f"<tr><td>{esc(r['event_type'])}</td><td><code>{r['user_id']}</code></td><td>{esc(r['channel_name'])}</td><td>{esc(r['title'])}</td><td>{esc(r['details'])}</td></tr>"
-            for r in events
-        )
-
-        warn_trs = "".join(
-            f"<tr><td>{r['id']}</td><td><code>{r['user_id']}</code></td><td>{esc(r['user_name'])}</td><td>{esc(r['reason'])}</td><td>{esc(r['status'])}</td></tr>"
-            for r in auto_warnings
-        )
-
-        def checked(v):
-            return "checked" if int(v or 0) else ""
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Protection</div><div class='stat'>{'ON' if s.get('enabled') else 'OFF'}</div></div>
-          <div class='card'><div class='muted'>Anti-Raid</div><div class='stat'>{'ON' if ar.get('enabled') else 'OFF'}</div></div>
-          <div class='card'><div class='muted'>Bad Words</div><div class='stat'>{bad_count:,}</div></div>
-          <div class='card'><div class='muted'>Ignored Channels</div><div class='stat'>{ignored_count:,}</div></div>
-          <div class='card'><div class='muted'>Whitelist Roles</div><div class='stat'>{whitelist_count:,}</div></div>
-          <div class='card'><div class='muted'>Auto Warnings</div><div class='stat'>{len(auto_warnings):,}</div></div>
-        </div>
-
-        {test_result}
-
-        <div class='card'>
-          <h3>Test Chat Protection</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='test_message'>
-            <textarea name=test_text placeholder='اكتب رسالة تجربة هنا' style='width:100%;height:70px'></textarea><br><br>
-            <button>Test Only</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Anti-Raid / Admin Abuse Protection</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='save_antiraid'>
-
-            <div class='grid'>
-              <label><input type=checkbox name=ar_enabled {checked(ar.get('enabled'))}> Anti-Raid Enabled</label>
-              <label><input type=checkbox name=anti_kick {checked(ar.get('anti_kick'))}> Anti Kick</label>
-              <label><input type=checkbox name=anti_ban {checked(ar.get('anti_ban'))}> Anti Ban</label>
-              <label><input type=checkbox name=anti_role_delete {checked(ar.get('anti_role_delete'))}> Anti Role Delete</label>
-              <label><input type=checkbox name=anti_role_update {checked(ar.get('anti_role_update'))}> Anti Role Edit</label>
-              <label><input type=checkbox name=anti_member_role_update {checked(ar.get('anti_member_role_update'))}> Anti Member Role Edit</label>
-              <label><input type=checkbox name=anti_channel_create {checked(ar.get('anti_channel_create'))}> Anti Channel Create</label>
-              <label><input type=checkbox name=anti_channel_delete {checked(ar.get('anti_channel_delete'))}> Anti Channel Delete</label>
-              <label><input type=checkbox name=anti_channel_update {checked(ar.get('anti_channel_update'))}> Anti Channel Edit</label>
-              <label><input type=checkbox name=anti_webhook_create {checked(ar.get('anti_webhook_create'))}> Anti Webhook Create</label>
-              <label><input type=checkbox name=anti_bot_add {checked(ar.get('anti_bot_add'))}> Anti Bot Add</label>
-            </div>
-
-            <br>
-            Threshold<br>
-            <input name=ar_threshold type=number min=1 value='{int(ar.get('threshold') or 3)}'>
-            Window seconds<br>
-            <input name=ar_window type=number min=5 value='{int(ar.get('window') or 60)}'>
-            Punish Action<br>
-            <select name=punish_action>
-              <option value='remove_roles' {'selected' if ar.get('punish_action') == 'remove_roles' else ''}>Remove Roles</option>
-              <option value='none' {'selected' if ar.get('punish_action') == 'none' else ''}>Log Only</option>
-            </select>
-
-            <br><br>
-            Trusted User IDs<br>
-            <textarea name=trusted_users style='width:100%;height:65px' placeholder='Owner/Admin IDs separated by comma'>{esc(ar.get('trusted_users') or '')}</textarea><br><br>
-
-            Trusted Role IDs<br>
-            <textarea name=trusted_roles style='width:100%;height:65px' placeholder='Trusted role IDs separated by comma'>{esc(ar.get('trusted_roles') or '')}</textarea><br><br>
-
-            <button>Save Anti-Raid</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Chat Protection Control</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-
-            <div class='grid'>
-              <label><input type=checkbox name=enabled {checked(s.get('enabled'))}> Enabled</label>
-              <label><input type=checkbox name=delete_messages {checked(s.get('delete_messages'))}> Delete Messages</label>
-              <label><input type=checkbox name=bad_words_enabled {checked(s.get('bad_words_enabled'))}> Bad Words</label>
-              <label><input type=checkbox name=links_enabled {checked(s.get('links_enabled'))}> Links</label>
-              <label><input type=checkbox name=invite_block_enabled {checked(s.get('invite_block_enabled'))}> Discord Invites</label>
-              <label><input type=checkbox name=spam_enabled {checked(s.get('spam_enabled'))}> Anti Spam</label>
-              <label><input type=checkbox name=duplicate_enabled {checked(s.get('duplicate_enabled'))}> Anti Duplicate</label>
-              <label><input type=checkbox name=mass_mention_enabled {checked(s.get('mass_mention_enabled'))}> Anti Mass Mention</label>
-              <label><input type=checkbox name=caps_enabled {checked(s.get('caps_enabled'))}> Anti Caps</label>
-              <label><input type=checkbox name=max_newlines_enabled {checked(s.get('max_newlines_enabled'))}> Anti Long Newlines</label>
-            </div>
-
-            <h3>Thresholds</h3>
-            <div class='grid'>
-              <div>Spam Threshold<br><input name=spam_threshold type=number min=2 value='{int(s.get('spam_threshold') or 6)}'></div>
-              <div>Spam Window<br><input name=spam_window type=number min=2 value='{int(s.get('spam_window') or 8)}'></div>
-              <div>Mention Threshold<br><input name=mention_threshold type=number min=1 value='{int(s.get('mention_threshold') or 6)}'></div>
-              <div>Duplicate Threshold<br><input name=duplicate_threshold type=number min=2 value='{int(s.get('duplicate_threshold') or 4)}'></div>
-              <div>Duplicate Window<br><input name=duplicate_window type=number min=2 value='{int(s.get('duplicate_window') or 15)}'></div>
-              <div>Caps Percent<br><input name=caps_percent type=number min=1 max=100 value='{int(s.get('caps_percent') or 85)}'></div>
-              <div>Caps Min Length<br><input name=caps_min_length type=number min=1 value='{int(s.get('caps_min_length') or 18)}'></div>
-              <div>Max Newlines<br><input name=max_newlines type=number min=1 value='{int(s.get('max_newlines') or 12)}'></div>
-            </div>
-
-            <h3>Bad Words / Phrases</h3>
-            <textarea name=bad_words style='width:100%;height:170px'>{esc(bad_words_raw)}</textarea><br><br>
-
-            Ignored Channel IDs<br>
-            <textarea name=ignored_channels style='width:100%;height:60px'>{esc(s.get('ignored_channels') or '')}</textarea><br><br>
-
-            Whitelist Role IDs<br>
-            <textarea name=whitelist_roles style='width:100%;height:60px'>{esc(s.get('whitelist_roles') or '')}</textarea><br><br>
-
-            Link Whitelist<br>
-            <textarea name=link_whitelist style='width:100%;height:60px' placeholder='youtube.com, twitch.tv'>{esc(s.get('link_whitelist') or '')}</textarea><br><br>
-
-            <button>Save Chat Protection</button>
-            <button name='action' value='reset_bad_words' style='background:#334155;margin-left:8px'>Reset Bad Words</button>
-          </form>
-        </div>
-
-        <div class='card'><h3>Recent Protection / Anti-Raid Events</h3><table><tr><th>Type</th><th>User</th><th>Channel</th><th>Title</th><th>Details</th></tr>{event_trs}</table></div>
-        <div class='card'><h3>Recent Auto Warnings</h3><table><tr><th>ID</th><th>User</th><th>Name</th><th>Reason</th><th>Status</th></tr>{warn_trs}</table></div>
-        """
-        return page("Protection", body, g)
-
-    @app.route("/dashboard/logs")
-    def logs_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        event_type = request.args.get("event_type", "").strip()
-        user_id = request.args.get("user_id", "").strip()
-        limit_raw = request.args.get("limit", "200").strip()
-
-        try:
-            limit = max(25, min(int(limit_raw or 200), 1000))
-        except Exception:
-            limit = 200
-
-        q = "SELECT * FROM log_events WHERE guild_id=?"
-        params = [g]
-
-        if event_type:
-            q += " AND event_type=?"
-            params.append(event_type)
-
-        if user_id.isdigit():
-            q += " AND user_id=?"
-            params.append(int(user_id))
-
-        q += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute(q, params)
-        rows = cur.fetchall()
-
-        cur.execute("""SELECT event_type, COUNT(*) c FROM log_events
-        WHERE guild_id=? GROUP BY event_type ORDER BY c DESC LIMIT 30""", (g,))
-        types = cur.fetchall()
-
-        cur.execute("SELECT COUNT(*) c FROM log_events WHERE guild_id=?", (g,))
-        total_logs = int(cur.fetchone()["c"] or 0)
-        conn.close()
-
-        log_map = all_log_channels(g)
-        log_channel_rows = ""
-        for key, (name, topic) in LOG_CHANNELS.items():
-            cid = int(log_map.get(key) or 0)
-            log_channel_rows += f"<tr><td><code>{esc(key)}</code></td><td>{esc(name)}</td><td>{f'<#{cid}>' if cid else '<span class=muted>Not set</span>'}</td><td><code>{cid}</code></td></tr>"
-
-        chips = "".join(
-            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/logs?guild_id={g}&event_type={esc(r['event_type'])}'>{esc(r['event_type'])} ({int(r['c'])})</a>"
-            for r in types
-        )
-
-        form = f"""
-        <div class='card'>
-          <h3>Logs Filter</h3>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=event_type placeholder='event_type' value='{esc(event_type)}'>
-            <input name=user_id placeholder='User ID' value='{esc(user_id)}'>
-            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-        """
-
-        trs = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{status_badge(r['event_type'])}</td><td>{user_chip(bot,g,r['user_id'],r['user_name'])}</td><td>{esc(r['channel_name'])}<br><code>{int(r['channel_id'] or 0)}</code></td><td><b>{esc(r['title'])}</b><br><span class='muted'>{esc(r['details'])}</span></td></tr>"
-            for r in rows
-        ) or "<tr><td colspan='5'>No logs.</td></tr>"
-
-        body = server_pill_html(g, bot)
-        body += f"<div class='grid'><div class='card kpi-info'><div class='muted'>Total DB Logs</div><div class='stat'>{total_logs:,}</div></div><div class='card'><div class='muted'>Mapped Log Rooms</div><div class='stat'>{sum(1 for x in log_map.values() if int(x or 0)):,}/{len(LOG_CHANNELS)}</div></div><div class='card kpi-good'><div class='muted'>Auto Refresh</div><div class='stat'>15s</div></div></div>"
-        body += f"<div class='card'><h3>Discord Log Rooms Mapping</h3><table><tr><th>Key</th><th>Room Name</th><th>Current</th><th>ID</th></tr>{log_channel_rows}</table><br><a class='btn' href='/dashboard/settings?guild_id={g}'>Edit Mapping</a></div>"
-        body += form
-        body += f"<div class='card'><h3>Event Types</h3>{chips or '<span class=muted>No logs yet.</span>'}</div>"
-        body += f"<div class='card'><h3>Recent Logs</h3><table><tr><th>ID</th><th>Type</th><th>User</th><th>Channel</th><th>Event</th></tr>{trs}</table></div>"
-        return page("Logs", body, g)
-    @app.route("/dashboard/live")
-    def live_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        activity_type = request.args.get("activity_type", "").strip()
-        actor_id = request.args.get("actor_id", "").strip()
-        limit_raw = request.args.get("limit", "250").strip()
-
-        try:
-            limit = max(25, min(int(limit_raw or 250), 1000))
-        except Exception:
-            limit = 250
-
-        conn = db()
-        cur = conn.cursor()
-
-        q = "SELECT * FROM live_activity WHERE guild_id=?"
-        params = [g]
-
-        if activity_type:
-            q += " AND activity_type=?"
-            params.append(activity_type)
-
-        if actor_id.isdigit():
-            q += " AND actor_id=?"
-            params.append(int(actor_id))
-
-        q += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
-
-        cur.execute(q, params)
-        rows = cur.fetchall()
-
-        cur.execute("""SELECT activity_type, COUNT(*) c, COALESCE(SUM(amount),0) amount
-        FROM live_activity
-        WHERE guild_id=? GROUP BY activity_type ORDER BY c DESC LIMIT 30""", (g,))
-        types = cur.fetchall()
-
-        cur.execute("""SELECT actor_id, actor_name, COUNT(*) c, COALESCE(SUM(amount),0) amount
-        FROM live_activity WHERE guild_id=?
-        GROUP BY actor_id, actor_name ORDER BY c DESC LIMIT 15""", (g,))
-        actors = cur.fetchall()
-
-        cur.execute("SELECT COUNT(*) c FROM live_activity WHERE guild_id=?", (g,))
-        total = cur.fetchone()
-        conn.close()
-
-        chips = "".join(
-            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/live?guild_id={g}&activity_type={esc(r['activity_type'])}'>{esc(r['activity_type'])} ({int(r['c'])})</a>"
-            for r in types
-        )
-
-        type_trs = "".join(
-            f"<tr><td>{status_badge(r['activity_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
-            for r in types
-        ) or "<tr><td colspan='3'>No activity.</td></tr>"
-
-        actor_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['c']):,}</td><td>{int(r['amount'] or 0):,}</td></tr>"
-            for r in actors
-        ) or "<tr><td colspan='3'>No actors.</td></tr>"
-
-        trs = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{status_badge(r['activity_type'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td><b>{esc(r['title'])}</b><br><span class='muted'>{esc(r['details'])}</span></td><td>{int(r['amount']):,}</td></tr>"
-            for r in rows
-        ) or "<tr><td colspan='5'>No live activity.</td></tr>"
-
-        body = server_pill_html(g, bot)
-        body += f"""
-        <div class='card'>
-          <h3>Live Activity Filter</h3>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=activity_type placeholder='activity_type' value='{esc(activity_type)}'>
-            <input name=actor_id placeholder='Actor ID' value='{esc(actor_id)}'>
-            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/live?guild_id={g}'>Reset</a>
-          </form>
-        </div>
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Live Rows</div><div class='stat'>{int(total['c'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Activity Types</div><div class='stat'>{len(types):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Auto Refresh</div><div class='stat'>8s</div></div>
-        </div>
-        """
-        body += f"<div class='card'><h3>Quick Filters</h3>{chips or '<span class=muted>No live activity yet.</span>'}</div>"
-        body += f"<div class='grid'><div class='card'><h3>Activity Summary</h3><table><tr><th>Type</th><th>Rows</th><th>Amount</th></tr>{type_trs}</table></div><div class='card'><h3>Top Actors</h3><table><tr><th>Actor</th><th>Rows</th><th>Amount</th></tr>{actor_trs}</table></div></div>"
-        body += f"<div class='card'><h3>Live Feed</h3><table><tr><th>ID</th><th>Type</th><th>Actor</th><th>Event</th><th>Amount</th></tr>{trs}</table></div>"
-        return page("Live Activity", body, g)
-    @app.route("/dashboard/settings", methods=["GET", "POST"])
-    def settings_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-
-            if action == "save_post_rewards":
-                post_rewards.update_settings(
-                    g,
-                    enabled=bool(request.form.get("post_reward_enabled")),
-                    amount=int(request.form.get("post_reward_amount") or 5000),
-                    channel_ids=request.form.get("post_reward_channels", ""),
-                    min_length=int(request.form.get("post_reward_min_length") or 5),
-                    cooldown_seconds=int(request.form.get("post_reward_cooldown") or 0)
-                )
-                return redirect(f"/dashboard/settings?guild_id={g}")
-
-            if action == "save_dev_mode":
-                set_dev_mode_enabled(g, bool(request.form.get("dev_mode_enabled")))
-                return redirect(f"/dashboard/settings?guild_id={g}")
-
-            if action == "save_log_channels":
-                for key in LOG_CHANNELS.keys():
-                    raw = request.form.get(f"log_{key}", "0")
-                    try:
-                        channel_id = int(raw or 0)
-                    except Exception:
-                        channel_id = 0
-                    set_log_channel(g, key, channel_id)
-
-                general_id = int(request.form.get("log_general") or 0)
-                if general_id:
-                    update_channel(g, "logs_channel_id", general_id)
-
-                return redirect(f"/dashboard/settings?guild_id={g}")
-
-            if "coin_name" in request.form:
-                set_coin_name(g, request.form.get("coin_name"))
-
-            for key in ["commands_channel_id", "gambling_channel_id", "logs_channel_id"]:
-                if key in request.form:
-                    update_channel(g, key, int(request.form.get(key) or 0))
-
-            for k, v in all_toggles(g).items():
-                set_system_enabled(g, k, bool(request.form.get(f"toggle_{k}")))
-
-            return redirect(f"/dashboard/settings?guild_id={g}")
-
-        gs = get_guild_settings(g)
-        toggles = all_toggles(g)
-
-        commands_channel_id = int(gs.get("commands_channel_id") or 0)
-        gambling_channel_id = int(gs.get("gambling_channel_id") or 0)
-        logs_channel_id = int(gs.get("logs_channel_id") or 0)
-        log_map = all_log_channels(g)
-        pr = post_rewards.get_settings(g)
-
-        checks = "".join(
-            f"<label><input type=checkbox name='toggle_{k}' {'checked' if v else ''}> {k}</label><br>"
-            for k, v in toggles.items()
-        )
-
-        log_rows = ""
-        for key, (name, topic) in LOG_CHANNELS.items():
-            current = int(log_map.get(key) or 0)
-            mention = f"<#{current}>" if current else "<span class='muted'>Not set</span>"
-            log_rows += f"""
-            <tr>
-              <td><code>{esc(key)}</code></td>
-              <td>{esc(name)}</td>
-              <td>{mention}</td>
-              <td><input name='log_{esc(key)}' value='{current}' style='width:210px'></td>
-            </tr>
-            """
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>Commands Room</div><div class='stat'>{f'<#{commands_channel_id}>' if commands_channel_id else 'OFF'}</div></div>
-          <div class='card'><div class='muted'>Gambling Room</div><div class='stat'>{f'<#{gambling_channel_id}>' if gambling_channel_id else 'OFF'}</div></div>
-          <div class='card'><div class='muted'>General Logs</div><div class='stat'>{f'<#{logs_channel_id}>' if logs_channel_id else 'OFF'}</div></div>
-        </div>
-
-        <div class='card kpi-good'>
-          <h3>Post Reward / مكافأة البوست</h3>
-          <p class='muted'>يعطي العضو مبلغ تلقائيًا لكل بوست في الرومات المحددة.</p>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='save_post_rewards'>
-            <label><input type=checkbox name=post_reward_enabled {'checked' if int(pr.get('enabled') or 0) else ''}> Enabled</label><br><br>
-            Amount per post<br>
-            <input name=post_reward_amount type=number min=0 value='{int(pr.get('amount') or 5000)}'><br><br>
-            Channel IDs<br>
-            <textarea name=post_reward_channels style='width:100%;height:70px' placeholder='Channel IDs separated by comma'>{esc(pr.get('channel_ids') or '')}</textarea><br><br>
-            Minimum text length<br>
-            <input name=post_reward_min_length type=number min=0 value='{int(pr.get('min_length') or 5)}'><br><br>
-            Cooldown seconds per user<br>
-            <input name=post_reward_cooldown type=number min=0 value='{int(pr.get('cooldown_seconds') or 0)}'><br><br>
-            <button>Save Post Reward</button>
-          </form>
-          <p class='muted'><a href='/dashboard/post-rewards?guild_id={g}'>Open Post Rewards Report</a></p>
-        </div>
-
-        <div class='card kpi-warn'>
-          <h3>Bot Access / Development Mode</h3>
-          <p class='muted'>Dev Mode يقفل الأوامر على الناس ويخليها لصاحب البوت فقط. الآن الافتراضي OFF عشان البوت مفتوح للجميع.</p>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='save_dev_mode'>
-            <label><input type=checkbox name=dev_mode_enabled {'checked' if is_dev_mode_enabled(g) else ''}> Dev Mode ON / البوت قيد التطوير</label>
-            <br><br>
-            <button>Save Dev Mode</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-
-            <h3>Guild Settings</h3>
-
-            Coin Name<br>
-            <input name=coin_name value='{esc(get_coin_name(g))}'><br><br>
-
-            Commands Channel ID<br>
-            <input name=commands_channel_id value='{commands_channel_id}'><br>
-            <div class='muted'>If set, economy/levels/real-estate/utility commands only work there.</div><br>
-
-            Gambling Channel ID<br>
-            <input name=gambling_channel_id value='{gambling_channel_id}'><br>
-            <div class='muted'>If set, casino commands only work there.</div><br>
-
-            Old General Logs Channel ID<br>
-            <input name=logs_channel_id value='{logs_channel_id}'><br><br>
-
-            <h3>System Toggles</h3>
-            {checks}
-            <br>
-            <button>Save</button>
-          </form>
-        </div>
-
-        <div class='card'>
-          <h3>Organized Discord Log Channels</h3>
-          <p class='muted'>Run <code>!تجهيز_اللوقات</code> to auto-create and map these rooms. You can also edit IDs manually here.</p>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='save_log_channels'>
-            <table>
-              <tr><th>Key</th><th>Channel Name</th><th>Current</th><th>Channel ID</th></tr>
-              {log_rows}
-            </table>
-            <br>
-            <button>Save Log Channels</button>
-          </form>
-        </div>
-        """
-        return page("Settings", body, g)
-
-
-    @app.route("/dashboard/post-rewards")
-    def post_rewards_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        data = post_rewards.summary(g, 150)
-        totals = data.get("totals", {})
-        top = data.get("top", [])
-        recent = data.get("recent", [])
-
-        top_rows = "".join(
-            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{int(r.get('posts') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
-            for r in top
-        ) or "<tr><td colspan='3'>No rewarded posts yet.</td></tr>"
-
-        recent_rows = "".join(
-            f"<tr><td><code>{r.get('id')}</code></td><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td><code>{r.get('channel_id')}</code></td><td><code>{r.get('message_id')}</code></td><td>{int(r.get('amount') or 0):,}</td><td><code>{esc(str(r.get('money_tx_id') or ''))[:12]}</code></td></tr>"
-            for r in recent
-        ) or "<tr><td colspan='6'>No recent rewards.</td></tr>"
-
-        body = server_pill_html(g, bot)
-        body += f"""
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Rewarded Posts</div><div class='stat'>{int(totals.get('c') or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Total Paid</div><div class='stat'>{int(totals.get('total') or 0):,}</div></div>
-          <div class='card'><div class='muted'>Top Users</div><div class='stat'>{len(top):,}</div></div>
-        </div>
-        <div class='card'>
-          <h3>Post Reward Report</h3>
-          <p class='muted'>هذا للبوستات العادية في الرومات المحددة من Settings.</p>
-          <a class='btn' href='/dashboard/settings?guild_id={g}'>Edit Post Reward Settings</a>
-          <a class='btn' style='background:#334155' href='/dashboard/boosts?guild_id={g}'>Open Boosts Page</a>
-        </div>
-        <div class='card'><h3>Top Paid Users</h3><table><tr><th>User</th><th>Posts</th><th>Total Paid</th></tr>{top_rows}</table></div>
-        <div class='card'><h3>Recent Rewards</h3><table><tr><th>ID</th><th>User</th><th>Channel</th><th>Message</th><th>Amount</th><th>TX</th></tr>{recent_rows}</table></div>
-        """
-        return page("Post Rewards", body, g)
-
-    @app.route("/dashboard/boosts")
-    def boosts_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        # Best-effort sync active boosters from the bot cache whenever page opens.
-        try:
-            guild_obj = None
-            for bg in bot.guilds:
-                if int(bg.id) == int(g):
-                    guild_obj = bg
-                    break
-            if guild_obj:
-                boost_rewards.sync_guild(guild_obj)
+            if is_system_enabled(message.guild.id, "levels"):
+                res = message_xp(message.guild.id, message.author.id, LEVEL_COOLDOWN_SECONDS)
+                if res and res[2]:
+                    await message.channel.send(embed=embed(
+                        "🎉 Level Up!",
+                        f"{message.author.mention} وصل إلى لفل **{res[1]}**!",
+                        "purple",
+                        message.author
+                    ))
         except Exception:
             pass
 
-        data = boost_rewards.summary(g, 200)
-        totals = data.get("totals", {})
-        boosters = data.get("boosters", [])
-        recent = data.get("recent", [])
+        await bot.process_commands(message)
 
-        booster_rows = "".join(
-            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{status_badge('active' if int(r.get('active') or 0) else 'inactive')}</td><td>{int(r.get('boost_count') or 0):,}</td><td>{int(r.get('first_boost_at') or 0)}</td><td>{int(r.get('last_boost_at') or 0)}</td></tr>"
-            for r in boosters
-        ) or "<tr><td colspan='5'>No boosters tracked yet.</td></tr>"
+    @bot.event
+    async def on_message_delete(message):
+        if not message.guild or message.author.bot:
+            return
 
-        recent_rows = "".join(
-            f"<tr><td><code>{r.get('id')}</code></td><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td><code>{r.get('message_id')}</code></td><td><code>{r.get('channel_id')}</code></td><td>{esc(r.get('event_type') or 'boost')}</td></tr>"
-            for r in recent
-        ) or "<tr><td colspan='5'>No boost events yet.</td></tr>"
+        attachments = "\n".join(a.url for a in getattr(message, "attachments", [])[:5]) or "None"
+        content = message.content or "[No text]"
 
-        body = server_pill_html(g, bot)
-        body += f"""
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Boost Events Tracked</div><div class='stat'>{int(totals.get('total_events') or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Unique Boosters</div><div class='stat'>{int(totals.get('unique_boosters') or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Active Boosters</div><div class='stat'>{int(totals.get('active_boosters') or 0):,}</div></div>
-        </div>
-        <div class='card'>
-          <h3>Server Boost Tracking</h3>
-          <p class='muted'>البوت يتتبع رسائل البوست الجديدة عشان يعرف مين بوّست وكم مرة. العضو النشط يظهر من premium_since لو كان موجود في كاش البوت.</p>
-          <p class='muted'>مهم: البوستات القديمة قبل تركيب النظام ما يقدر يعرف عددها الحقيقي إذا ما كان عنده رسالة البوست، لكنه يقدر يعرف active boosters من دسكورد.</p>
-        </div>
-        <div class='card'><h3>Boosters</h3><table><tr><th>User</th><th>Status</th><th>Boost Count</th><th>First Boost</th><th>Last Boost</th></tr>{booster_rows}</table></div>
-        <div class='card'><h3>Recent Boost Events</h3><table><tr><th>ID</th><th>User</th><th>Message</th><th>Channel</th><th>Type</th></tr>{recent_rows}</table></div>
-        """
-        return page("Boosts", body, g)
-
-    @app.route("/dashboard/shop", methods=["GET", "POST"])
-    def shop_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        real_estate.seed(g)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
-            try:
-                property_id = int(request.form.get("property_id") or 0)
-            except Exception:
-                property_id = 0
-
-            try:
-                owner_id = int(request.form.get("owner_id") or 0)
-            except Exception:
-                owner_id = 0
-
-            owner_name = request.form.get("owner_name", "").strip() or str(owner_id or "")
-            reason = request.form.get("reason", "").strip() or f"Dashboard real estate shop {action}"
-
-            conn = db()
-            cur = conn.cursor()
-
-            if action in {"set_owner", "clear_owner", "edit_property"} and property_id:
-                cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (g, property_id))
-                prop = cur.fetchone()
-
-                if prop:
-                    if action == "set_owner":
-                        cur.execute(
-                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
-                            (owner_id, owner_name[:120], int(time.time()), g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_shop_set_owner", int(prop["owner_id"] or 0), owner_id, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
-
-                    elif action == "clear_owner":
-                        cur.execute(
-                            "UPDATE properties SET owner_id=0, owner_name='' WHERE guild_id=? AND id=?",
-                            (g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_shop_clear_owner", int(prop["owner_id"] or 0), 0, actor_id, 0, int(prop["level"]), int(prop["level"]), int(prop["price"]), int(prop["price"]), reason, ""))
-
-                    elif action == "edit_property":
-                        try:
-                            price = max(0, int(request.form.get("price") or prop["price"]))
-                            rent = max(0, int(request.form.get("rent") or prop["rent"]))
-                            level = max(1, int(request.form.get("level") or prop["level"]))
-                        except Exception:
-                            price, rent, level = int(prop["price"]), int(prop["rent"]), int(prop["level"])
-
-                        cur.execute(
-                            "UPDATE properties SET price=?, rent=?, level=? WHERE guild_id=? AND id=?",
-                            (price, rent, level, g, property_id)
-                        )
-                        cur.execute("""INSERT INTO property_ledger
-                        (guild_id,property_id,action,old_owner_id,new_owner_id,actor_id,amount,level_before,level_after,price_before,price_after,reason,money_tx_id,created_at)
-                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,strftime('%s','now'))""",
-                        (g, property_id, "dashboard_shop_edit_property", int(prop["owner_id"] or 0), int(prop["owner_id"] or 0), actor_id, 0, int(prop["level"]), level, int(prop["price"]), price, reason, ""))
-
-                    conn.commit()
-
-                    log_event(
-                        g,
-                        f"dashboard_real_estate_shop_{action}",
-                        owner_id or int(prop["owner_id"] or 0),
-                        owner_name,
-                        0,
-                        "",
-                        f"Dashboard real estate shop {action}",
-                        f"Actor={actor_id}, Property={property_id}, Reason={reason}"
-                    )
-
-            conn.close()
-            return redirect(f"/dashboard/shop?guild_id={g}")
-
-        owner_filter = request.args.get("owner_id", "").strip()
-        property_type = request.args.get("type", "").strip()
-        only_available = request.args.get("available", "1").strip() == "1"
-
-        rows = real_estate.rows(g, only_available=only_available)
-
-        if owner_filter.isdigit():
-            rows = [r for r in rows if int(r["owner_id"] or 0) == int(owner_filter)]
-
-        if property_type:
-            rows = [r for r in rows if str(r["type_key"]) == property_type]
-
-        all_rows = real_estate.rows(g)
-        available_count = sum(1 for r in all_rows if int(r["owner_id"] or 0) == 0)
-        sold_count = len(all_rows) - available_count
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("""SELECT p.*, l.created_at, l.money_tx_id, l.amount
-        FROM property_ledger l
-        JOIN properties p ON p.guild_id=l.guild_id AND p.id=l.property_id
-        WHERE l.guild_id=? AND l.action IN ('buy_from_system','dashboard_shop_set_owner')
-        ORDER BY l.id DESC LIMIT 40""", (g,))
-        purchases = cur.fetchall()
-
-        cur.execute("""SELECT type_key, COUNT(*) c,
-        SUM(CASE WHEN owner_id=0 THEN 1 ELSE 0 END) available,
-        COALESCE(SUM(CASE WHEN owner_id!=0 THEN price ELSE 0 END),0) sold_value
-        FROM properties WHERE guild_id=? GROUP BY type_key ORDER BY sold_value DESC""", (g,))
-        type_summary = cur.fetchall()
-        conn.close()
-
-        summary_trs = "".join(
-            f"<tr><td>{esc(r['type_key'])}</td><td>{int(r['c']):,}</td><td>{int(r['available'] or 0):,}</td><td>{int(r['sold_value'] or 0):,}</td></tr>"
-            for r in type_summary
+        log_event(message.guild.id, "message_delete", message.author.id, message.author.display_name, message.channel.id, message.channel.name, "Message deleted", content[:1000])
+        await send_log(
+            bot,
+            message.guild,
+            "messages",
+            "🗑️ Message Deleted",
+            f"User: {message.author.mention} (`{message.author.id}`)\nChannel: {message.channel.mention}\nContent: `{content[:900]}`\nAttachments: {attachments}",
+            "warn",
+            message.author
         )
 
-        trs = "".join(
-            f"""<tr>
-              <td>{r['id']}</td>
-              <td>{esc(r['display_name'])}</td>
-              <td>{esc(r['type_key'])}</td>
-              <td>{r['owner_id'] or '-'}</td>
-              <td>{esc(r['owner_name'] or '')}</td>
-              <td>{int(r['price']):,}</td>
-              <td>{int(r['rent']):,}</td>
-              <td>{int(r['level'])}</td>
-              <td>
-                <form method='post' style='display:grid;grid-template-columns:110px 110px 85px 85px 70px 120px;gap:6px;min-width:640px'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=property_id value='{r['id']}'>
-                  <input name=owner_id placeholder='Owner ID'>
-                  <input name=owner_name placeholder='Name'>
-                  <input name=price value='{int(r['price'])}' type=number min=0>
-                  <input name=rent value='{int(r['rent'])}' type=number min=0>
-                  <input name=level value='{int(r['level'])}' type=number min=1>
-                  <input name=reason placeholder='Reason'>
-                  <button name=action value='set_owner'>Set Owner</button>
-                  <button name=action value='clear_owner' style='background:#dc2626'>Clear</button>
-                  <button name=action value='edit_property' style='background:#334155'>Edit</button>
-                </form>
-              </td>
-            </tr>"""
-            for r in rows[:250]
+    @bot.event
+    async def on_message_edit(before, after):
+        if not before.guild or before.author.bot:
+            return
+        if before.content == after.content:
+            return
+
+        log_event(before.guild.id, "message_edit", before.author.id, before.author.display_name, before.channel.id, before.channel.name, "Message edited", f"Before: {before.content[:500]} | After: {after.content[:500]}")
+        await send_log(
+            bot,
+            before.guild,
+            "messages",
+            "✏️ Message Edited",
+            f"User: {before.author.mention} (`{before.author.id}`)\nChannel: {before.channel.mention}\nBefore: `{before.content[:700]}`\nAfter: `{after.content[:700]}`",
+            "info",
+            before.author
         )
 
-        purchase_trs = "".join(
-            f"<tr><td>{p['id']}</td><td>{esc(p['display_name'])}</td><td>{esc(p['type_key'])}</td><td><code>{p['owner_id']}</code></td><td>{esc(p['owner_name'])}</td><td>{int(p['amount'] or p['price'] or 0):,}</td><td><code>{esc(p['money_tx_id'])[:12]}</code></td></tr>"
-            for p in purchases
+    @bot.event
+    async def on_member_join(member):
+        ensure_guild(member.guild.id, member.guild.name)
+        log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
+
+        await send_log(
+            bot,
+            member.guild,
+            "join_leave",
+            "📥 Member Joined",
+            f"User: {member.mention} (`{member.id}`)\nAccount Created: {fmt_dt(member.created_at)}\nBot: `{member.bot}`",
+            "ok",
+            member
         )
 
-        body = server_pill_html(g, bot) + f"""
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Shop Mode</div><div class='stat'>Real Estate</div></div>
-          <div class='card kpi-good'><div class='muted'>Available</div><div class='stat'>{available_count:,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Sold / Owned</div><div class='stat'>{sold_count:,}</div></div>
-          <div class='card'><div class='muted'>Total Properties</div><div class='stat'>{len(all_rows):,}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>Real Estate Shop Filters</h3>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=owner_id placeholder='Owner ID' value='{esc(owner_filter)}'>
-            <input name=type placeholder='type_key مثل room/apartment' value='{esc(property_type)}'>
-            <label><input type=checkbox name=available value=1 {'checked' if only_available else ''}> Available only</label>
-            <button>Filter</button>
-            <a class='btn' style='background:#334155' href='/dashboard/shop?guild_id={g}'>Reset</a>
-          </form>
-          <p class='muted'>المتجر حاليًا مخصص للعقارات فقط. أمر الشراء في الديسكورد: <code>!شراء ID</code></p>
-        </div>
-
-        <div class='card'>
-          <h3>Property Type Summary</h3>
-          <table><tr><th>Type</th><th>Total</th><th>Available</th><th>Sold Value</th></tr>{summary_trs}</table>
-        </div>
-
-        <div class='card'>
-          <h3>Properties Shop</h3>
-          <table><tr><th>ID</th><th>Name</th><th>Type</th><th>Owner</th><th>Owner Name</th><th>Price</th><th>Rent</th><th>Level</th><th>Actions</th></tr>{trs}</table>
-        </div>
-
-        <div class='card'>
-          <h3>Recent Property Purchases</h3>
-          <table><tr><th>ID</th><th>Property</th><th>Type</th><th>Buyer</th><th>Name</th><th>Amount</th><th>TX</th></tr>{purchase_trs}</table>
-        </div>
-        """
-        return page("Real Estate Shop", body, g)
-
-
-    @app.route("/dashboard/giveaways", methods=["GET", "POST"])
-    def giveaways_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        giveaway_service.ensure_tables()
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-
-            if action == "create":
-                prize = request.form.get("prize", "").strip()
-                winner_count = int(request.form.get("winner_count") or 1)
-                created_by_id = int((dashboard_user() or {}).get("id") or 0)
-                created_by_name = dashboard_user().get("global_name") or dashboard_user().get("username") or "Dashboard"
-                giveaway_service.create_giveaway(g, prize, winner_count, created_by_id, created_by_name)
-                return redirect(f"/dashboard/giveaways?guild_id={g}")
-
-            if action == "close":
-                giveaway_id = int(request.form.get("giveaway_id") or 0)
-                giveaway_service.close_giveaway(g, giveaway_id)
-                return redirect(f"/dashboard/giveaways?guild_id={g}")
-
-            if action == "reopen":
-                giveaway_id = int(request.form.get("giveaway_id") or 0)
-                conn = db()
-                cur = conn.cursor()
-                cur.execute("UPDATE giveaways SET status='open', ended_at=0 WHERE guild_id=? AND id=?", (g, giveaway_id))
-                conn.commit()
-                conn.close()
-                return redirect(f"/dashboard/giveaways?guild_id={g}")
-
-            if action == "pick":
-                giveaway_id = int(request.form.get("giveaway_id") or 0)
-                giveaway_service.pick_winners(g, giveaway_id)
-                return redirect(f"/dashboard/giveaways?guild_id={g}&view_id={giveaway_id}")
-
-            if action == "add_entry":
-                giveaway_id = int(request.form.get("giveaway_id") or 0)
-                user_id = int(request.form.get("user_id") or 0)
-                user_name = request.form.get("user_name", "").strip() or str(user_id)
-                giveaway_service.join(g, giveaway_id, user_id, user_name)
-                return redirect(f"/dashboard/giveaways?guild_id={g}&view_id={giveaway_id}")
-
-        view_id = request.args.get("view_id", "").strip()
-        rows = giveaway_service.giveaways(g, 100)
-
-        giveaway_trs = ""
-        for r in rows:
-            entries = giveaway_service.entry_count(g, int(r["id"]))
-            winners = giveaway_service.winner_list(g, int(r["id"]))
-            giveaway_trs += f"""<tr>
-              <td>{r['id']}</td>
-              <td>{esc(r['prize'])}</td>
-              <td>{int(r['winner_count'])}</td>
-              <td>{entries}</td>
-              <td>{esc(r['status'])}</td>
-              <td>{esc(', '.join(str(w) for w in winners)) or '-'}</td>
-              <td><a href='/dashboard/giveaways?guild_id={g}&view_id={r['id']}'>Entries</a></td>
-              <td>
-                <form method='post' style='display:inline'>
-                  <input type=hidden name=guild_id value='{g}'>
-                  <input type=hidden name=giveaway_id value='{r['id']}'>
-                  <button name=action value='pick'>Pick</button>
-                  <button name=action value='close' style='background:#334155'>Close</button>
-                  <button name=action value='reopen' style='background:#16a34a'>Reopen</button>
-                </form>
-              </td>
-            </tr>"""
-
-        entries_card = ""
-        if view_id.isdigit():
-            entries = giveaway_service.entries(g, int(view_id))
-            entry_trs = "".join(
-                f"<tr><td>{e['id']}</td><td><code>{e['user_id']}</code></td><td>{esc(e['user_name'])}</td></tr>"
-                for e in entries
-            )
-            entries_card = f"""
-            <div class='card'>
-              <h3>Entries for Giveaway #{view_id}</h3>
-              <form method=post>
-                <input type=hidden name=guild_id value='{g}'>
-                <input type=hidden name=action value='add_entry'>
-                <input type=hidden name=giveaway_id value='{view_id}'>
-                <input name=user_id placeholder='User ID' required>
-                <input name=user_name placeholder='Name optional'>
-                <button>Add Entry</button>
-              </form>
-              <br>
-              <table><tr><th>ID</th><th>User ID</th><th>Name</th></tr>{entry_trs}</table>
-            </div>
-            """
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='card'>
-          <h3>Create Giveaway</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=action value='create'>
-            <input name=prize placeholder='Prize' required>
-            <input name=winner_count type=number min=1 value=1 style='width:120px'>
-            <button>Create</button>
-          </form>
-        </div>
-
-        {entries_card}
-
-        <div class='card'>
-          <h3>Giveaways</h3>
-          <table><tr><th>ID</th><th>Prize</th><th>Winners</th><th>Entries</th><th>Status</th><th>Winner IDs</th><th>Entries</th><th>Action</th></tr>{giveaway_trs}</table>
-        </div>
-        """
-        return page("Giveaways", body, g)
-
-    @app.route("/dashboard/user", methods=["GET", "POST"])
-    def user_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        if request.method == "POST":
-            action = request.form.get("action", "").strip()
-            actor_id, actor_name = dashboard_actor()
-
-            try:
-                uid_int = int(request.form.get("user_id") or 0)
-            except Exception:
-                uid_int = 0
-
-            try:
-                amount = int(str(request.form.get("amount") or "0").replace(",", ""))
-            except Exception:
-                amount = 0
-
-            reason = request.form.get("reason").strip() if request.form.get("reason") else f"Dashboard user action {action}"
-
-            if uid_int and action in {"give", "take", "set"}:
-                info = member_info(bot, g, uid_int)
-                uname = info["name"] if info["name"] != str(uid_int) else str(uid_int)
-
-                if action == "give" and amount > 0:
-                    economy_service.credit(g, uid_int, amount, "dashboard_user_give", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
-                elif action == "take" and amount > 0:
-                    economy_service.debit(g, uid_int, amount, "dashboard_user_take", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
-                elif action == "set" and amount >= 0:
-                    economy_service.set_balance(g, uid_int, amount, "dashboard_user_set_balance", user_name=uname, actor_id=actor_id, actor_name=actor_name, reason=reason)
-
-                log_event(g, f"dashboard_user_{action}", uid_int, uname, 0, "", f"Dashboard user {action}", f"Actor={actor_id}, Amount={amount}, Reason={reason}")
-
-            return redirect(f"/dashboard/user?guild_id={g}&user_id={uid_int}")
-
-        uid = request.args.get("user_id", "").strip()
-
-        if not uid.isdigit():
-            return page("User Lookup", server_pill_html(g, bot) + f"<div class='card'><h3>User Lookup</h3><form><input type=hidden name=guild_id value='{g}'><input name=user_id placeholder='User ID'><button>Search</button></form></div>", g)
-
-        uid = int(uid)
-        info = member_info(bot, g, uid)
-
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, uid))
-        bal = cur.fetchone()
-
-        cur.execute("SELECT xp,level FROM levels WHERE guild_id=? AND user_id=?", (g, uid))
-        lvl = cur.fetchone()
-
-        cur.execute("""SELECT
-        COUNT(*) rows,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, uid))
-        money = cur.fetchone()
-
-        cur.execute("""SELECT source_type, COUNT(*) c,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? AND user_id=?
-        GROUP BY source_type ORDER BY c DESC LIMIT 25""", (g, uid))
-        sources = cur.fetchall()
-
-        cur.execute("SELECT * FROM money_ledger WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
-        ledger = cur.fetchall()
-
-        cur.execute("SELECT * FROM warnings WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT 50", (g, uid))
-        warns = cur.fetchall()
-
-        cur.execute("SELECT * FROM properties WHERE guild_id=? AND owner_id=? ORDER BY id LIMIT 50", (g, uid))
-        props = cur.fetchall()
-
-        conn.close()
-
-        source_trs = "".join(
-            f"<tr><td>{status_badge(r['source_type'])}</td><td>{int(r['c']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td></tr>"
-            for r in sources
-        ) or "<tr><td colspan='5'>No source data.</td></tr>"
-
-        ledger_trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{status_badge(r['source_type'])}</td><td>{esc(r['reason'])}</td></tr>"
-            for r in ledger
-        ) or "<tr><td colspan='6'>No money history.</td></tr>"
-
-        warn_trs = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['reason'])}</td><td>{status_badge(r['status'])}</td><td>{user_chip(bot,g,r['moderator_id'],r['moderator_name'])}</td></tr>"
-            for r in warns
-        ) or "<tr><td colspan='4'>No warnings.</td></tr>"
-
-        prop_trs = "".join(
-            f"<tr><td><code>{r['id']}</code></td><td>{esc(r['display_name'])}</td><td>{int(r['level'])}</td><td>{int(r['rent']):,}</td></tr>"
-            for r in props
-        ) or "<tr><td colspan='4'>No properties.</td></tr>"
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='card'>
-          <form>
-            <input type=hidden name=guild_id value='{g}'>
-            <input name=user_id value='{uid}' placeholder='User ID'>
-            <button>Search</button>
-            <a class='btn' style='background:#334155' href='/dashboard/money-tracker?guild_id={g}&user_id={uid}'>Money Profile</a>
-            <a class='btn' style='background:#334155' href='/dashboard/warnings?guild_id={g}&user_id={uid}&status=all'>Warnings</a>
-          </form>
-        </div>
-
-        <div class='card' style='display:flex;justify-content:space-between;align-items:center;gap:18px;flex-wrap:wrap'>
-          <div class='userline'>
-            <img class='avatar-lg' src='{esc(info["avatar"])}'>
-            <div>
-              <div class='muted'>User Profile</div>
-              <div style='font-size:26px;font-weight:950'>{esc(info["name"])}</div>
-              <code>{uid}</code>
-            </div>
-          </div>
-        </div>
-
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Balance</div><div class='stat'>{int(bal['balance'] if bal else 0):,}</div></div>
-          <div class='card'><div class='muted'>Level</div><div class='stat'>{int(lvl['level'] if lvl else 1)}</div><div class='muted'>XP {int(lvl['xp'] if lvl else 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Gained</div><div class='stat'>{int(money['gained'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Spent/Lost</div><div class='stat'>{int(money['spent'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(money['net'] or 0):,}</div></div>
-          <div class='card'><div class='muted'>Warnings</div><div class='stat'>{len(warns):,}</div></div>
-          <div class='card'><div class='muted'>Properties</div><div class='stat'>{len(props):,}</div></div>
-        </div>
-
-        <div class='card'>
-          <h3>User Money Control</h3>
-          <form method=post>
-            <input type=hidden name=guild_id value='{g}'>
-            <input type=hidden name=user_id value='{uid}'>
-            <input name=amount type=number min=0 placeholder='Amount'>
-            <input name=reason placeholder='Reason' style='min-width:260px'>
-            <button name=action value='give'>Give</button>
-            <button name=action value='take' style='background:#dc2626'>Take</button>
-            <button name=action value='set' style='background:#334155'>Set Balance</button>
-          </form>
-        </div>
-
-        <div class='card'><h3>Money Sources</h3><table><tr><th>Source</th><th>Rows</th><th>Gained</th><th>Spent</th><th>Net</th></tr>{source_trs}</table></div>
-        <div class='card'><h3>Money History</h3><table><tr><th>TX</th><th>Amount</th><th>Before</th><th>After</th><th>Source</th><th>Reason</th></tr>{ledger_trs}</table></div>
-        <div class='card'><h3>Warnings</h3><table><tr><th>ID</th><th>Reason</th><th>Status</th><th>By</th></tr>{warn_trs}</table></div>
-        <div class='card'><h3>Properties</h3><table><tr><th>ID</th><th>Name</th><th>Level</th><th>Rent</th></tr>{prop_trs}</table></div>
-        """
-        return page("User Lookup", body, g)
-
-    @app.route("/dashboard/setup")
-    def setup_page():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-
-        guild_obj = None
-        try:
-            for bg in bot.guilds:
-                if int(bg.id) == int(g):
-                    guild_obj = bg
-                    break
-        except Exception:
-            guild_obj = None
-
-        if not guild_obj:
-            return page("Setup Status", server_pill_html(g, bot) + "<div class='card'><h3 class='bad'>Bot is not connected to this guild.</h3></div>", g)
-
-        s = system_status(guild_obj)
-        mem = s["memory"]
-        logs = s["logs"]
-        gs = s["guild_settings"]
-        perms = s["permissions"]
-
-        def yn(v):
-            return "✅" if v else "❌"
-
-        rows = [
-            ("Persistent memory path", yn(mem["persistent_path"]), f"<code>{esc(mem['db_file'])}</code>"),
-            ("Database size", "ℹ️", f"<code>{esc(mem['db_size_text'])}</code>"),
-            ("Organized log rooms", yn(logs["mapped"] == logs["total"]), f"<code>{logs['mapped']}/{logs['total']}</code>"),
-            ("Commands channel", yn(bool(gs.get("commands_channel_id"))), f"<code>{esc(gs.get('commands_channel_id') or 0)}</code>"),
-            ("Gambling channel", yn(bool(gs.get("gambling_channel_id"))), f"<code>{esc(gs.get('gambling_channel_id') or 0)}</code>"),
-            ("View Audit Log", yn(perms.get("view_audit_log")), ""),
-            ("Manage Channels", yn(perms.get("manage_channels")), ""),
-            ("Manage Messages", yn(perms.get("manage_messages")), ""),
-            ("Embed Links", yn(perms.get("embed_links")), ""),
-        ]
-
-        trs = "".join(f"<tr><td>{name}</td><td>{status}</td><td>{detail}</td></tr>" for name, status, detail in rows)
-
-        log_map = all_log_channels(g)
-        log_trs = ""
-        for key, (name, topic) in LOG_CHANNELS.items():
-            cid = int(log_map.get(key) or 0)
-            log_trs += f"<tr><td><code>{esc(key)}</code></td><td>{esc(name)}</td><td>{f'<#{cid}>' if cid else '<span class=bad>Not set</span>'}</td></tr>"
-
-        body = server_pill_html(g, bot)
-        body += f"""
-        <div class='card'>
-          <h3>Setup Checklist</h3>
-          <table><tr><th>Check</th><th>Status</th><th>Details</th></tr>{trs}</table>
-          <br>
-          <p class='muted'>From Discord run: <code>!تجهيز_اللوقات</code>, <code>!فحص_الصلاحيات</code>, <code>!اختبار_اللوقات</code></p>
-        </div>
-        <div class='card'>
-          <h3>Log Rooms</h3>
-          <table><tr><th>Key</th><th>Name</th><th>Channel</th></tr>{log_trs}</table>
-        </div>
-        """
-        return page("Setup Status", body, g)
-
-
-    @app.route("/dashboard/health")
-    def health():
-        d = require_login()
-        if d:
-            return d
-
-        g = gid(bot)
-        cfg = oauth_config()
-        bot_online = bool(bot and getattr(bot, "user", None))
-        bot_name = str(bot.user) if bot_online else "Not ready"
-        bot_ids = bot_guild_ids(bot)
-        current_connected = int(g or 0) in bot_ids if g else False
-        current_name = bot_guild_name(bot, g) if g else "None"
-
-        body = server_pill_html(g, bot) + f"""
-        <div class='card'>
-          <h2 class='ok'>V9 Unified + Discord Login OK</h2>
-          <p>Bot Online: {'✅' if bot_online else '❌'}</p>
-          <p>Bot Name: <code>{esc(bot_name)}</code></p>
-          <p>Bot Guilds Count: <code>{len(bot_ids)}</code></p>
-          <p>Current Guild Connected: {'✅' if current_connected else '❌'}</p>
-          <p>Current Guild: <b>{esc(current_name)}</b> <code>{esc(g)}</code></p>
-          <p>Commands Room: <code>{esc(get_guild_settings(g).get('commands_channel_id') if g else 0)}</code></p>
-          <p>Gambling Room: <code>{esc(get_guild_settings(g).get('gambling_channel_id') if g else 0)}</code></p>
-          <p>Logs Room: <code>{esc(get_guild_settings(g).get('logs_channel_id') if g else 0)}</code></p>
-          <p>Organized Log Rooms: <code>{sum(1 for x in all_log_channels(g).values() if int(x or 0)) if g else 0}/{len(LOG_CHANNELS)}</code></p>
-          <p>DB: <code>{esc(DB_FILE)}</code></p>
-          <p>Discord Login: ✅</p>
-          <p>Redirect URI: <code>{esc(redirect_uri())}</code></p>
-          <p>Base URL: <code>{esc(cfg['base_url'])}</code></p>
-        </div>
-        """
-        return page("Health", body, g)
-
-    return app
+        if member.bot:
+            entry = await get_latest_audit(member.guild, discord.AuditLogAction.bot_add, member.id)
+            if entry:
+                await handle_antiraid_action(bot, member.guild, "bot_add", entry.user, f"Bot `{member}` (`{member.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_member_remove(member):
+        leave_type, moderator, reason = await detect_leave_type(member)
+        if leave_type in {"kick", "ban"} and moderator:
+            await handle_antiraid_action(bot, member.guild, leave_type, moderator, f"Member `{member}` (`{member.id}`)", reason)
+        title = "📤 Member Left"
+        color = "warn"
+
+        if leave_type == "kick":
+            title = "👢 Member Kicked"
+            color = "bad"
+        elif leave_type == "ban":
+            title = "🔨 Member Banned"
+            color = "bad"
+
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "None"
+
+        details = (
+            f"User: **{member}** (`{member.id}`)\n"
+            f"Type: `{leave_type}`\n"
+            f"Moderator: {mod_text}\n"
+            f"Reason: `{reason}`\n"
+            f"Account Created: {fmt_dt(member.created_at)}\n"
+            f"Joined Server: {fmt_dt(member.joined_at) if member.joined_at else 'Unknown'}\n"
+            f"Roles Before Leaving:\n{role_list(member)}"
+        )
+
+        log_event(member.guild.id, f"member_{leave_type}", member.id, member.display_name, title=title, details=details[:1900])
+        await send_log(bot, member.guild, "join_leave", title, details, color, member)
+
+    @bot.event
+    async def on_member_ban(guild, user):
+        moderator, reason = await audit_reason(guild, discord.AuditLogAction.ban, user.id)
+        if moderator:
+            await handle_antiraid_action(bot, guild, "ban", moderator, f"User `{user}` (`{user.id}`)", reason)
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
+
+        log_event(guild.id, "member_ban", user.id, str(user), title="Member banned", details=f"By={mod_text}, Reason={reason}")
+        await send_log(
+            bot,
+            guild,
+            "join_leave",
+            "🔨 Member Banned",
+            f"User: **{user}** (`{user.id}`)\nModerator: {mod_text}\nReason: `{reason}`\nAccount Created: {fmt_dt(user.created_at)}",
+            "bad"
+        )
+
+    @bot.event
+    async def on_member_unban(guild, user):
+        moderator, reason = await audit_reason(guild, discord.AuditLogAction.unban, user.id)
+        mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
+
+        log_event(guild.id, "member_unban", user.id, str(user), title="Member unbanned", details=f"By={mod_text}, Reason={reason}")
+        await send_log(
+            bot,
+            guild,
+            "join_leave",
+            "🔓 Member Unbanned",
+            f"User: **{user}** (`{user.id}`)\nModerator: {mod_text}\nReason: `{reason}`",
+            "ok"
+        )
+
+    @bot.event
+    async def on_member_update(before, after):
+        if before.roles != after.roles:
+            before_ids = {r.id for r in before.roles}
+            after_ids = {r.id for r in after.roles}
+
+            added = [r.mention for r in after.roles if r.id not in before_ids and r.name != "@everyone"]
+            removed = [r.mention for r in before.roles if r.id not in after_ids and r.name != "@everyone"]
+
+            details = f"User: {after.mention} (`{after.id}`)\nAdded: {', '.join(added) if added else 'None'}\nRemoved: {', '.join(removed) if removed else 'None'}"
+            action = getattr(discord.AuditLogAction, "member_role_update", None)
+            if action:
+                entry = await get_latest_audit(after.guild, action, after.id)
+                if entry:
+                    await handle_antiraid_action(bot, after.guild, "member_role_update", entry.user, f"Member `{after}` (`{after.id}`)", entry.reason or "")
+            log_event(after.guild.id, "member_roles_update", after.id, after.display_name, title="Roles changed", details=details)
+            await send_log(bot, after.guild, "roles", "🎭 Roles Updated", details, "info", after)
+
+        if before.nick != after.nick:
+            details = f"User: {after.mention} (`{after.id}`)\nBefore: `{before.nick}`\nAfter: `{after.nick}`"
+            log_event(after.guild.id, "member_nick_update", after.id, after.display_name, title="Nickname changed", details=details)
+            await send_log(bot, after.guild, "roles", "🏷️ Nickname Updated", details, "info", after)
+
+
+    @bot.event
+    async def on_guild_role_delete(role):
+        entry = await get_latest_audit(role.guild, discord.AuditLogAction.role_delete, role.id)
+        if entry:
+            await handle_antiraid_action(bot, role.guild, "role_delete", entry.user, f"Role `{role.name}` (`{role.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_role_update(before, after):
+        entry = await get_latest_audit(after.guild, discord.AuditLogAction.role_update, after.id)
+        added_perms = antiraid.dangerous_perms_added(before.permissions, after.permissions)
+        if entry:
+            if added_perms:
+                await handle_antiraid_action(
+                    bot,
+                    after.guild,
+                    "dangerous_role_update",
+                    entry.user,
+                    f"Role `{after.name}` (`{after.id}`) added dangerous perms: {', '.join(added_perms)}",
+                    entry.reason or ""
+                )
+            await handle_antiraid_action(bot, after.guild, "role_update", entry.user, f"Role `{after.name}` (`{after.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_channel_create(channel):
+        log_event(channel.guild.id, "channel_create", channel.id, channel.name, channel.id, channel.name, "Channel created", str(channel))
+        await send_log(bot, channel.guild, "server", "➕ Channel Created", f"Channel: {channel.mention if hasattr(channel, 'mention') else channel.name}\nID: `{channel.id}`\nType: `{channel.type}`", "ok")
+
+        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_create, channel.id)
+        if entry:
+            await handle_antiraid_action(bot, channel.guild, "channel_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_channel_delete(channel):
+        log_event(channel.guild.id, "channel_delete", channel.id, channel.name, 0, channel.name, "Channel deleted", str(channel))
+        await send_log(bot, channel.guild, "server", "➖ Channel Deleted", f"Name: **{channel.name}**\nID: `{channel.id}`\nType: `{channel.type}`", "bad")
+
+        entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
+        if entry:
+            await handle_antiraid_action(bot, channel.guild, "channel_delete", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_guild_channel_update(before, after):
+        entry = await get_latest_audit(after.guild, discord.AuditLogAction.channel_update, after.id)
+        if entry:
+            await handle_antiraid_action(bot, after.guild, "channel_update", entry.user, f"Channel `{after.name}` (`{after.id}`)", entry.reason or "")
+
+    @bot.event
+    async def on_webhooks_update(channel):
+        for action_type, audit_action in [
+            ("webhook_create", discord.AuditLogAction.webhook_create),
+            ("webhook_update", discord.AuditLogAction.webhook_update),
+            ("webhook_delete", discord.AuditLogAction.webhook_delete),
+        ]:
+            entry = await get_latest_audit(channel.guild, audit_action, None)
+            if entry:
+                await handle_antiraid_action(bot, channel.guild, action_type, entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+                break
+
+
+    @bot.event
+    async def on_voice_state_update(member, before, after):
+        if before.channel == after.channel:
+            return
+
+        if before.channel and after.channel:
+            title = "🔀 Voice Moved"
+            details = f"User: {member.mention} (`{member.id}`)\nFrom: **{before.channel.name}**\nTo: **{after.channel.name}**"
+        elif after.channel:
+            title = "🔊 Voice Joined"
+            details = f"User: {member.mention} (`{member.id}`)\nChannel: **{after.channel.name}**"
+        else:
+            title = "🔇 Voice Left"
+            details = f"User: {member.mention} (`{member.id}`)\nChannel: **{before.channel.name}**"
+
+        log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
+        await send_log(bot, member.guild, "voice", title, details, "info", member)
