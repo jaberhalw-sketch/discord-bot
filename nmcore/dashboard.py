@@ -11,6 +11,7 @@ from nmcore.services import security
 from nmcore.services import full_check
 from nmcore.services import reports
 from nmcore.services import post_rewards
+from nmcore.services import boost_rewards
 from nmcore.services import shop as shop_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
@@ -1230,13 +1231,6 @@ DASHBOARD_BASE_URL</pre>
         stats = cur.fetchone()
 
         conn.close()
-
-        real_estate_stock_summary = real_estate.stock_summary(g)
-        real_estate_stock_rows = "".join(
-            f"<tr><td>{esc(s['type_key'])}</td><td>{int(s['total'] or 0):,}</td><td>{int(s['available'] or 0):,}</td><td>{int(s['owned'] or 0):,}</td><td>{int(s['min_price'] or 0):,}</td><td>{int(s['min_rent'] or 0):,}</td></tr>"
-            for s in real_estate_stock_summary
-        )
-
         trs = "".join(
             f"""<tr>
               <td><a href='/dashboard/user?guild_id={g}&user_id={r['user_id']}'><code>{r['user_id']}</code></a></td>
@@ -2535,6 +2529,99 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
         return page("Settings", body, g)
+
+
+    @app.route("/dashboard/post-rewards")
+    def post_rewards_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        data = post_rewards.summary(g, 150)
+        totals = data.get("totals", {})
+        top = data.get("top", [])
+        recent = data.get("recent", [])
+
+        top_rows = "".join(
+            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{int(r.get('posts') or 0):,}</td><td>{int(r.get('total') or 0):,}</td></tr>"
+            for r in top
+        ) or "<tr><td colspan='3'>No rewarded posts yet.</td></tr>"
+
+        recent_rows = "".join(
+            f"<tr><td><code>{r.get('id')}</code></td><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td><code>{r.get('channel_id')}</code></td><td><code>{r.get('message_id')}</code></td><td>{int(r.get('amount') or 0):,}</td><td><code>{esc(str(r.get('money_tx_id') or ''))[:12]}</code></td></tr>"
+            for r in recent
+        ) or "<tr><td colspan='6'>No recent rewards.</td></tr>"
+
+        body = server_pill_html(g, bot)
+        body += f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Rewarded Posts</div><div class='stat'>{int(totals.get('c') or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Total Paid</div><div class='stat'>{int(totals.get('total') or 0):,}</div></div>
+          <div class='card'><div class='muted'>Top Users</div><div class='stat'>{len(top):,}</div></div>
+        </div>
+        <div class='card'>
+          <h3>Post Reward Report</h3>
+          <p class='muted'>هذا للبوستات العادية في الرومات المحددة من Settings.</p>
+          <a class='btn' href='/dashboard/settings?guild_id={g}'>Edit Post Reward Settings</a>
+          <a class='btn' style='background:#334155' href='/dashboard/boosts?guild_id={g}'>Open Boosts Page</a>
+        </div>
+        <div class='card'><h3>Top Paid Users</h3><table><tr><th>User</th><th>Posts</th><th>Total Paid</th></tr>{top_rows}</table></div>
+        <div class='card'><h3>Recent Rewards</h3><table><tr><th>ID</th><th>User</th><th>Channel</th><th>Message</th><th>Amount</th><th>TX</th></tr>{recent_rows}</table></div>
+        """
+        return page("Post Rewards", body, g)
+
+    @app.route("/dashboard/boosts")
+    def boosts_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        # Best-effort sync active boosters from the bot cache whenever page opens.
+        try:
+            guild_obj = None
+            for bg in bot.guilds:
+                if int(bg.id) == int(g):
+                    guild_obj = bg
+                    break
+            if guild_obj:
+                boost_rewards.sync_guild(guild_obj)
+        except Exception:
+            pass
+
+        data = boost_rewards.summary(g, 200)
+        totals = data.get("totals", {})
+        boosters = data.get("boosters", [])
+        recent = data.get("recent", [])
+
+        booster_rows = "".join(
+            f"<tr><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td>{status_badge('active' if int(r.get('active') or 0) else 'inactive')}</td><td>{int(r.get('boost_count') or 0):,}</td><td>{int(r.get('first_boost_at') or 0)}</td><td>{int(r.get('last_boost_at') or 0)}</td></tr>"
+            for r in boosters
+        ) or "<tr><td colspan='5'>No boosters tracked yet.</td></tr>"
+
+        recent_rows = "".join(
+            f"<tr><td><code>{r.get('id')}</code></td><td>{user_chip(bot,g,r.get('user_id') or 0,r.get('user_name') or '')}</td><td><code>{r.get('message_id')}</code></td><td><code>{r.get('channel_id')}</code></td><td>{esc(r.get('event_type') or 'boost')}</td></tr>"
+            for r in recent
+        ) or "<tr><td colspan='5'>No boost events yet.</td></tr>"
+
+        body = server_pill_html(g, bot)
+        body += f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Boost Events Tracked</div><div class='stat'>{int(totals.get('total_events') or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Unique Boosters</div><div class='stat'>{int(totals.get('unique_boosters') or 0):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Active Boosters</div><div class='stat'>{int(totals.get('active_boosters') or 0):,}</div></div>
+        </div>
+        <div class='card'>
+          <h3>Server Boost Tracking</h3>
+          <p class='muted'>البوت يتتبع رسائل البوست الجديدة عشان يعرف مين بوّست وكم مرة. العضو النشط يظهر من premium_since لو كان موجود في كاش البوت.</p>
+          <p class='muted'>مهم: البوستات القديمة قبل تركيب النظام ما يقدر يعرف عددها الحقيقي إذا ما كان عنده رسالة البوست، لكنه يقدر يعرف active boosters من دسكورد.</p>
+        </div>
+        <div class='card'><h3>Boosters</h3><table><tr><th>User</th><th>Status</th><th>Boost Count</th><th>First Boost</th><th>Last Boost</th></tr>{booster_rows}</table></div>
+        <div class='card'><h3>Recent Boost Events</h3><table><tr><th>ID</th><th>User</th><th>Message</th><th>Channel</th><th>Type</th></tr>{recent_rows}</table></div>
+        """
+        return page("Boosts", body, g)
 
     @app.route("/dashboard/shop", methods=["GET", "POST"])
     def shop_page():
