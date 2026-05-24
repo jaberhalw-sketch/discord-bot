@@ -1,4 +1,4 @@
-import os, time, html, json, urllib.parse, urllib.request, urllib.error
+import os, time, html, json, urllib.parse, urllib.request, urllib.error, asyncio
 from flask import Flask, request, redirect, session
 from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
 from nmcore.db import db, init_db
@@ -2525,6 +2525,239 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
         return page("Setup Wizard", body, g)
+
+
+    @app.route("/dashboard/roles", methods=["GET", "POST"])
+    def role_manager_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        def get_guild_obj():
+            try:
+                for guild in bot.guilds:
+                    if int(guild.id) == int(g):
+                        return guild
+            except Exception:
+                pass
+            return None
+
+        def run_discord(coro, timeout=8):
+            try:
+                fut = asyncio.run_coroutine_threadsafe(coro, bot.loop)
+                return fut.result(timeout=timeout)
+            except Exception as e:
+                return e
+
+        def fetch_member_sync(guild, user_id):
+            try:
+                m = guild.get_member(int(user_id))
+                if m:
+                    return m
+                res = run_discord(guild.fetch_member(int(user_id)), timeout=8)
+                if isinstance(res, Exception):
+                    return None
+                return res
+            except Exception:
+                return None
+
+        def can_manage_role(guild, role):
+            try:
+                me = guild.me
+                if not me:
+                    return False, "Bot member not loaded"
+                if role.is_default():
+                    return False, "Cannot manage @everyone"
+                if getattr(role, "managed", False):
+                    return False, "Managed/integration role"
+                if role >= me.top_role:
+                    return False, "Role is above/equal bot top role"
+                if not me.guild_permissions.manage_roles:
+                    return False, "Bot missing Manage Roles"
+                return True, "OK"
+            except Exception as e:
+                return False, str(e)
+
+        guild = get_guild_obj()
+        if not guild:
+            return page("Role Manager", server_pill_html(g, bot) + "<div class='card'><h3>Guild not found</h3><p class='muted'>البوت مو شايف هذا السيرفر الآن.</p></div>", g)
+
+        msg = ""
+        msg_color = "info"
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            actor_id, actor_name = dashboard_actor()
+
+            try:
+                user_id = int(request.form.get("user_id") or 0)
+                role_id = int(request.form.get("role_id") or 0)
+            except Exception:
+                user_id = 0
+                role_id = 0
+
+            member = fetch_member_sync(guild, user_id) if user_id else None
+            role = guild.get_role(role_id) if role_id else None
+
+            if not member:
+                msg = "❌ العضو غير موجود أو البوت ما قدر يجيبه من Discord."
+                msg_color = "bad"
+            elif not role:
+                msg = "❌ الرتبة غير موجودة."
+                msg_color = "bad"
+            else:
+                ok, reason = can_manage_role(guild, role)
+                if not ok:
+                    msg = f"❌ البوت ما يقدر يتحكم في هذه الرتبة: {esc(reason)}"
+                    msg_color = "bad"
+                elif action == "add_role":
+                    async def do_add():
+                        await member.add_roles(role, reason=f"Dashboard role add by {actor_name} ({actor_id})")
+                    res = run_discord(do_add(), timeout=8)
+                    if isinstance(res, Exception):
+                        msg = f"❌ فشل إعطاء الرتبة: {esc(type(res).__name__)}: {esc(str(res)[:300])}"
+                        msg_color = "bad"
+                    else:
+                        msg = f"✅ تم إعطاء {role.mention} إلى {member.mention}"
+                        msg_color = "ok"
+                        log_event(g, "dashboard_role_add", member.id, member.display_name, 0, "", "Dashboard role added", f"Role={role.name} ({role.id}), Actor={actor_id}")
+                elif action == "remove_role":
+                    async def do_remove():
+                        await member.remove_roles(role, reason=f"Dashboard role remove by {actor_name} ({actor_id})")
+                    res = run_discord(do_remove(), timeout=8)
+                    if isinstance(res, Exception):
+                        msg = f"❌ فشل سحب الرتبة: {esc(type(res).__name__)}: {esc(str(res)[:300])}"
+                        msg_color = "bad"
+                    else:
+                        msg = f"✅ تم سحب {role.mention} من {member.mention}"
+                        msg_color = "ok"
+                        log_event(g, "dashboard_role_remove", member.id, member.display_name, 0, "", "Dashboard role removed", f"Role={role.name} ({role.id}), Actor={actor_id}")
+
+            return redirect(f"/dashboard/roles?guild_id={g}&user_id={user_id}&msg={urllib.parse.quote(msg)}&color={msg_color}")
+
+        selected_uid = request.args.get("user_id", "").strip()
+        msg = request.args.get("msg", "").strip()
+        msg_color = request.args.get("color", "info").strip()
+
+        target_member = None
+        if selected_uid.isdigit():
+            target_member = fetch_member_sync(guild, int(selected_uid))
+
+        roles = sorted([r for r in guild.roles if not r.is_default()], key=lambda r: r.position, reverse=True)
+        manageable = []
+        locked = []
+
+        for r in roles:
+            ok, reason = can_manage_role(guild, r)
+            item = (r, reason)
+            if ok:
+                manageable.append(item)
+            else:
+                locked.append(item)
+
+        target_roles = set()
+        if target_member:
+            target_roles = {int(r.id) for r in target_member.roles}
+
+        role_rows = ""
+        for role, reason in manageable[:250]:
+            has_role = int(role.id) in target_roles
+            role_rows += f"""
+            <tr>
+              <td><span class='pill'>{esc(role.name)}</span><br><code>{role.id}</code></td>
+              <td>{int(role.position)}</td>
+              <td>{'✅ معه الرتبة' if has_role else '—'}</td>
+              <td>
+                <form method='post' style='display:inline'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=user_id value='{esc(selected_uid)}'>
+                  <input type=hidden name=role_id value='{role.id}'>
+                  <button name=action value='add_role' {'disabled' if not target_member or has_role else ''}>Give</button>
+                </form>
+                <form method='post' style='display:inline'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=user_id value='{esc(selected_uid)}'>
+                  <input type=hidden name=role_id value='{role.id}'>
+                  <button name=action value='remove_role' style='background:#dc2626' {'disabled' if not target_member or not has_role else ''}>Remove</button>
+                </form>
+              </td>
+            </tr>
+            """
+
+        if not role_rows:
+            role_rows = "<tr><td colspan='4'>No manageable roles. ارفع رتبة البوت فوق الرتب وعطه Manage Roles.</td></tr>"
+
+        locked_rows = "".join(
+            f"<tr><td>{esc(role.name)}<br><code>{role.id}</code></td><td>{esc(reason)}</td></tr>"
+            for role, reason in locked[:120]
+        ) or "<tr><td colspan='2'>No locked roles.</td></tr>"
+
+        member_card = ""
+        if target_member:
+            member_card = f"""
+            <div class='card'>
+              <h3>Target Member</h3>
+              <div class='userline'>
+                <img class='avatar-lg' src='{target_member.display_avatar.url}'>
+                <div>
+                  <b style='font-size:22px'>{esc(target_member.display_name)}</b><br>
+                  <code>{target_member.id}</code><br>
+                  <span class='muted'>Current roles: {max(0, len(target_member.roles)-1)}</span>
+                </div>
+              </div>
+            </div>
+            """
+        elif selected_uid:
+            member_card = "<div class='card kpi-bad'><h3>Member not found</h3><p class='muted'>تأكد من User ID وأن العضو داخل السيرفر.</p></div>"
+
+        alert = f"<div class='card kpi-{msg_color}'><h3>Result</h3><p>{esc(msg)}</p></div>" if msg else ""
+
+        body = server_pill_html(g, bot)
+        body += alert
+        body += f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Manageable Roles</div><div class='stat'>{len(manageable):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Locked Roles</div><div class='stat'>{len(locked):,}</div></div>
+          <div class='card'><div class='muted'>Bot Top Role</div><div class='stat' style='font-size:18px'>{esc(guild.me.top_role.name if guild.me else 'Unknown')}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Role Manager</h3>
+          <p class='muted'>اختر عضو بالـ User ID، بعدها تقدر تعطيه أو تسحب منه أي رتبة يقدر البوت يتحكم فيها.</p>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(selected_uid)}' style='min-width:260px'>
+            <button>Open Member</button>
+          </form>
+        </div>
+
+        {member_card}
+
+        <div class='card'>
+          <h3>Quick Role Action</h3>
+          <form method=post>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='User ID' value='{esc(selected_uid)}'>
+            <input name=role_id placeholder='Role ID'>
+            <button name=action value='add_role'>Give Role</button>
+            <button name=action value='remove_role' style='background:#dc2626'>Remove Role</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Manageable Roles</h3>
+          <table><tr><th>Role</th><th>Position</th><th>Status</th><th>Action</th></tr>{role_rows}</table>
+        </div>
+
+        <div class='card'>
+          <h3>Locked / Not Manageable Roles</h3>
+          <p class='muted'>هذه الرتب ما يقدر البوت يتحكم فيها لأنها أعلى من رتبة البوت أو managed من Discord.</p>
+          <table><tr><th>Role</th><th>Reason</th></tr>{locked_rows}</table>
+        </div>
+        """
+        return page("Role Manager", body, g)
 
     @app.route("/dashboard/settings", methods=["GET", "POST"])
     def settings_page():
