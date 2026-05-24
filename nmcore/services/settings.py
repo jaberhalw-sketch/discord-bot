@@ -21,18 +21,15 @@ COMMAND_SYSTEM = {
 }
 
 
-def _settings_write_retry(fn, retries=5, delay=0.12):
-    last = None
-    for attempt in range(int(retries)):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            last = e
-            if "locked" not in str(e).lower():
-                raise
-            time.sleep(delay * (attempt + 1))
-    # Do not crash message events forever if database is temporarily busy.
-    return None
+def _settings_write_retry(fn, retries=1, delay=0.0):
+    try:
+        return fn()
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower():
+            raise
+        return None
+    except Exception:
+        return None
 
 
 def ensure_guild(guild_id:int, guild_name:str=""):
