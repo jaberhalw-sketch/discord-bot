@@ -25,6 +25,7 @@ from nmcore.services.activity import log_event, record
 
 DISCORD_API = "https://discord.com/api/v10"
 ADMINISTRATOR_BIT = 0x8
+BOT_OWNER_ID = 881722045031915521
 
 
 def esc(x):
@@ -94,6 +95,39 @@ def is_admin_guild(g):
         return False
 
 
+
+def is_bot_owner_dashboard():
+    try:
+        u = session.get("discord_user") or {}
+        return int(u.get("id") or 0) == int(BOT_OWNER_ID)
+    except Exception:
+        return False
+
+
+def bot_guilds_for_owner(bot=None):
+    out = []
+    try:
+        for guild in getattr(bot, "guilds", []) or []:
+            icon = ""
+            try:
+                icon = guild.icon.url if getattr(guild, "icon", None) else ""
+            except Exception:
+                icon = ""
+
+            out.append({
+                "id": str(guild.id),
+                "name": guild.name,
+                "icon": icon,
+                "owner": True,
+                "bot_owner_access": True,
+                "member_count": int(getattr(guild, "member_count", 0) or 0),
+            })
+    except Exception:
+        pass
+
+    return sorted(out, key=lambda x: str(x.get("name") or "").lower())
+
+
 def bot_guild_ids(bot=None):
     try:
         if bot and getattr(bot, "guilds", None):
@@ -144,6 +178,11 @@ def discord_user_avatar(user, size=128):
 
 def discord_guild_icon(g, size=128):
     try:
+        # Bot owner synthetic guild entries already include full icon URL.
+        direct = g.get("icon_url") or g.get("icon")
+        if isinstance(direct, str) and direct.startswith("http"):
+            return direct
+
         gid = str(g.get("id") or "")
         icon = g.get("icon")
         if gid and icon:
@@ -237,8 +276,11 @@ def status_badge(text):
 
 def refresh_session_manageable_guilds(bot=None, force=False):
     """
-    Refresh Discord guild permissions so old sessions cannot keep dashboard access
-    after Administrator is removed.
+    Refresh Discord guild permissions so old sessions cannot keep dashboard access.
+
+    Special rule:
+    BOT_OWNER_ID can see and control every server where the bot is installed,
+    even if his Discord account is not Administrator in that guild.
     """
     token = session.get("discord_access_token")
     if not token:
@@ -251,6 +293,22 @@ def refresh_session_manageable_guilds(bot=None, force=False):
         return
 
     try:
+        if is_bot_owner_dashboard():
+            manageable = bot_guilds_for_owner(bot)
+            session["discord_guilds"] = manageable
+            session["guilds_refreshed_at"] = now
+            session["bot_owner_mode"] = True
+
+            current = session.get("guild_id")
+            allowed = {int(g["id"]) for g in manageable if str(g.get("id", "")).isdigit()}
+
+            if current and int(current) not in allowed:
+                session.pop("guild_id", None)
+
+            session.modified = True
+            return
+
+        session["bot_owner_mode"] = False
         guilds = discord_api_get("/users/@me/guilds", token)
         manageable = filter_manageable_to_bot_guilds([g for g in guilds if is_admin_guild(g)], bot)
         session["discord_guilds"] = manageable
@@ -276,6 +334,11 @@ def has_dashboard_access(bot=None, guild_id=0):
     if not gid_int:
         return False
 
+    # Bot owner can access every guild where the bot is installed.
+    if is_bot_owner_dashboard():
+        ids = bot_guild_ids(bot)
+        return bool(gid_int in ids) if ids else True
+
     allowed = {
         int(g["id"])
         for g in session.get("discord_guilds", [])
@@ -300,7 +363,7 @@ def dashboard_access_denied_html():
     <div class='card'>
       <h3 class='bad'>Dashboard access denied</h3>
       <p>You cannot open this server dashboard.</p>
-      <p class='muted'>Reason: the bot is not in this guild, or you do not have Owner/Administrator permission.</p>
+      <p class='muted'>Reason: the bot is not in this guild, or you do not have permission. Bot owner can access all bot guilds.</p>
       <p>Requested Guild ID: <code>{esc(denied)}</code></p>
     </div>
     """
@@ -391,7 +454,7 @@ def guild_selector_html(active_gid):
         gid_raw = int(g["id"])
         icon = discord_guild_icon(g)
         icon_html = f"<img class='avatar-lg' src='{esc(icon)}'>" if icon else "<div class='avatar-lg' style='display:grid;place-items:center;font-size:28px'>🛡️</div>"
-        owner_badge = "Owner" if g.get("owner") else "Administrator"
+        owner_badge = "Bot Owner" if g.get("bot_owner_access") else ("Owner" if g.get("owner") else "Administrator")
 
         cards += f"""
         <a class='server-card' href='/dashboard?guild_id={gid_raw}'>
@@ -407,7 +470,7 @@ def guild_selector_html(active_gid):
     return f"""
     <div class='card'>
       <h3>Servers you can manage</h3>
-      <p class='muted'>Only servers where you are Owner/Administrator and the bot is inside are shown.</p>
+      <p class='muted'>Bot Owner mode: you can see every server where the bot is installed. Normal admins only see servers they administer.</p>
       <div class='server-grid'>{cards}</div>
       <br>
       <a class='btn' style='background:#334155' href='/logout'>Logout</a>
