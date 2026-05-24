@@ -70,6 +70,85 @@ def ensure_guild(guild_id:int, guild_name:str=""):
 
     return _settings_write_retry(work)
 
+
+def get_coin_name(guild_id:int)->str:
+    ensure_guild(guild_id)
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT coin_name FROM guild_settings WHERE guild_id=?", (int(guild_id),))
+        row = cur.fetchone()
+        conn.close()
+        return row["coin_name"] if row and row["coin_name"] else DEFAULT_COIN_NAME
+    res = _settings_write_retry(work)
+    return res or DEFAULT_COIN_NAME
+
+
+def set_coin_name(guild_id:int, coin_name:str):
+    ensure_guild(guild_id)
+    val = str(coin_name or DEFAULT_COIN_NAME).strip()[:40] or DEFAULT_COIN_NAME
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE guild_settings SET coin_name=?, updated_at=? WHERE guild_id=?", (val, int(time.time()), int(guild_id)))
+        conn.commit()
+        conn.close()
+
+    return _settings_write_retry(work)
+
+
+def is_system_enabled(guild_id:int, system_key:str)->bool:
+    ensure_guild(guild_id)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT enabled FROM system_toggles WHERE guild_id=? AND system_key=?", (int(guild_id), str(system_key)))
+        row = cur.fetchone()
+        conn.close()
+        return True if not row else bool(row["enabled"])
+
+    res = _settings_write_retry(work)
+    return True if res is None else bool(res)
+
+
+def set_system_enabled(guild_id:int, system_key:str, enabled:bool):
+    ensure_guild(guild_id)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO system_toggles (guild_id,system_key,enabled,updated_at)
+        VALUES (?,?,?,?)
+        ON CONFLICT(guild_id,system_key) DO UPDATE SET
+          enabled=excluded.enabled,
+          updated_at=excluded.updated_at""",
+        (int(guild_id), str(system_key), 1 if enabled else 0, int(time.time())))
+        conn.commit()
+        conn.close()
+
+    return _settings_write_retry(work)
+
+
+def all_toggles(guild_id:int)->dict:
+    ensure_guild(guild_id)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT system_key, enabled FROM system_toggles WHERE guild_id=?", (int(guild_id),))
+        rows = cur.fetchall()
+        conn.close()
+        out = {k: v for k, v in SYSTEM_DEFAULTS.items()}
+        for r in rows:
+            out[str(r["system_key"])] = bool(r["enabled"])
+        return out
+
+    res = _settings_write_retry(work)
+    return res or {k: v for k, v in SYSTEM_DEFAULTS.items()}
+
+
 def get_guild_settings(guild_id:int)->dict:
     ensure_guild(guild_id)
     conn=db(); cur=conn.cursor()
@@ -173,4 +252,3 @@ def update_lfg_settings(guild_id:int, *, channel_id=None, category_id=None, dele
         update_channel(guild_id, "lfg_category_id", int(category_id or 0))
     if delete_empty_minutes is not None:
         update_channel(guild_id, "lfg_delete_empty_minutes", max(0, int(delete_empty_minutes or 0)))
-
