@@ -3,21 +3,15 @@ from nmcore.db import db
 from nmcore.config import LIVE_ACTIVITY_LIMIT
 
 
-def _write_retry(fn, retries=5, delay=0.12):
-    last = None
-    for attempt in range(int(retries)):
-        try:
-            return fn()
-        except sqlite3.OperationalError as e:
-            last = e
-            if "locked" not in str(e).lower():
-                raise
-            time.sleep(delay * (attempt + 1))
-        except Exception:
-            # Logs should never kill bot events.
-            return None
-    # If still locked, drop the log instead of crashing on_message/on_voice.
-    return None
+def _write_retry(fn, retries=1, delay=0.0):
+    try:
+        return fn()
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower():
+            raise
+        return None
+    except Exception:
+        return None
 
 
 def record(guild_id:int, actor_id:int, actor_name:str, activity_type:str, title:str, details:str="", amount:int=0):
