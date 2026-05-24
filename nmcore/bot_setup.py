@@ -238,10 +238,6 @@ _ENSURED_GUILD_CACHE = {}
 
 
 def safe_ensure_guild_once(guild):
-    """
-    Avoid writing guild_settings on every single message.
-    This prevents SQLite lock storms during active chat/voice events.
-    """
     if not guild:
         return
 
@@ -249,17 +245,14 @@ def safe_ensure_guild_once(guild):
     gid = int(guild.id)
     last = int(_ENSURED_GUILD_CACHE.get(gid, 0) or 0)
 
-    # Only refresh each guild once every 10 minutes.
     if now - last < 600:
         return
 
     try:
         ensure_guild(guild.id, guild.name)
         _ENSURED_GUILD_CACHE[gid] = now
-    except Exception as e:
-        # Never let settings writes kill message/command processing.
-        if "locked" not in str(e).lower():
-            pass
+    except Exception:
+        pass
 
 
 def setup_bot(bot):
@@ -585,10 +578,7 @@ def setup_bot(bot):
     @bot.event
     async def on_member_join(member):
         safe_ensure_guild_once(member.guild)
-        try:
-            log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
-        except Exception:
-            pass
+        log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
 
         await send_log(
             bot,
