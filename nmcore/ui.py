@@ -133,3 +133,4 @@ code{{background:#020617;border:1px solid #1f2937;border-radius:9px;padding:2px 
 .kpi-good{{border-left:4px solid var(--ok)}}.kpi-warn{{border-left:4px solid var(--warn)}}.kpi-bad{{border-left:4px solid var(--bad)}}.kpi-info{{border-left:4px solid var(--blue)}}
 @media(max-width:900px){{.wrap{{display:block}}.side{{width:100%;height:auto;position:relative}}.main{{padding:18px}}}}
 </style></head><body><div class="wrap"><aside class="side"><div class="brandbox"><div class="brand">NM System V9</div><div class="brand-sub">Pro Control Dashboard</div></div>{links}</aside><main class="main"><div class="topbar"><h1>{escape(title)}</h1><span class="pill">Guild {int(guild_id) if guild_id else "Select Server"}</span></div>{body}</main></div></body></html>"""
+
