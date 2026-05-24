@@ -20,8 +20,7 @@ COMMAND_SYSTEM = {
     "مساعدة":"utility","بنق":"utility","شرح_الاقتصاد":"utility","شرح_القمار":"utility","شرح_البوت":"utility","شرح_لعب":"utility","لعب":"utility","lfg":"utility","قيم":"utility","ارسال_الشروحات":"admin","اعداد":"admin","لوحة":"admin","قفل":"admin","فتح":"admin","مسح":"admin"
 }
 
-
-def _settings_write_retry(fn, retries=1, delay=0.0):
+def _fast_db_write(fn):
     try:
         return fn()
     except sqlite3.OperationalError as e:
@@ -33,118 +32,80 @@ def _settings_write_retry(fn, retries=1, delay=0.0):
 
 
 def ensure_guild(guild_id:int, guild_name:str=""):
+    gid = int(guild_id)
+    now = int(time.time())
+
     def work():
         conn = db()
         cur = conn.cursor()
-
         cur.execute("""INSERT OR IGNORE INTO guild_settings
-        (guild_id,guild_name,coin_name,created_at,updated_at)
-        VALUES (?,?,?,?,?)""", (int(guild_id), str(guild_name or "")[:120], DEFAULT_COIN_NAME, int(time.time()), int(time.time())))
+        (guild_id,guild_name,coin_name,created_at,updated_at) VALUES (?,?,?,?,?)""",
+        (gid, str(guild_name or "")[:180], DEFAULT_COIN_NAME, now, now))
 
         if guild_name:
-            cur.execute("UPDATE guild_settings SET guild_name=?, updated_at=? WHERE guild_id=?", (str(guild_name)[:120], int(time.time()), int(guild_id)))
+            cur.execute("UPDATE guild_settings SET guild_name=?, updated_at=? WHERE guild_id=?",
+                        (str(guild_name)[:180], now, gid))
 
-        for key, enabled in SYSTEM_DEFAULTS.items():
-            cur.execute("""INSERT OR IGNORE INTO system_toggles
-            (guild_id,system_key,enabled,updated_at)
-            VALUES (?,?,?,?)""", (int(guild_id), key, 1 if enabled else 0, int(time.time())))
-
-        # Safe migrations. These are repeated but cheap, and ignore if column exists.
-        migrations = [
+        # migrations are safe; run quickly and ignore existing columns
+        for sql in [
             "ALTER TABLE guild_settings ADD COLUMN dev_mode_enabled INTEGER DEFAULT 0",
             "ALTER TABLE guild_settings ADD COLUMN lfg_channel_id INTEGER DEFAULT 0",
             "ALTER TABLE guild_settings ADD COLUMN lfg_category_id INTEGER DEFAULT 0",
             "ALTER TABLE guild_settings ADD COLUMN lfg_delete_empty_minutes INTEGER DEFAULT 10",
-        ]
-        for sql in migrations:
+        ]:
             try:
                 cur.execute(sql)
             except Exception:
                 pass
 
+        for k, v in SYSTEM_DEFAULTS.items():
+            cur.execute("""INSERT OR IGNORE INTO system_toggles
+            (guild_id,system_key,enabled,updated_at) VALUES (?,?,?,?)""",
+            (gid, k, 1 if v else 0, now))
+
         conn.commit()
         conn.close()
 
-    return _settings_write_retry(work)
-
+    return _fast_db_write(work)
 
 def get_coin_name(guild_id:int)->str:
     ensure_guild(guild_id)
-    def work():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT coin_name FROM guild_settings WHERE guild_id=?", (int(guild_id),))
-        row = cur.fetchone()
-        conn.close()
-        return row["coin_name"] if row and row["coin_name"] else DEFAULT_COIN_NAME
-    res = _settings_write_retry(work)
-    return res or DEFAULT_COIN_NAME
-
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT coin_name FROM guild_settings WHERE guild_id=?", (int(guild_id),))
+    row=cur.fetchone(); conn.close()
+    return row["coin_name"] if row and row["coin_name"] else DEFAULT_COIN_NAME
 
 def set_coin_name(guild_id:int, coin_name:str):
     ensure_guild(guild_id)
     val = str(coin_name or DEFAULT_COIN_NAME).strip()[:40] or DEFAULT_COIN_NAME
-
-    def work():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("UPDATE guild_settings SET coin_name=?, updated_at=? WHERE guild_id=?", (val, int(time.time()), int(guild_id)))
-        conn.commit()
-        conn.close()
-
-    return _settings_write_retry(work)
-
+    conn=db(); cur=conn.cursor()
+    cur.execute("UPDATE guild_settings SET coin_name=?, updated_at=? WHERE guild_id=?", (val,int(time.time()),int(guild_id)))
+    conn.commit(); conn.close()
 
 def is_system_enabled(guild_id:int, system_key:str)->bool:
     ensure_guild(guild_id)
-
-    def work():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT enabled FROM system_toggles WHERE guild_id=? AND system_key=?", (int(guild_id), str(system_key)))
-        row = cur.fetchone()
-        conn.close()
-        return True if not row else bool(row["enabled"])
-
-    res = _settings_write_retry(work)
-    return True if res is None else bool(res)
-
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT enabled FROM system_toggles WHERE guild_id=? AND system_key=?", (int(guild_id),str(system_key)))
+    row=cur.fetchone(); conn.close()
+    return True if not row else bool(row["enabled"])
 
 def set_system_enabled(guild_id:int, system_key:str, enabled:bool):
     ensure_guild(guild_id)
-
-    def work():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("""INSERT INTO system_toggles (guild_id,system_key,enabled,updated_at)
-        VALUES (?,?,?,?)
-        ON CONFLICT(guild_id,system_key) DO UPDATE SET
-          enabled=excluded.enabled,
-          updated_at=excluded.updated_at""",
-        (int(guild_id), str(system_key), 1 if enabled else 0, int(time.time())))
-        conn.commit()
-        conn.close()
-
-    return _settings_write_retry(work)
-
+    conn=db(); cur=conn.cursor()
+    cur.execute("""INSERT INTO system_toggles (guild_id,system_key,enabled,updated_at)
+    VALUES (?,?,?,?) ON CONFLICT(guild_id,system_key) DO UPDATE SET enabled=excluded.enabled, updated_at=excluded.updated_at""",
+    (int(guild_id), str(system_key), 1 if enabled else 0, int(time.time())))
+    conn.commit(); conn.close()
 
 def all_toggles(guild_id:int)->dict:
     ensure_guild(guild_id)
-
-    def work():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT system_key, enabled FROM system_toggles WHERE guild_id=?", (int(guild_id),))
-        rows = cur.fetchall()
-        conn.close()
-        out = {k: v for k, v in SYSTEM_DEFAULTS.items()}
-        for r in rows:
-            out[str(r["system_key"])] = bool(r["enabled"])
-        return out
-
-    res = _settings_write_retry(work)
-    return res or {k: v for k, v in SYSTEM_DEFAULTS.items()}
-
+    data = dict(SYSTEM_DEFAULTS)
+    conn=db(); cur=conn.cursor()
+    cur.execute("SELECT system_key,enabled FROM system_toggles WHERE guild_id=?", (int(guild_id),))
+    for r in cur.fetchall():
+        data[r["system_key"]] = bool(r["enabled"])
+    conn.close()
+    return data
 
 def get_guild_settings(guild_id:int)->dict:
     ensure_guild(guild_id)
