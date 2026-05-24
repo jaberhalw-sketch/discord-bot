@@ -8,16 +8,16 @@ def db():
     voice XP, live logs, boosts, and message events write at the same time.
 
     Fixes:
-    - timeout=30 gives SQLite time to wait instead of instantly crashing.
+    - timeout=1 gives SQLite time to wait instead of instantly crashing.
     - busy_timeout does the same at PRAGMA level.
     - WAL mode lets readers and writers work together better.
     - synchronous=NORMAL is the recommended WAL balance for bot dashboards.
     """
-    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
+    conn = sqlite3.connect(DB_FILE, timeout=1, check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
     try:
-        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA busy_timeout = 1000")
         conn.execute("PRAGMA journal_mode = WAL")
         conn.execute("PRAGMA synchronous = NORMAL")
         conn.execute("PRAGMA temp_store = MEMORY")
@@ -28,7 +28,7 @@ def db():
     return conn
 
 
-def execute_with_retry(fn, retries=5, delay=0.15):
+def execute_with_retry(fn, retries=2, delay=0.05):
     """
     Small helper for hot write paths. Existing code can still use db() normally.
     """
@@ -40,7 +40,7 @@ def execute_with_retry(fn, retries=5, delay=0.15):
             last = e
             if "locked" not in str(e).lower():
                 raise
-            time.sleep(delay * (attempt + 1))
+            time.sleep(delay)
     raise last
 
 def init_db():
