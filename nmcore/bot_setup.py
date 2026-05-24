@@ -770,3 +770,4 @@ def setup_bot(bot):
         except Exception:
             pass
         await send_log(bot, member.guild, "voice", title, details, "info", member)
+
