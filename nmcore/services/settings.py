@@ -173,3 +173,4 @@ def update_lfg_settings(guild_id:int, *, channel_id=None, category_id=None, dele
         update_channel(guild_id, "lfg_category_id", int(category_id or 0))
     if delete_empty_minutes is not None:
         update_channel(guild_id, "lfg_delete_empty_minutes", max(0, int(delete_empty_minutes or 0)))
+
