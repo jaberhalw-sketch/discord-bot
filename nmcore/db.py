@@ -1,37 +1,132 @@
-import sqlite3, time
+import sqlite3
+import threading
+import time
 from .config import DB_FILE, DEFAULT_COIN_NAME
 
 
-def db():
-    """
-    Railway + SQLite can get 'database is locked' when the bot, dashboard,
-    voice XP, live logs, boosts, and message events write at the same time.
+_WRITE_LOCK = threading.RLock()
 
-    Fixes:
-    - timeout=1 gives SQLite time to wait instead of instantly crashing.
-    - busy_timeout does the same at PRAGMA level.
-    - WAL mode lets readers and writers work together better.
-    - synchronous=NORMAL is the recommended WAL balance for bot dashboards.
-    """
-    conn = sqlite3.connect(DB_FILE, timeout=1, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+
+def _is_write_sql(sql: str) -> bool:
+    s = str(sql or "").lstrip().upper()
+    return s.startswith((
+        "INSERT", "UPDATE", "DELETE", "REPLACE",
+        "CREATE", "ALTER", "DROP", "BEGIN", "COMMIT", "ROLLBACK"
+    ))
+
+
+class SafeCursor:
+    def __init__(self, conn, cursor):
+        self._safe_conn = conn
+        self._cursor = cursor
+
+    def execute(self, sql, params=()):
+        if _is_write_sql(sql):
+            self._safe_conn._acquire_write()
+        return self._cursor.execute(sql, params)
+
+    def executemany(self, sql, seq_of_params):
+        if _is_write_sql(sql):
+            self._safe_conn._acquire_write()
+        return self._cursor.executemany(sql, seq_of_params)
+
+    def executescript(self, sql_script):
+        self._safe_conn._acquire_write()
+        return self._cursor.executescript(sql_script)
+
+    def __iter__(self):
+        return iter(self._cursor)
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class SafeConnection:
+    def __init__(self, raw):
+        self._raw = raw
+        self._lock_acquired = False
+
+    def _acquire_write(self):
+        if not self._lock_acquired:
+            _WRITE_LOCK.acquire()
+            self._lock_acquired = True
+
+    def _release_write(self):
+        if self._lock_acquired:
+            self._lock_acquired = False
+            try:
+                _WRITE_LOCK.release()
+            except RuntimeError:
+                pass
+
+    def cursor(self, *args, **kwargs):
+        return SafeCursor(self, self._raw.cursor(*args, **kwargs))
+
+    def execute(self, sql, params=()):
+        if _is_write_sql(sql):
+            self._acquire_write()
+        return self._raw.execute(sql, params)
+
+    def executemany(self, sql, seq_of_params):
+        if _is_write_sql(sql):
+            self._acquire_write()
+        return self._raw.executemany(sql, seq_of_params)
+
+    def executescript(self, sql_script):
+        self._acquire_write()
+        return self._raw.executescript(sql_script)
+
+    def commit(self):
+        try:
+            return self._raw.commit()
+        finally:
+            self._release_write()
+
+    def rollback(self):
+        try:
+            return self._raw.rollback()
+        finally:
+            self._release_write()
+
+    def close(self):
+        try:
+            return self._raw.close()
+        finally:
+            self._release_write()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type:
+                self.rollback()
+            else:
+                self.commit()
+        finally:
+            self.close()
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+def db():
+    raw = sqlite3.connect(DB_FILE, timeout=1, check_same_thread=False)
+    raw.row_factory = sqlite3.Row
 
     try:
-        conn.execute("PRAGMA busy_timeout = 1000")
-        conn.execute("PRAGMA journal_mode = WAL")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        conn.execute("PRAGMA temp_store = MEMORY")
-        conn.execute("PRAGMA foreign_keys = ON")
+        raw.execute("PRAGMA busy_timeout = 1000")
+        raw.execute("PRAGMA journal_mode = WAL")
+        raw.execute("PRAGMA synchronous = NORMAL")
+        raw.execute("PRAGMA temp_store = MEMORY")
+        raw.execute("PRAGMA foreign_keys = ON")
     except Exception:
         pass
 
-    return conn
+    return SafeConnection(raw)
 
 
-def execute_with_retry(fn, retries=2, delay=0.05):
-    """
-    Small helper for hot write paths. Existing code can still use db() normally.
-    """
+def execute_with_retry(fn, retries=3, delay=0.08):
     last = None
     for attempt in range(int(retries)):
         try:
@@ -40,7 +135,7 @@ def execute_with_retry(fn, retries=2, delay=0.05):
             last = e
             if "locked" not in str(e).lower():
                 raise
-            time.sleep(delay)
+            time.sleep(delay * (attempt + 1))
     raise last
 
 def init_db():
