@@ -58,6 +58,7 @@ def page(title, body, guild_id=0):
             ("🎁 Giveaways",f"/dashboard/giveaways{q}"),
             ("👤 User Profile",f"/dashboard/user{q}"),
             ("🎭 Game Roles",f"/dashboard/game-roles{q}"),
+            ("👑 Role Manager",f"/dashboard/roles{q}"),
         ]),
         ("Safety / Moderation", [
             ("⚠️ Warnings",f"/dashboard/warnings{q}"),
