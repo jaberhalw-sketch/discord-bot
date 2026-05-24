@@ -1,9 +1,19 @@
+import os
 import discord
 from html import escape
 from nmcore.config import BOT_BRAND
 from nmcore.services.settings import get_coin_name
 
 COLORS={"ok":0x22c55e,"bad":0xef4444,"info":0x3b82f6,"warn":0xf59e0b,"purple":0x7c3aed}
+
+
+def dashboard_logo_url():
+    """
+    Set Railway variable:
+    DASHBOARD_LOGO_URL=https://...
+    Recommended: use the Discord bot avatar image link.
+    """
+    return os.getenv("DASHBOARD_LOGO_URL", "").strip()
 
 def coin(guild_id, amount):
     return f"**{int(amount):,}** {get_coin_name(guild_id)}"
@@ -32,6 +42,8 @@ def page(title, body, guild_id=0):
     q=f"?guild_id={int(guild_id)}" if guild_id else ""
     refresh_titles = {"Live Activity": 8, "Logs": 15, "Warnings": 20, "Money Tracker": 20}
     refresh_meta = f"<meta http-equiv='refresh' content='{refresh_titles.get(str(title), 0)}'>" if str(title) in refresh_titles else ""
+    logo_url = dashboard_logo_url()
+    logo_html = f"<img class='brand-logo' src='{escape(logo_url)}' alt='NM logo'>" if logo_url else "<div class='brand-logo-fallback'>NM</div>"
 
     nav_groups=[
         ("Main", [
@@ -97,7 +109,9 @@ body{{margin:0;background:
   var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,Segoe UI,Arial,sans-serif}}
 .wrap{{display:flex;min-height:100vh}}
 .side{{width:315px;background:rgba(8,13,28,.86);padding:18px;position:sticky;top:0;height:100vh;overflow:auto;border-right:1px solid rgba(148,163,184,.16);backdrop-filter:blur(18px)}}
-.brandbox{{border:1px solid rgba(139,92,246,.35);background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(34,211,238,.08));border-radius:22px;padding:14px;margin-bottom:16px}}
+.brandbox{{display:flex;align-items:center;gap:13px;border:1px solid rgba(139,92,246,.35);background:linear-gradient(135deg,rgba(139,92,246,.22),rgba(34,211,238,.08));border-radius:22px;padding:14px;margin-bottom:16px}}
+.brand-logo{{width:54px;height:54px;border-radius:18px;object-fit:cover;border:1px solid rgba(255,255,255,.18);box-shadow:0 14px 35px rgba(0,0,0,.28)}}
+.brand-logo-fallback{{width:54px;height:54px;border-radius:18px;display:grid;place-items:center;font-weight:950;background:linear-gradient(135deg,var(--brand),var(--brand2));box-shadow:0 14px 35px rgba(0,0,0,.28)}}
 .brand{{font-size:24px;font-weight:950;letter-spacing:-.04em}}
 .brand-sub{{font-size:12px;color:var(--muted);margin-top:4px}}
 .nav-group{{color:#64748b;text-transform:uppercase;font-size:11px;font-weight:950;letter-spacing:.14em;margin:18px 0 7px}}
@@ -132,5 +146,4 @@ code{{background:#020617;border:1px solid #1f2937;border-radius:9px;padding:2px 
 .server-card:hover{{border-color:rgba(139,92,246,.55);transform:translateY(-2px)}}
 .kpi-good{{border-left:4px solid var(--ok)}}.kpi-warn{{border-left:4px solid var(--warn)}}.kpi-bad{{border-left:4px solid var(--bad)}}.kpi-info{{border-left:4px solid var(--blue)}}
 @media(max-width:900px){{.wrap{{display:block}}.side{{width:100%;height:auto;position:relative}}.main{{padding:18px}}}}
-</style></head><body><div class="wrap"><aside class="side"><div class="brandbox"><div class="brand">NM System V9</div><div class="brand-sub">Pro Control Dashboard</div></div>{links}</aside><main class="main"><div class="topbar"><h1>{escape(title)}</h1><span class="pill">Guild {int(guild_id) if guild_id else "Select Server"}</span></div>{body}</main></div></body></html>"""
-
+</style></head><body><div class="wrap"><aside class="side"><div class="brandbox">{logo_html}<div><div class="brand">NM System V9</div><div class="brand-sub">Pro Control Dashboard</div></div></div>{links}</aside><main class="main"><div class="topbar"><h1>{escape(title)}</h1><span class="pill">Guild {int(guild_id) if guild_id else "Select Server"}</span></div>{body}</main></div></body></html>"""
