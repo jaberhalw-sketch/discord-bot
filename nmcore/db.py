@@ -1,10 +1,47 @@
-import sqlite3
+import sqlite3, time
 from .config import DB_FILE, DEFAULT_COIN_NAME
 
+
 def db():
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    """
+    Railway + SQLite can get 'database is locked' when the bot, dashboard,
+    voice XP, live logs, boosts, and message events write at the same time.
+
+    Fixes:
+    - timeout=30 gives SQLite time to wait instead of instantly crashing.
+    - busy_timeout does the same at PRAGMA level.
+    - WAL mode lets readers and writers work together better.
+    - synchronous=NORMAL is the recommended WAL balance for bot dashboards.
+    """
+    conn = sqlite3.connect(DB_FILE, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+
+    try:
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        conn.execute("PRAGMA temp_store = MEMORY")
+        conn.execute("PRAGMA foreign_keys = ON")
+    except Exception:
+        pass
+
     return conn
+
+
+def execute_with_retry(fn, retries=5, delay=0.15):
+    """
+    Small helper for hot write paths. Existing code can still use db() normally.
+    """
+    last = None
+    for attempt in range(int(retries)):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            last = e
+            if "locked" not in str(e).lower():
+                raise
+            time.sleep(delay * (attempt + 1))
+    raise last
 
 def init_db():
     conn = db()
