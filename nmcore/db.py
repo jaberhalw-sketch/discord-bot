@@ -225,4 +225,3 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_live_guild_time ON live_activity(guild_id, created_at DESC)")
     conn.commit()
     conn.close()
-
