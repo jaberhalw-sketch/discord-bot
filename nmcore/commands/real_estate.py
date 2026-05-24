@@ -35,7 +35,7 @@ class MyPropertiesView(discord.ui.View):
             await interaction.followup.send(embed=embed("❌ خطأ في رد الإيجار", res["error"], "bad", interaction.user), ephemeral=True)
             return
 
-        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}"
+        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}\nالإيجار الجاي بعد: **3 ساعات**"
         if res.get("warning"):
             desc += f"\n\n⚠️ {res['warning']}"
         e = embed("💵 تم جمع الإيجار", desc, "ok", interaction.user)
@@ -48,6 +48,21 @@ class MyPropertiesView(discord.ui.View):
 
 def property_line(ctx, r):
     return f"`#{r['id']}` **{r['display_name']}** • {coin(ctx.guild.id, r['price'])} • Rent **{int(r['rent']):,}** • L{int(r['level'])}"
+
+
+
+def rent_status_lines(ctx, rows):
+    if not rows:
+        return "ما عندك عقارات."
+
+    lines = []
+    for r in rows[:20]:
+        status = "✅ جاهز للاستلام" if r["ready"] else f"⏳ باقي {r['remaining_text']}"
+        lines.append(
+            f"`#{r['id']}` **{r['name']}** • L{r['level']} • Rent **{int(r['amount']):,}** • {status}"
+        )
+    return "\n".join(lines)
+
 
 
 def setup(bot):
@@ -84,7 +99,7 @@ def setup(bot):
             await ctx.reply(embed=embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", ctx.author))
             return
 
-        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}"
+        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}\nالإيجار الجاي بعد: **3 ساعات**"
         if res.get("warning"):
             desc += f"\n\n⚠️ {res['warning']}"
         e = embed("💵 تم جمع الإيجار", desc, "ok", ctx.author)
@@ -95,9 +110,25 @@ def setup(bot):
 
     @bot.command(name="عقاراتي")
     async def mine(ctx):
-        rows = real_estate.my_rows(ctx.guild.id, ctx.author.id)
-        lines = [f"`#{r['id']}` **{r['display_name']}** • L{r['level']} • Rent **{int(r['rent']):,}**" for r in rows[:20]]
+        status = real_estate.rent_status(ctx.guild.id, ctx.author.id)
+        props = status["properties"]
 
-        e = embed("🏘️ عقاراتك", "\n".join(lines) if lines else "ما عندك عقارات.", "purple", ctx.author)
-        e.add_field(name="الإيجار", value="اضغط الزر أو اكتب `!ايجار`.", inline=False)
-        await ctx.reply(embed=e, view=MyPropertiesView(ctx) if rows else None)
+        e = embed("🏘️ عقاراتك", rent_status_lines(ctx, props), "purple", ctx.author)
+
+        if props:
+            if status["ready_count"] > 0:
+                e.add_field(
+                    name="💵 جاهز للاستلام",
+                    value=f"عندك **{status['ready_count']}** عقار جاهز\nالمبلغ الجاهز: {coin(ctx.guild.id, status['ready_amount'])}",
+                    inline=False
+                )
+            else:
+                e.add_field(
+                    name="⏳ الإيجار القادم",
+                    value=f"باقي على أقرب إيجار: **{status['next_remaining_text']}**",
+                    inline=False
+                )
+
+            e.add_field(name="طريقة الاستلام", value="اضغط زر **استلام الإيجار** أو اكتب `!ايجار`.", inline=False)
+
+        await ctx.reply(embed=e, view=MyPropertiesView(ctx) if props else None)
