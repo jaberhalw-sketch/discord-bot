@@ -143,6 +143,59 @@ def buy(guild_id:int,user_id:int,user_name:str,property_id:int):
     return {"ok":True,"name":p["display_name"],"price":price,"tx_id":tx["tx_id"]}
 
 
+
+def seconds_to_text(seconds:int):
+    seconds = max(0, int(seconds or 0))
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+
+    if h > 0:
+        return f"{h} ساعة و {m} دقيقة"
+    if m > 0:
+        return f"{m} دقيقة و {s} ثانية"
+    return f"{s} ثانية"
+
+
+def rent_status(guild_id:int, user_id:int):
+    props = my_rows(guild_id, user_id)
+    now = int(time.time())
+    out = []
+
+    for p in props:
+        last = int(p["last_rent_claim"] or 0)
+        elapsed = now - last if last else REAL_ESTATE_RENT_COOLDOWN_SECONDS
+        remaining = max(0, REAL_ESTATE_RENT_COOLDOWN_SECONDS - elapsed)
+        ready = remaining <= 0
+        amount = int(p["rent"]) * int(p["level"])
+
+        out.append({
+            "id": int(p["id"]),
+            "name": p["display_name"],
+            "level": int(p["level"]),
+            "rent": int(p["rent"]),
+            "amount": amount,
+            "ready": ready,
+            "remaining": remaining,
+            "remaining_text": seconds_to_text(remaining),
+            "last_claim": last,
+        })
+
+    ready_count = sum(1 for x in out if x["ready"])
+    ready_amount = sum(x["amount"] for x in out if x["ready"])
+    next_remaining = min([x["remaining"] for x in out if not x["ready"]], default=0)
+
+    return {
+        "properties": out,
+        "count": len(out),
+        "ready_count": ready_count,
+        "ready_amount": ready_amount,
+        "next_remaining": next_remaining,
+        "next_remaining_text": seconds_to_text(next_remaining),
+        "cooldown": REAL_ESTATE_RENT_COOLDOWN_SECONDS,
+    }
+
+
 def collect_rent(guild_id:int,user_id:int,user_name:str):
     props = my_rows(guild_id,user_id)
     if not props:
@@ -152,7 +205,13 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
     eligible = [p for p in props if now - int(p["last_rent_claim"] or 0) >= REAL_ESTATE_RENT_COOLDOWN_SECONDS]
 
     if not eligible:
-        return {"ok":False,"error":"الإيجار تحت الكولداون."}
+        status = rent_status(guild_id, user_id)
+        return {
+            "ok": False,
+            "error": f"الإيجار تحت الكولداون. باقي على أقرب إيجار: {status['next_remaining_text']}.",
+            "next_remaining": status["next_remaining"],
+            "next_remaining_text": status["next_remaining_text"],
+        }
 
     total = sum(int(p["rent"]) * int(p["level"]) for p in eligible)
 
