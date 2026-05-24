@@ -233,6 +233,35 @@ async def voice_xp_background_loop(bot):
 
 
 
+
+_ENSURED_GUILD_CACHE = {}
+
+
+def safe_ensure_guild_once(guild):
+    """
+    Avoid writing guild_settings on every single message.
+    This prevents SQLite lock storms during active chat/voice events.
+    """
+    if not guild:
+        return
+
+    now = int(asyncio.get_event_loop().time())
+    gid = int(guild.id)
+    last = int(_ENSURED_GUILD_CACHE.get(gid, 0) or 0)
+
+    # Only refresh each guild once every 10 minutes.
+    if now - last < 600:
+        return
+
+    try:
+        ensure_guild(guild.id, guild.name)
+        _ENSURED_GUILD_CACHE[gid] = now
+    except Exception as e:
+        # Never let settings writes kill message/command processing.
+        if "locked" not in str(e).lower():
+            pass
+
+
 def setup_bot(bot):
     global _GUIDE_LOOP_STARTED
     if not _GUIDE_LOOP_STARTED:
@@ -261,7 +290,7 @@ def setup_bot(bot):
         if not ctx.guild or not ctx.command:
             return True
 
-        ensure_guild(ctx.guild.id, ctx.guild.name)
+        safe_ensure_guild_once(ctx.guild)
 
         # Bot owner bypass:
         # Owner can use every command in any room even if dev mode, system toggles,
@@ -391,7 +420,7 @@ def setup_bot(bot):
             await bot.process_commands(message)
             return
 
-        ensure_guild(message.guild.id, message.guild.name)
+        safe_ensure_guild_once(message.guild)
 
         # Track Discord server boosts and post rewards before other processing.
         try:
@@ -555,8 +584,11 @@ def setup_bot(bot):
 
     @bot.event
     async def on_member_join(member):
-        ensure_guild(member.guild.id, member.guild.name)
-        log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
+        safe_ensure_guild_once(member.guild)
+        try:
+            log_event(member.guild.id, "member_join", member.id, member.display_name, title="Member joined")
+        except Exception:
+            pass
 
         await send_log(
             bot,
@@ -733,5 +765,8 @@ def setup_bot(bot):
             title = "🔇 Voice Left"
             details = f"User: {member.mention} (`{member.id}`)\nChannel: **{before.channel.name}**"
 
-        log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
+        try:
+            log_event(member.guild.id, "voice_state", member.id, member.display_name, (after.channel.id if after.channel else before.channel.id), (after.channel.name if after.channel else before.channel.name), title, details)
+        except Exception:
+            pass
         await send_log(bot, member.guild, "voice", title, details, "info", member)
