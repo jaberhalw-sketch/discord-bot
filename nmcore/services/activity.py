@@ -65,4 +65,3 @@ def log_event(guild_id:int, event_type:str, user_id:int=0, user_name:str="", cha
         conn.close()
 
     return _write_retry(work)
-
