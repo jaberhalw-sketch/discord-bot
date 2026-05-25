@@ -1387,7 +1387,7 @@ DASHBOARD_BASE_URL</pre>
                 if prop:
                     if action == "set_owner":
                         cur.execute(
-                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=strftime('%s','now') WHERE guild_id=? AND id=?",
+                            "UPDATE properties SET owner_id=?, owner_name=?, last_rent_claim=? WHERE guild_id=? AND id=?",
                             (owner_id, owner_name[:120], int(time.time()), g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
@@ -1397,7 +1397,7 @@ DASHBOARD_BASE_URL</pre>
 
                     elif action == "clear_owner":
                         cur.execute(
-                            "UPDATE properties SET owner_id=0, owner_name='' WHERE guild_id=? AND id=?",
+                            "UPDATE properties SET owner_id=0, owner_name='', last_rent_claim=0 WHERE guild_id=? AND id=?",
                             (g, property_id)
                         )
                         cur.execute("""INSERT INTO property_ledger
