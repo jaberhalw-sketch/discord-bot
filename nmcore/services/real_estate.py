@@ -1,7 +1,5 @@
 import time, sqlite3
 from nmcore.db import db
-from nmcore.config import RENT_COOLDOWN_SECONDS
-
 # NM System rule: every property rent becomes available every 3 hours.
 RENT_COOLDOWN_SECONDS = 3 * 60 * 60
 from nmcore.services.economy import debit, credit
