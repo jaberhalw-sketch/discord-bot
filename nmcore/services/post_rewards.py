@@ -1,4 +1,4 @@
-import time
+import time, sqlite3
 from nmcore.db import db
 from nmcore.services.economy import credit
 from nmcore.services.activity import record, log_event
@@ -7,59 +7,109 @@ from nmcore.services.activity import record, log_event
 DEFAULT_AMOUNT = 5000
 DEFAULT_MIN_LENGTH = 5
 DEFAULT_COOLDOWN_SECONDS = 0
+_TABLES_READY = False
+_SETTINGS_CACHE = {}
+_SETTINGS_CACHE_TTL = 15
 
 
-def ensure_tables():
-    conn = db()
-    cur = conn.cursor()
+def ensure_tables(force=False):
+    global _TABLES_READY
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS post_reward_settings (
-        guild_id INTEGER PRIMARY KEY,
-        enabled INTEGER DEFAULT 0,
-        amount INTEGER DEFAULT 5000,
-        channel_ids TEXT DEFAULT '',
-        min_length INTEGER DEFAULT 5,
-        cooldown_seconds INTEGER DEFAULT 0,
-        updated_at INTEGER DEFAULT 0
-    )""")
+    if _TABLES_READY and not force:
+        return True
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS post_rewards (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        guild_id INTEGER NOT NULL,
-        user_id INTEGER NOT NULL,
-        user_name TEXT DEFAULT '',
-        channel_id INTEGER NOT NULL DEFAULT 0,
-        message_id INTEGER NOT NULL DEFAULT 0,
-        amount INTEGER NOT NULL DEFAULT 0,
-        money_tx_id TEXT DEFAULT '',
-        created_at INTEGER NOT NULL DEFAULT 0,
-        UNIQUE(guild_id, message_id)
-    )""")
+    try:
+        conn = db()
+        cur = conn.cursor()
 
-    conn.commit()
-    conn.close()
+        cur.execute("""CREATE TABLE IF NOT EXISTS post_reward_settings (
+            guild_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            amount INTEGER DEFAULT 5000,
+            channel_ids TEXT DEFAULT '',
+            min_length INTEGER DEFAULT 5,
+            cooldown_seconds INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0
+        )""")
 
+        cur.execute("""CREATE TABLE IF NOT EXISTS post_rewards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            user_name TEXT DEFAULT '',
+            channel_id INTEGER NOT NULL DEFAULT 0,
+            message_id INTEGER NOT NULL DEFAULT 0,
+            amount INTEGER NOT NULL DEFAULT 0,
+            money_tx_id TEXT DEFAULT '',
+            created_at INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(guild_id, message_id)
+        )""")
+
+        conn.commit()
+        conn.close()
+        _TABLES_READY = True
+        return True
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower():
+            raise
+        return False
+    except Exception:
+        return False
 
 def get_settings(guild_id:int):
-    ensure_tables()
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""INSERT OR IGNORE INTO post_reward_settings
-    (guild_id,enabled,amount,channel_ids,min_length,cooldown_seconds,updated_at)
-    VALUES (?,?,?,?,?,?,?)""", (int(guild_id), 0, DEFAULT_AMOUNT, "", DEFAULT_MIN_LENGTH, DEFAULT_COOLDOWN_SECONDS, int(time.time())))
-    conn.commit()
-    cur.execute("SELECT * FROM post_reward_settings WHERE guild_id=?", (int(guild_id),))
-    row = cur.fetchone()
-    conn.close()
-    return dict(row) if row else {
-        "guild_id": int(guild_id),
-        "enabled": 0,
-        "amount": DEFAULT_AMOUNT,
-        "channel_ids": "",
-        "min_length": DEFAULT_MIN_LENGTH,
-        "cooldown_seconds": DEFAULT_COOLDOWN_SECONDS,
-    }
+    now = int(time.time())
+    gid = int(guild_id)
 
+    cached = _SETTINGS_CACHE.get(gid)
+    if cached and now - int(cached.get("_cached_at", 0)) <= _SETTINGS_CACHE_TTL:
+        return dict(cached)
+
+    if not ensure_tables():
+        if cached:
+            return dict(cached)
+        return {
+            "guild_id": gid,
+            "enabled": 0,
+            "amount": DEFAULT_AMOUNT,
+            "channel_ids": "",
+            "min_length": DEFAULT_MIN_LENGTH,
+            "cooldown_seconds": DEFAULT_COOLDOWN_SECONDS,
+        }
+
+    try:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""INSERT OR IGNORE INTO post_reward_settings
+        (guild_id,enabled,amount,channel_ids,min_length,cooldown_seconds,updated_at)
+        VALUES (?,?,?,?,?,?,?)""", (gid, 0, DEFAULT_AMOUNT, "", DEFAULT_MIN_LENGTH, DEFAULT_COOLDOWN_SECONDS, now))
+        conn.commit()
+        cur.execute("SELECT * FROM post_reward_settings WHERE guild_id=?", (gid,))
+        row = cur.fetchone()
+        conn.close()
+        data = dict(row) if row else {
+            "guild_id": gid,
+            "enabled": 0,
+            "amount": DEFAULT_AMOUNT,
+            "channel_ids": "",
+            "min_length": DEFAULT_MIN_LENGTH,
+            "cooldown_seconds": DEFAULT_COOLDOWN_SECONDS,
+        }
+        data["_cached_at"] = now
+        _SETTINGS_CACHE[gid] = dict(data)
+        return data
+    except sqlite3.OperationalError as e:
+        if "locked" not in str(e).lower():
+            raise
+        if cached:
+            return dict(cached)
+        return {
+            "guild_id": gid,
+            "enabled": 0,
+            "amount": DEFAULT_AMOUNT,
+            "channel_ids": "",
+            "min_length": DEFAULT_MIN_LENGTH,
+            "cooldown_seconds": DEFAULT_COOLDOWN_SECONDS,
+        }
 
 def update_settings(guild_id:int, *, enabled=None, amount=None, channel_ids=None, min_length=None, cooldown_seconds=None):
     ensure_tables()
@@ -99,6 +149,7 @@ def update_settings(guild_id:int, *, enabled=None, amount=None, channel_ids=None
     (int(guild_id), data["enabled"], data["amount"], data["channel_ids"], data["min_length"], data["cooldown_seconds"], int(time.time())))
     conn.commit()
     conn.close()
+    _SETTINGS_CACHE.pop(int(guild_id), None)
 
 
 def _ids(text):
@@ -115,7 +166,8 @@ def configured_channel_ids(guild_id:int):
 
 
 def already_rewarded(guild_id:int, message_id:int):
-    ensure_tables()
+    if not ensure_tables():
+        return True
     conn = db()
     cur = conn.cursor()
     cur.execute("SELECT id FROM post_rewards WHERE guild_id=? AND message_id=?", (int(guild_id), int(message_id)))
@@ -125,7 +177,8 @@ def already_rewarded(guild_id:int, message_id:int):
 
 
 def last_user_reward_at(guild_id:int, user_id:int):
-    ensure_tables()
+    if not ensure_tables():
+        return int(time.time())
     conn = db()
     cur = conn.cursor()
     cur.execute("""SELECT created_at FROM post_rewards
@@ -196,7 +249,8 @@ def reward_message(message):
         return {"ok": False, "reason": "credit failed"}
 
     now = int(time.time())
-    ensure_tables()
+    if not ensure_tables():
+        return {"ok": False, "reason": "database busy"}
     conn = db()
     cur = conn.cursor()
     cur.execute("""INSERT OR IGNORE INTO post_rewards
