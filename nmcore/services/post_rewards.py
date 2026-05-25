@@ -286,3 +286,4 @@ def summary(guild_id:int, limit:int=50):
 
     conn.close()
     return {"totals": totals, "top": top, "recent": recent}
+
