@@ -35,7 +35,7 @@ class MyPropertiesView(discord.ui.View):
             await interaction.followup.send(embed=embed("❌ خطأ في رد الإيجار", res["error"], "bad", interaction.user), ephemeral=True)
             return
 
-        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}\nالإيجار الجاي بعد: **3 ساعات**"
+        desc = f"عدد العقارات المستلمة: **{res['count']}**\nعدد الدفعات المتجمعة: **{res.get('cycles', res['count'])}**\nالمبلغ: {coin(interaction.guild.id, res['amount'])}\nالإيجار الجاي يبدأ يتجمع من الآن كل **3 ساعات**"
         if res.get("warning"):
             desc += f"\n\n⚠️ {res['warning']}"
         e = embed("💵 تم جمع الإيجار", desc, "ok", interaction.user)
@@ -57,9 +57,13 @@ def rent_status_lines(ctx, rows):
 
     lines = []
     for r in rows[:20]:
-        status = "✅ جاهز للاستلام" if r["ready"] else f"⏳ باقي {r['remaining_text']}"
+        if r["ready"]:
+            status = f"✅ جاهز: **{r['cycles']}** دفعة = **{int(r['accumulated_amount']):,}**"
+        else:
+            status = f"⏳ باقي {r['remaining_text']}"
+
         lines.append(
-            f"`#{r['id']}` **{r['name']}** • L{r['level']} • Rent **{int(r['amount']):,}** • {status}"
+            f"`#{r['id']}` **{r['name']}** • L{r['level']} • كل 3 ساعات **{int(r['amount']):,}** • {status}"
         )
     return "\n".join(lines)
 
@@ -99,7 +103,7 @@ def setup(bot):
             await ctx.reply(embed=embed("💵 لا يمكن جمع الإيجار", res["error"], "warn", ctx.author))
             return
 
-        desc = f"عدد العقارات: **{res['count']}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}\nالإيجار الجاي بعد: **3 ساعات**"
+        desc = f"عدد العقارات المستلمة: **{res['count']}**\nعدد الدفعات المتجمعة: **{res.get('cycles', res['count'])}**\nالمبلغ: {coin(ctx.guild.id, res['amount'])}\nالإيجار الجاي يبدأ يتجمع من الآن كل **3 ساعات**"
         if res.get("warning"):
             desc += f"\n\n⚠️ {res['warning']}"
         e = embed("💵 تم جمع الإيجار", desc, "ok", ctx.author)
@@ -119,7 +123,7 @@ def setup(bot):
             if status["ready_count"] > 0:
                 e.add_field(
                     name="💵 جاهز للاستلام",
-                    value=f"عندك **{status['ready_count']}** عقار جاهز\nالمبلغ الجاهز: {coin(ctx.guild.id, status['ready_amount'])}",
+                    value=f"عندك **{status['ready_count']}** عقار جاهز\nعدد الدفعات المتجمعة: **{status.get('total_cycles', status['ready_count'])}**\nالمبلغ الجاهز: {coin(ctx.guild.id, status['ready_amount'])}",
                     inline=False
                 )
             else:
