@@ -1,6 +1,9 @@
 import time, sqlite3
 from nmcore.db import db
-from nmcore.config import REAL_ESTATE_RENT_COOLDOWN_SECONDS
+from nmcore.config import RENT_COOLDOWN_SECONDS
+
+# NM System rule: every property rent becomes available every 3 hours.
+RENT_COOLDOWN_SECONDS = 3 * 60 * 60
 from nmcore.services.economy import debit, credit
 from nmcore.services.activity import record
 
@@ -164,8 +167,8 @@ def rent_status(guild_id:int, user_id:int):
 
     for p in props:
         last = int(p["last_rent_claim"] or 0)
-        elapsed = now - last if last else REAL_ESTATE_RENT_COOLDOWN_SECONDS
-        remaining = max(0, REAL_ESTATE_RENT_COOLDOWN_SECONDS - elapsed)
+        elapsed = now - last if last else RENT_COOLDOWN_SECONDS
+        remaining = max(0, RENT_COOLDOWN_SECONDS - elapsed)
         ready = remaining <= 0
         amount = int(p["rent"]) * int(p["level"])
 
@@ -192,7 +195,7 @@ def rent_status(guild_id:int, user_id:int):
         "ready_amount": ready_amount,
         "next_remaining": next_remaining,
         "next_remaining_text": seconds_to_text(next_remaining),
-        "cooldown": REAL_ESTATE_RENT_COOLDOWN_SECONDS,
+        "cooldown": RENT_COOLDOWN_SECONDS,
     }
 
 
@@ -202,7 +205,7 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
         return {"ok":False,"error":"ما عندك عقارات."}
 
     now = int(time.time())
-    eligible = [p for p in props if now - int(p["last_rent_claim"] or 0) >= REAL_ESTATE_RENT_COOLDOWN_SECONDS]
+    eligible = [p for p in props if now - int(p["last_rent_claim"] or 0) >= RENT_COOLDOWN_SECONDS]
 
     if not eligible:
         status = rent_status(guild_id, user_id)
@@ -251,6 +254,167 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
         )
 
     return {"ok":True,"count":len(eligible),"amount":total,"tx_id":tx["tx_id"]}
+
+
+
+def get_property(guild_id:int, property_id:int):
+    seed(guild_id)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM properties WHERE guild_id=? AND id=?", (int(guild_id), int(property_id)))
+        row = cur.fetchone()
+        conn.close()
+        return row
+
+    res = _retry(work)
+    return None if isinstance(res, dict) else res
+
+
+def transfer_property(guild_id:int, from_user_id:int, to_user_id:int, to_user_name:str, property_id:int, actor_id:int=0, reason:str="Transfer property"):
+    seed(guild_id)
+    p = get_property(guild_id, property_id)
+
+    if not p:
+        return {"ok": False, "error": "العقار غير موجود."}
+
+    old_owner = int(p["owner_id"] or 0)
+    if old_owner != int(from_user_id):
+        return {"ok": False, "error": "ما تقدر تنقل عقار مو مملوك لك."}
+
+    if int(to_user_id) == int(from_user_id):
+        return {"ok": False, "error": "ما تقدر تنقل العقار لنفسك."}
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""UPDATE properties
+        SET owner_id=?, owner_name=?, last_rent_claim=?
+        WHERE guild_id=? AND id=? AND owner_id=?""",
+        (int(to_user_id), str(to_user_name)[:120], int(time.time()), int(guild_id), int(property_id), int(from_user_id)))
+        changed = cur.rowcount
+        conn.commit()
+        conn.close()
+        return changed
+
+    changed = _retry(work, retries=5, delay=0.12)
+    if isinstance(changed, dict) and not changed.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة الآن، جرب بعد ثواني."}
+
+    if not changed:
+        return {"ok": False, "error": "فشل نقل العقار، يمكن تغير المالك قبل العملية."}
+
+    prop_log(
+        guild_id, property_id, "transfer",
+        old_owner_id=from_user_id,
+        new_owner_id=to_user_id,
+        actor_id=actor_id or from_user_id,
+        amount=0,
+        level_before=int(p["level"]),
+        level_after=int(p["level"]),
+        price_before=int(p["price"]),
+        price_after=int(p["price"]),
+        reason=reason,
+        money_tx_id=""
+    )
+
+    return {
+        "ok": True,
+        "id": int(p["id"]),
+        "name": p["display_name"],
+        "old_owner_id": int(from_user_id),
+        "new_owner_id": int(to_user_id),
+        "new_owner_name": str(to_user_name),
+    }
+
+
+def admin_assign_property(guild_id:int, property_id:int, to_user_id:int, to_user_name:str, actor_id:int=0, reason:str="Admin property assign"):
+    seed(guild_id)
+    p = get_property(guild_id, property_id)
+
+    if not p:
+        return {"ok": False, "error": "العقار غير موجود."}
+
+    old_owner = int(p["owner_id"] or 0)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""UPDATE properties
+        SET owner_id=?, owner_name=?, last_rent_claim=?
+        WHERE guild_id=? AND id=?""",
+        (int(to_user_id), str(to_user_name)[:120], int(time.time()), int(guild_id), int(property_id)))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work, retries=5, delay=0.12)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة الآن، جرب بعد ثواني."}
+
+    prop_log(
+        guild_id, property_id, "admin_assign",
+        old_owner_id=old_owner,
+        new_owner_id=to_user_id,
+        actor_id=actor_id or 0,
+        amount=0,
+        level_before=int(p["level"]),
+        level_after=int(p["level"]),
+        price_before=int(p["price"]),
+        price_after=int(p["price"]),
+        reason=reason,
+        money_tx_id=""
+    )
+
+    return {
+        "ok": True,
+        "id": int(p["id"]),
+        "name": p["display_name"],
+        "old_owner_id": old_owner,
+        "new_owner_id": int(to_user_id),
+        "new_owner_name": str(to_user_name),
+    }
+
+
+def admin_return_property(guild_id:int, property_id:int, actor_id:int=0, reason:str="Admin return property to market"):
+    seed(guild_id)
+    p = get_property(guild_id, property_id)
+
+    if not p:
+        return {"ok": False, "error": "العقار غير موجود."}
+
+    old_owner = int(p["owner_id"] or 0)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""UPDATE properties
+        SET owner_id=0, owner_name='', last_rent_claim=0
+        WHERE guild_id=? AND id=?""", (int(guild_id), int(property_id)))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work, retries=5, delay=0.12)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة الآن، جرب بعد ثواني."}
+
+    prop_log(
+        guild_id, property_id, "admin_return_to_market",
+        old_owner_id=old_owner,
+        new_owner_id=0,
+        actor_id=actor_id or 0,
+        amount=0,
+        level_before=int(p["level"]),
+        level_after=int(p["level"]),
+        price_before=int(p["price"]),
+        price_after=int(p["price"]),
+        reason=reason,
+        money_tx_id=""
+    )
+
+    return {"ok": True, "id": int(p["id"]), "name": p["display_name"], "old_owner_id": old_owner}
 
 
 def stock_summary(guild_id:int):
