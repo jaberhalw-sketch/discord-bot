@@ -129,6 +129,113 @@ def setup(bot):
                     inline=False
                 )
 
-            e.add_field(name="طريقة الاستلام", value="اضغط زر **استلام الإيجار** أو اكتب `!ايجار`.", inline=False)
+            e.add_field(name="طريقة الاستلام", value="كل عقار يعطي إيجار كل **3 ساعات**. اضغط زر **استلام الإيجار** أو اكتب `!ايجار`.", inline=False)
 
         await ctx.reply(embed=e, view=MyPropertiesView(ctx) if props else None)
+
+
+    @bot.command(name="نقل_عقار", aliases=["تحويل_عقار", "property_transfer"])
+    async def transfer_property_cmd(ctx, member: discord.Member, property_id: int):
+        if member.bot:
+            await ctx.reply(embed=embed("🏘️ لا يمكن النقل", "ما تقدر تنقل عقار لبوت.", "bad", ctx.author))
+            return
+
+        res = real_estate.transfer_property(
+            ctx.guild.id,
+            ctx.author.id,
+            member.id,
+            member.display_name,
+            property_id,
+            actor_id=ctx.author.id,
+            reason=f"Owner transfer from {ctx.author.id} to {member.id}"
+        )
+
+        if not res["ok"]:
+            await ctx.reply(embed=embed("🏘️ فشل نقل العقار", res["error"], "bad", ctx.author))
+            return
+
+        e = embed(
+            "🏘️ تم نقل العقار",
+            f"**{res['name']}**\n\nمن: {ctx.author.mention}\nإلى: {member.mention}",
+            "ok",
+            ctx.author
+        )
+        e.add_field(name="ملاحظة", value="الإيجار يبدأ يحسب للمالك الجديد من الآن، ويصير جاهز بعد 3 ساعات.", inline=False)
+        await ctx.reply(embed=e)
+
+        await send_action_log(
+            ctx,
+            "economy",
+            "🏘️ Property Transferred",
+            f"From: {ctx.author.mention} (`{ctx.author.id}`)\nTo: {member.mention} (`{member.id}`)\nProperty: **{res['name']}** (`{property_id}`)",
+            "money"
+        )
+
+    @bot.command(name="اعطاء_عقار", aliases=["admin_property_give"])
+    async def admin_give_property_cmd(ctx, member: discord.Member, property_id: int):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=embed("صلاحية مرفوضة", "هذا الأمر للإدارة فقط.", "bad", ctx.author))
+            return
+
+        if member.bot:
+            await ctx.reply(embed=embed("🏘️ لا يمكن النقل", "ما تقدر تعطي عقار لبوت.", "bad", ctx.author))
+            return
+
+        res = real_estate.admin_assign_property(
+            ctx.guild.id,
+            property_id,
+            member.id,
+            member.display_name,
+            actor_id=ctx.author.id,
+            reason=f"Admin assign by {ctx.author.id} to {member.id}"
+        )
+
+        if not res["ok"]:
+            await ctx.reply(embed=embed("🏘️ فشل إعطاء العقار", res["error"], "bad", ctx.author))
+            return
+
+        e = embed(
+            "🏘️ تم إعطاء العقار",
+            f"**{res['name']}**\n\nالمالك الجديد: {member.mention}",
+            "ok",
+            ctx.author
+        )
+        e.add_field(name="ملاحظة", value="الإيجار يبدأ يحسب للمالك الجديد من الآن، ويصير جاهز بعد 3 ساعات.", inline=False)
+        await ctx.reply(embed=e)
+
+        await send_action_log(
+            ctx,
+            "economy",
+            "🏘️ Admin Property Assigned",
+            f"Actor: {ctx.author.mention} (`{ctx.author.id}`)\nTo: {member.mention} (`{member.id}`)\nProperty: **{res['name']}** (`{property_id}`)",
+            "money"
+        )
+
+    @bot.command(name="ارجاع_عقار", aliases=["سحب_عقار", "admin_property_return"])
+    async def admin_return_property_cmd(ctx, property_id: int):
+        if not ctx.author.guild_permissions.administrator:
+            await ctx.reply(embed=embed("صلاحية مرفوضة", "هذا الأمر للإدارة فقط.", "bad", ctx.author))
+            return
+
+        res = real_estate.admin_return_property(
+            ctx.guild.id,
+            property_id,
+            actor_id=ctx.author.id,
+            reason=f"Admin return by {ctx.author.id}"
+        )
+
+        if not res["ok"]:
+            await ctx.reply(embed=embed("🏘️ فشل إرجاع العقار", res["error"], "bad", ctx.author))
+            return
+
+        e = embed("🏘️ تم إرجاع العقار للسوق", f"**{res['name']}** صار متاح للبيع من جديد.", "ok", ctx.author)
+        await ctx.reply(embed=e)
+
+        await send_action_log(
+            ctx,
+            "economy",
+            "🏘️ Property Returned To Market",
+            f"Actor: {ctx.author.mention} (`{ctx.author.id}`)\nProperty: **{res['name']}** (`{property_id}`)\nOld owner: `{res['old_owner_id']}`",
+            "money"
+        )
+
