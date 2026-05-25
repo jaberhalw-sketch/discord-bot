@@ -286,6 +286,7 @@ def init_db():
         created_at INTEGER NOT NULL,
         ended_at INTEGER DEFAULT 0
     )""")
+    
     cur.execute("""CREATE TABLE IF NOT EXISTS shop_purchases (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         guild_id INTEGER NOT NULL,
