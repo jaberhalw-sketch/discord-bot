@@ -48,7 +48,10 @@ class SafeConnection:
 
     def _acquire_write(self):
         if not self._lock_acquired:
-            _WRITE_LOCK.acquire()
+            # Never block Discord heartbeat forever.
+            acquired = _WRITE_LOCK.acquire(timeout=1)
+            if not acquired:
+                raise sqlite3.OperationalError("database is locked: python write lock timeout")
             self._lock_acquired = True
 
     def _release_write(self):
