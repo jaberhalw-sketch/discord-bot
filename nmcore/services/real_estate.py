@@ -165,25 +165,35 @@ def rent_status(guild_id:int, user_id:int):
 
     for p in props:
         last = int(p["last_rent_claim"] or 0)
-        elapsed = now - last if last else RENT_COOLDOWN_SECONDS
-        remaining = max(0, RENT_COOLDOWN_SECONDS - elapsed)
-        ready = remaining <= 0
-        amount = int(p["rent"]) * int(p["level"])
+
+        # If never claimed / new owner, start timer from created_at if available, otherwise now.
+        if last <= 0:
+            last = int(p["created_at"] or now)
+
+        elapsed = max(0, now - last)
+        cycles = elapsed // RENT_COOLDOWN_SECONDS
+        remaining = 0 if cycles > 0 else max(0, RENT_COOLDOWN_SECONDS - elapsed)
+
+        per_cycle_amount = int(p["rent"]) * int(p["level"])
+        accumulated_amount = per_cycle_amount * int(cycles)
 
         out.append({
             "id": int(p["id"]),
             "name": p["display_name"],
             "level": int(p["level"]),
             "rent": int(p["rent"]),
-            "amount": amount,
-            "ready": ready,
-            "remaining": remaining,
+            "amount": per_cycle_amount,
+            "cycles": int(cycles),
+            "accumulated_amount": int(accumulated_amount),
+            "ready": cycles > 0,
+            "remaining": int(remaining),
             "remaining_text": seconds_to_text(remaining),
             "last_claim": last,
         })
 
     ready_count = sum(1 for x in out if x["ready"])
-    ready_amount = sum(x["amount"] for x in out if x["ready"])
+    ready_amount = sum(x["accumulated_amount"] for x in out if x["ready"])
+    total_cycles = sum(x["cycles"] for x in out if x["ready"])
     next_remaining = min([x["remaining"] for x in out if not x["ready"]], default=0)
 
     return {
@@ -191,6 +201,7 @@ def rent_status(guild_id:int, user_id:int):
         "count": len(out),
         "ready_count": ready_count,
         "ready_amount": ready_amount,
+        "total_cycles": total_cycles,
         "next_remaining": next_remaining,
         "next_remaining_text": seconds_to_text(next_remaining),
         "cooldown": RENT_COOLDOWN_SECONDS,
@@ -203,7 +214,25 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
         return {"ok":False,"error":"ما عندك عقارات."}
 
     now = int(time.time())
-    eligible = [p for p in props if now - int(p["last_rent_claim"] or 0) >= RENT_COOLDOWN_SECONDS]
+    eligible = []
+
+    for p in props:
+        last = int(p["last_rent_claim"] or 0)
+        if last <= 0:
+            last = int(p["created_at"] or now)
+
+        elapsed = max(0, now - last)
+        cycles = elapsed // RENT_COOLDOWN_SECONDS
+
+        if cycles > 0:
+            per_cycle_amount = int(p["rent"]) * int(p["level"])
+            eligible.append({
+                "row": p,
+                "cycles": int(cycles),
+                "amount": int(per_cycle_amount * cycles),
+                "new_last_claim": int(last + (cycles * RENT_COOLDOWN_SECONDS)),
+                "per_cycle_amount": int(per_cycle_amount),
+            })
 
     if not eligible:
         status = rent_status(guild_id, user_id)
@@ -214,9 +243,10 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
             "next_remaining_text": status["next_remaining_text"],
         }
 
-    total = sum(int(p["rent"]) * int(p["level"]) for p in eligible)
+    total = sum(x["amount"] for x in eligible)
+    total_cycles = sum(x["cycles"] for x in eligible)
 
-    tx = credit(guild_id,user_id,total,"real_estate_rent",user_name=user_name,reason=f"Rent from {len(eligible)} properties")
+    tx = credit(guild_id,user_id,total,"real_estate_rent",user_name=user_name,reason=f"Accumulated rent: {total_cycles} payments from {len(eligible)} properties")
     if not tx.get("ok"):
         if tx.get("error") == "database_locked":
             return {"ok": False, "error": "قاعدة البيانات مشغولة الآن، جرب بعد ثواني."}
@@ -225,33 +255,41 @@ def collect_rent(guild_id:int,user_id:int,user_name:str):
     def update_claims():
         conn = db()
         cur = conn.cursor()
-        for p in eligible:
-            cur.execute("UPDATE properties SET last_rent_claim=? WHERE guild_id=? AND id=?", (now,int(guild_id),int(p["id"])))
+        for item in eligible:
+            p = item["row"]
+            cur.execute("UPDATE properties SET last_rent_claim=? WHERE guild_id=? AND id=?", (int(item["new_last_claim"]), int(guild_id), int(p["id"])))
         conn.commit()
         conn.close()
         return {"ok": True}
 
     updated = _retry(update_claims, retries=5, delay=0.12)
     if isinstance(updated, dict) and not updated.get("ok"):
-        # Money was already credited; don't fail silently. Tell user it was paid.
-        return {"ok": True, "count": len(eligible), "amount": total, "tx_id": tx["tx_id"], "warning": "تم دفع الإيجار لكن تحديث وقت الاستلام تأخر بسبب ضغط قاعدة البيانات."}
+        return {
+            "ok": True,
+            "count": len(eligible),
+            "cycles": total_cycles,
+            "amount": total,
+            "tx_id": tx["tx_id"],
+            "warning": "تم دفع الإيجار لكن تحديث وقت الاستلام تأخر بسبب ضغط قاعدة البيانات."
+        }
 
-    # Log property ledger after claims; if locked, ignore ledger, not money.
-    for p in eligible:
+    for item in eligible:
+        p = item["row"]
         prop_log(
             guild_id,
             int(p["id"]),
-            "rent_collect",
+            "rent_collect_accumulated",
             old_owner_id=user_id,
             new_owner_id=user_id,
             actor_id=user_id,
-            amount=int(p["rent"])*int(p["level"]),
+            amount=int(item["amount"]),
             level_before=int(p["level"]),
             level_after=int(p["level"]),
-            money_tx_id=tx["tx_id"]
+            money_tx_id=tx["tx_id"],
+            reason=f"{item['cycles']} rent cycles x {item['per_cycle_amount']}"
         )
 
-    return {"ok":True,"count":len(eligible),"amount":total,"tx_id":tx["tx_id"]}
+    return {"ok":True,"count":len(eligible),"cycles":total_cycles,"amount":total,"tx_id":tx["tx_id"]}
 
 
 
