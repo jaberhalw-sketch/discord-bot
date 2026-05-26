@@ -35,14 +35,14 @@ def company_embed(ctx, c):
 def setup(bot):
     @bot.command(name="قطاعات_الشركات", aliases=["company_sectors"])
     async def sectors(ctx):
-        e = embed("🏢 قطاعات الشركات", companies.sectors_text(), "info", ctx.author)
+        e = embed("🏢 قطاعات الشركات", companies.sectors_text(ctx.guild.id), "info", ctx.author)
         e.add_field(name="فتح شركة", value="`!شركة_فتح sector_name اسم الشركة`\nمثال: `!شركة_فتح tech Jaber Tech`", inline=False)
         await ctx.reply(embed=e)
 
     @bot.command(name="شركة_فتح", aliases=["فتح_شركة", "company_create"])
     async def create(ctx, sector_key: str = None, *, name: str = None):
         if not sector_key or not name:
-            e = embed("🏢 فتح شركة", "الاستخدام:\n`!شركة_فتح tech Jaber Tech`\n\nالقطاعات:\n" + companies.sectors_text(), "info", ctx.author)
+            e = embed("🏢 فتح شركة", "الاستخدام:\n`!شركة_فتح tech Jaber Tech`\n\nالقطاعات:\n" + companies.sectors_text(ctx.guild.id), "info", ctx.author)
             await ctx.reply(embed=e)
             return
 
@@ -57,12 +57,28 @@ def setup(bot):
         await ctx.reply(embed=e)
 
     @bot.command(name="شركتي", aliases=["company", "my_company"])
-    async def my_company(ctx):
-        c = companies.get_company_by_owner(ctx.guild.id, ctx.author.id)
+    async def my_company(ctx, company_id: int = None):
+        c = companies.get_company_for_owner(ctx.guild.id, ctx.author.id, company_id)
         if not c:
             await ctx.reply(embed=embed("🏢 ما عندك شركة", "افتح شركة باستخدام:\n`!شركة_فتح tech اسم الشركة`", "warn", ctx.author))
             return
         await ctx.reply(embed=company_embed(ctx, c))
+
+    @bot.command(name="شركاتي", aliases=["my_companies"])
+    async def my_companies(ctx):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+        if not rows:
+            await ctx.reply(embed=embed("🏢 شركاتك", "ما عندك شركات. تقدر تفتح حتى 3 شركات.", "warn", ctx.author))
+            return
+
+        lines = []
+        for c in rows:
+            sec = companies.sector_info_for_guild(ctx.guild.id, c["sector_key"])
+            preview = companies.income_preview(c)
+            lines.append(f"`#{c['id']}` {sec['emoji']} **{c['name']}** — L{int(c['level'])} — Balance `{fmt(c['balance'])}` — Net/6h `{fmt(preview['net_company'])}`")
+        e = embed("🏢 شركاتك", "\n".join(lines), "purple", ctx.author)
+        e.add_field(name="ملاحظة", value="تقدر تملك حتى **3 شركات**. افتح شركة بـ `!شركة_فتح sector الاسم`.", inline=False)
+        await ctx.reply(embed=e)
 
     @bot.command(name="الشركات", aliases=["top_companies", "توب_الشركات"])
     async def top(ctx):
@@ -187,8 +203,37 @@ def setup(bot):
         e.add_field(name="توقع العملية القادمة", value=f"**{r['next_event_preview']['label']}**\n{r['next_event_preview']['details']}", inline=False)
         await ctx.reply(embed=e)
 
+    @bot.command(name="شركة_بيع", aliases=["بيع_شركة", "company_sell"])
+    async def sell_company_cmd(ctx, company_id: int = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+
+        if not rows:
+            await ctx.reply(embed=embed("🏢 بيع شركة", "ما عندك شركات للبيع.", "warn", ctx.author))
+            return
+
+        if len(rows) > 1 and not company_id:
+            lines = []
+            for c in rows:
+                sec = companies.sector_info_for_guild(ctx.guild.id, c["sector_key"])
+                refund = int(sec["start_cost"] * companies.SELL_REFUND_BPS // 10000)
+                lines.append(f"`#{c['id']}` {sec['emoji']} **{c['name']}** — بيع بخسارة: `{refund:,}` + رصيد الشركة `{int(c['balance']):,}`")
+            await ctx.reply(embed=embed("🏢 اختر شركة للبيع", "\\n".join(lines) + "\\n\\nاستخدم: `!شركة_بيع COMPANY_ID`", "warn", ctx.author))
+            return
+
+        res = companies.sell_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id)
+        if not res["ok"]:
+            await ctx.reply(embed=embed("❌ فشل بيع الشركة", res["error"], "bad", ctx.author))
+            return
+
+        c = res["company"]
+        e = embed("🏢 تم بيع الشركة", f"بعت **{c['name']}** بخسارة.", "ok", ctx.author)
+        e.add_field(name="30% من سعر فتح الشركة", value=coin(ctx.guild.id, res["refund"]), inline=True)
+        e.add_field(name="رصيد الشركة المتبقي", value=coin(ctx.guild.id, res["company_balance"]), inline=True)
+        e.add_field(name="المجموع المستلم", value=coin(ctx.guild.id, res["payout"]), inline=False)
+        await ctx.reply(embed=e)
+
     @bot.command(name="شرح_الشركات", aliases=["companies_help"])
     async def help_companies(ctx):
         e = embed("🏢 نظام الشركات", "افتح شركة، وظف أعضاء، اجمع دخل كل 6 ساعات، طور الشركة، واسحب الأرباح.", "info", ctx.author)
-        e.add_field(name="الأوامر", value="`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`\n`!شركتي`\n`!شركة_دخل`\n`!شركة_ترقية`\n`!شركة_ايداع 50000`\n`!شركة_سحب 50000`\n`!شركة_توظيف @user`\n`!شركة_طرد @user`\n`!قرارات_الشركة`\n`!شركة_قرار marketing`\n`!شركة_تحليل`\n`!الشركات`", inline=False)
+        e.add_field(name="الأوامر", value="`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`\n`!شركتي` أو `!شركاتي`\n`!شركة_دخل`\n`!شركة_ترقية`\n`!شركة_ايداع 50000`\n`!شركة_سحب 50000`\n`!شركة_بيع COMPANY_ID`\n`!شركة_توظيف @user`\n`!شركة_طرد @user`\n`!قرارات_الشركة`\n`!شركة_قرار marketing`\n`!شركة_تحليل`\n`!الشركات`", inline=False)
         await ctx.reply(embed=e)
