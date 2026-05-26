@@ -18,7 +18,8 @@ def company_embed(ctx, c):
     e.add_field(name="💼 رصيد الشركة", value=coin(ctx.guild.id, int(c["balance"] or 0)), inline=True)
     e.add_field(name="⭐ السمعة", value=str(int(c["reputation"] or 0)), inline=True)
     e.add_field(name="👥 الموظفين", value=f"{max(0, len(members)-1)}/8", inline=True)
-    e.add_field(name="📈 دخل كل 6 ساعات", value=f"Gross `{fmt(preview['gross'])}`\nTax `{fmt(preview['tax'])}`\nPayroll `{fmt(preview['payroll_total'])}`\nNet company `{fmt(preview['net_company'])}`", inline=True)
+    e.add_field(name="📈 دخل كل 6 ساعات", value=f"Gross `{fmt(preview['gross'])}`\nTax `{fmt(preview['tax'])}`\nPayroll `{fmt(preview['payroll_total'])}`\nRisk cost `{fmt(preview.get('operating_risk_cost',0))}`\nNet company `{fmt(preview['net_company'])}`", inline=True)
+    e.add_field(name="🧠 نجاح الشركة", value=f"Success **{preview.get('success_score',0)}/100**\nStrategy: **{preview.get('strategy','Balanced')}**", inline=True)
     if cycles > 0:
         e.add_field(name="✅ دخل جاهز", value=f"دفعات جاهزة: **{cycles}**", inline=True)
     else:
@@ -81,7 +82,10 @@ def setup(bot):
         if not res["ok"]:
             await ctx.reply(embed=embed("📈 دخل الشركة", res["error"], "warn", ctx.author))
             return
-        e = embed("📈 تم استلام دخل الشركة", f"دفعات متجمعة: **{res['cycles']}**\nدخل الشركة الصافي: {coin(ctx.guild.id, res['company_amount'])}", "ok", ctx.author)
+        event = res.get("event", {})
+        e = embed("📈 تم استلام دخل الشركة", f"دفعات متجمعة: **{res['cycles']}**\nدخل الشركة الصافي: {coin(ctx.guild.id, res['company_amount'])}\n\n**{event.get('label','Stable Operation')}**\n{event.get('details','')}", "ok", ctx.author)
+        if int(res.get("event_delta", 0)):
+            e.add_field(name="تأثير القرار/المخاطرة", value=coin(ctx.guild.id, res.get("event_delta", 0)), inline=False)
         if res["paid_employees"]:
             e.add_field(name="رواتب الموظفين", value=f"تم دفع **{res['paid_employees']}** موظف\nلكل موظف: {coin(ctx.guild.id, res['employee_each'])}", inline=False)
         e.add_field(name="رصيد الشركة بعد الاستلام", value=coin(ctx.guild.id, res["balance_after"]), inline=False)
@@ -142,8 +146,49 @@ def setup(bot):
             return
         await ctx.reply(embed=embed("✅ تم طرد الموظف", f"تم إخراج {member.mention} من شركتك.", "ok", ctx.author))
 
+    @bot.command(name="قرارات_الشركة", aliases=["company_decisions"])
+    async def company_decisions(ctx):
+        e = embed("🧠 قرارات الشركة", companies.decision_options_text(), "info", ctx.author)
+        e.add_field(name="استخدام", value="`!شركة_قرار marketing`\n`!شركة_قرار quality`\n`!شركة_قرار aggressive`", inline=False)
+        await ctx.reply(embed=e)
+
+    @bot.command(name="شركة_قرار", aliases=["قرار_شركة", "company_decision"])
+    async def company_decision(ctx, decision_key: str = None):
+        if not decision_key:
+            await ctx.reply(embed=embed("🧠 قرار الشركة", "استخدم:\n`!قرارات_الشركة`\nثم:\n`!شركة_قرار marketing`", "info", ctx.author))
+            return
+
+        res = companies.make_decision(ctx.guild.id, ctx.author.id, ctx.author.display_name, decision_key)
+        if not res["ok"]:
+            await ctx.reply(embed=embed("❌ فشل قرار الشركة", res["error"], "bad", ctx.author))
+            return
+
+        d = res["decision"]
+        e = embed("🧠 تم تنفيذ قرار الشركة", f"{d['emoji']} **{d['name']}**\n{d['desc']}", "ok", ctx.author)
+        e.add_field(name="التكلفة", value=coin(ctx.guild.id, res["cost"]), inline=True)
+        e.add_field(name="رصيد الشركة", value=coin(ctx.guild.id, res["balance_after"]), inline=True)
+        await ctx.reply(embed=e)
+
+    @bot.command(name="شركة_تحليل", aliases=["تحليل_شركة", "company_report"])
+    async def company_report(ctx):
+        c = companies.get_company_by_owner(ctx.guild.id, ctx.author.id)
+        if not c:
+            await ctx.reply(embed=embed("🏢 ما عندك شركة", "افتح شركة أولًا.", "warn", ctx.author))
+            return
+
+        r = companies.decision_report(c)
+        p = r["preview"]
+        e = embed("📊 تحليل الشركة", f"**{c['name']}**\nStrategy: **{r['strategy']}**", "purple", ctx.author)
+        e.add_field(name="Success Score", value=f"**{p['success_score']}/100**", inline=True)
+        e.add_field(name="Risk", value=f"**{r['risk']}/100**", inline=True)
+        e.add_field(name="Net / 6h", value=coin(ctx.guild.id, p["net_company"]), inline=True)
+        e.add_field(name="Stats", value=f"Marketing `{r['marketing']}`\nQuality `{r['quality']}`\nAutomation `{r['automation']}`\nSecurity `{r['security']}`\nInnovation `{r['innovation']}`", inline=True)
+        e.add_field(name="Costs", value=f"Tax `{fmt(p['tax'])}`\nPayroll `{fmt(p['payroll_total'])}`\nRisk Cost `{fmt(p.get('operating_risk_cost',0))}`", inline=True)
+        e.add_field(name="توقع العملية القادمة", value=f"**{r['next_event_preview']['label']}**\n{r['next_event_preview']['details']}", inline=False)
+        await ctx.reply(embed=e)
+
     @bot.command(name="شرح_الشركات", aliases=["companies_help"])
     async def help_companies(ctx):
         e = embed("🏢 نظام الشركات", "افتح شركة، وظف أعضاء، اجمع دخل كل 6 ساعات، طور الشركة، واسحب الأرباح.", "info", ctx.author)
-        e.add_field(name="الأوامر", value="`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`\n`!شركتي`\n`!شركة_دخل`\n`!شركة_ترقية`\n`!شركة_ايداع 50000`\n`!شركة_سحب 50000`\n`!شركة_توظيف @user`\n`!شركة_طرد @user`\n`!الشركات`", inline=False)
+        e.add_field(name="الأوامر", value="`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`\n`!شركتي`\n`!شركة_دخل`\n`!شركة_ترقية`\n`!شركة_ايداع 50000`\n`!شركة_سحب 50000`\n`!شركة_توظيف @user`\n`!شركة_طرد @user`\n`!قرارات_الشركة`\n`!شركة_قرار marketing`\n`!شركة_تحليل`\n`!الشركات`", inline=False)
         await ctx.reply(embed=e)
