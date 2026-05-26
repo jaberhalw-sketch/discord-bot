@@ -11,7 +11,7 @@ from nmcore.services.log_channels import get_log_channel
 from nmcore.services import antiraid
 from nmcore.services import guides
 from nmcore.config import LEVEL_COOLDOWN_SECONDS
-from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways, lfg, game_roles, profile, boosts
+from nmcore.commands import economy, casino, levels, real_estate, moderation, admin, shop, giveaways, lfg, game_roles, profile, boosts, companies
 from nmcore.ui import embed
 from nmcore.services import boost_rewards
 from nmcore.services import post_rewards
@@ -277,6 +277,7 @@ def setup_bot(bot):
     game_roles.setup(bot)
     profile.setup(bot)
     boosts.setup(bot)
+    companies.setup(bot)
 
     @bot.check
     async def global_toggle_check(ctx):
