@@ -64,6 +64,7 @@ def page(title, body, guild_id=0):
             ("🎰 Casino Controls",f"/dashboard/casino-controls{q}"),
             ("🛒 Real Estate Shop",f"/dashboard/shop{q}"),
             ("🏘️ Real Estate Admin",f"/dashboard/real-estate{q}"),
+            ("🏢 Companies",f"/dashboard/companies{q}"),
         ]),
         ("Community", [
             ("📊 Levels",f"/dashboard/levels{q}"),
