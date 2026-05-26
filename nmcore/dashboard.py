@@ -2824,43 +2824,94 @@ DASHBOARD_BASE_URL</pre>
         return page("Role Manager", body, g)
 
 
-    @app.route("/dashboard/companies")
+    @app.route("/dashboard/companies", methods=["GET", "POST"])
     def companies_page():
         d = require_login()
         if d:
             return d
 
         g = gid(bot)
-        rows = companies_service.all_companies(g, 200)
+        companies_service.seed_sector_settings(g)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+            sector_key = request.form.get("sector_key", "").strip()
+
+            if action == "update_sector" and sector_key:
+                try:
+                    enabled = request.form.get("enabled") == "1"
+                    start_cost = int(request.form.get("start_cost") or 0)
+                    base_income = int(request.form.get("base_income") or 0)
+                    upgrade_base = int(request.form.get("upgrade_base") or 0)
+                    tax_bps = int(float(request.form.get("tax_percent") or 0) * 100)
+                    payroll_bps = int(float(request.form.get("payroll_percent") or 0) * 100)
+                    risk_bps = int(float(request.form.get("risk_percent") or 0) * 100)
+                    companies_service.update_sector_settings(
+                        g,
+                        sector_key,
+                        enabled=enabled,
+                        start_cost=start_cost,
+                        base_income=base_income,
+                        upgrade_base=upgrade_base,
+                        tax_bps=tax_bps,
+                        payroll_bps=payroll_bps,
+                        risk_bps=risk_bps,
+                    )
+                except Exception:
+                    pass
+
+            return redirect(f"/dashboard/companies?guild_id={g}")
+
+        rows = companies_service.all_companies(g, 300)
+        settings = companies_service.sector_settings(g)
 
         total_balance = sum(int(c.get("balance") or 0) for c in rows)
         active = sum(1 for c in rows if int(c.get("active") or 0))
         avg_level = round(sum(int(c.get("level") or 1) for c in rows) / max(1, len(rows)), 2)
 
-        sector_cards = ""
-        for key, s in companies_service.SECTORS.items():
-            sector_cards += f"<div class='card'><h3>{s['emoji']} {esc(s['name'])}</h3><p class='muted'>{esc(s['desc'])}</p><p>Start: <b>{int(s['start_cost']):,}</b><br>Base income / 6h: <b>{int(s['base_income']):,}</b><br>Tax: <b>{int(s['tax_bps'])/100:.1f}%</b></p><code>{esc(key)}</code></div>"
+        sector_rows = ""
+        for key in companies_service.SECTORS.keys():
+            s = companies_service.sector_info_for_guild(g, key)
+            sector_rows += f"""
+            <tr>
+              <td>{s['emoji']} <b>{esc(s['name'])}</b><br><code>{esc(key)}</code><br><span class='muted'>{esc(s['desc'])}</span></td>
+              <td>
+                <form method='post' style='display:grid;grid-template-columns:75px 120px 120px 120px 90px 90px 90px 90px;gap:6px;min-width:820px'>
+                  <input type=hidden name=guild_id value='{g}'>
+                  <input type=hidden name=sector_key value='{esc(key)}'>
+                  <label style='display:flex;align-items:center;gap:5px'><input type=checkbox name=enabled value=1 {'checked' if int(s.get('enabled',1)) else ''}> Enabled</label>
+                  <input name=start_cost type=number min=0 value='{int(s['start_cost'])}' title='Start Cost'>
+                  <input name=base_income type=number min=0 value='{int(s['base_income'])}' title='Base Income'>
+                  <input name=upgrade_base type=number min=0 value='{int(s['upgrade_base'])}' title='Upgrade Base'>
+                  <input name=tax_percent type=number step=.1 min=0 max=100 value='{int(s['tax_bps'])/100}' title='Tax %'>
+                  <input name=payroll_percent type=number step=.1 min=0 max=100 value='{int(s['payroll_bps'])/100}' title='Payroll %'>
+                  <input name=risk_percent type=number step=.1 min=0 max=100 value='{int(s['risk_bps'])/100}' title='Risk %'>
+                  <button name=action value='update_sector'>Save</button>
+                </form>
+              </td>
+            </tr>
+            """
 
-        trs = ""
+        company_rows = ""
         for c in rows:
-            sector = companies_service.sector_info(c["sector_key"])
+            sector = companies_service.sector_info_for_guild(g, c["sector_key"])
             preview = companies_service.income_preview(c)
             cycles, remaining = companies_service.rent_like_remaining(c)
-            trs += f"""
+            company_rows += f"""
             <tr>
               <td><code>{int(c['id'])}</code></td>
               <td>{sector['emoji']} <b>{esc(c['name'])}</b><br><span class='muted'>{esc(sector['name'])}</span></td>
               <td>{user_chip(bot,g,c['owner_id'],c['owner_name'])}</td>
               <td>{int(c['level'])}</td>
               <td>{int(c['balance']):,}</td>
+              <td>{preview['success_score']}/100</td>
               <td>{preview['net_company']:,}</td>
               <td>{'✅ '+str(cycles)+' ready' if cycles else '⏳ '+companies_service.seconds_to_text(remaining)}</td>
-              <td><a class='btn' style='background:#334155' href='/dashboard/user?guild_id={g}&user_id={int(c['owner_id'])}'>Owner Profile</a></td>
             </tr>
             """
 
-        if not trs:
-            trs = "<tr><td colspan='8'>No companies yet.</td></tr>"
+        if not company_rows:
+            company_rows = "<tr><td colspan='8'>No companies yet.</td></tr>"
 
         body = server_pill_html(g, bot) + f"""
         <div class='grid'>
@@ -2869,17 +2920,21 @@ DASHBOARD_BASE_URL</pre>
           <div class='card'><div class='muted'>Company Balances</div><div class='stat'>{total_balance:,}</div></div>
           <div class='card kpi-warn'><div class='muted'>Average Level</div><div class='stat'>{avg_level}</div></div>
         </div>
+
         <div class='card'>
-          <h3>Company System</h3>
-          <p class='muted'>Realistic economy layer: sectors, startup cost, taxes, payroll, employees, upgrades, and accumulated income every 6 hours.</p>
-          <code>!شرح_الشركات</code>
-          <code>!قطاعات_الشركات</code>
-          <code>!شركة_فتح tech Jaber Tech</code>
+          <h3>Company System Settings</h3>
+          <p class='muted'>غيّر أسعار فتح الشركات والدخل والضرائب والرواتب والمخاطرة من هنا. التغييرات محفوظة في قاعدة البيانات وتبقى بعد الريستارت.</p>
+          <p>Limit: <b>{companies_service.MAX_COMPANIES_PER_USER}</b> companies per member • Sell refund: <b>30%</b> of current start cost + company balance.</p>
         </div>
-        <div class='grid'>{sector_cards}</div>
+
+        <div class='card'>
+          <h3>Sector Prices / Income Editor</h3>
+          <table><tr><th>Sector</th><th>Settings</th></tr>{sector_rows}</table>
+        </div>
+
         <div class='card'>
           <h3>Companies</h3>
-          <table><tr><th>ID</th><th>Company</th><th>Owner</th><th>Level</th><th>Balance</th><th>Net / 6h</th><th>Income</th><th>Action</th></tr>{trs}</table>
+          <table><tr><th>ID</th><th>Company</th><th>Owner</th><th>Level</th><th>Balance</th><th>Success</th><th>Net / 6h</th><th>Income</th></tr>{company_rows}</table>
         </div>
         """
         return page("Companies", body, g)
