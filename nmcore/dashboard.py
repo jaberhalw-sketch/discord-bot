@@ -16,6 +16,7 @@ from nmcore.services import game_roles as game_roles_service
 from nmcore.services import casino as casino_service
 from nmcore.services import profile as profile_service
 from nmcore.services import shop as shop_service
+from nmcore.services import companies as companies_service
 from nmcore.services import giveaways as giveaway_service
 from nmcore.services.log_channels import LOG_CHANNELS, get_log_channel, set_log_channel, all_log_channels
 from nmcore.services.diagnostics import system_status
@@ -2821,6 +2822,67 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
         return page("Role Manager", body, g)
+
+
+    @app.route("/dashboard/companies")
+    def companies_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        rows = companies_service.all_companies(g, 200)
+
+        total_balance = sum(int(c.get("balance") or 0) for c in rows)
+        active = sum(1 for c in rows if int(c.get("active") or 0))
+        avg_level = round(sum(int(c.get("level") or 1) for c in rows) / max(1, len(rows)), 2)
+
+        sector_cards = ""
+        for key, s in companies_service.SECTORS.items():
+            sector_cards += f"<div class='card'><h3>{s['emoji']} {esc(s['name'])}</h3><p class='muted'>{esc(s['desc'])}</p><p>Start: <b>{int(s['start_cost']):,}</b><br>Base income / 6h: <b>{int(s['base_income']):,}</b><br>Tax: <b>{int(s['tax_bps'])/100:.1f}%</b></p><code>{esc(key)}</code></div>"
+
+        trs = ""
+        for c in rows:
+            sector = companies_service.sector_info(c["sector_key"])
+            preview = companies_service.income_preview(c)
+            cycles, remaining = companies_service.rent_like_remaining(c)
+            trs += f"""
+            <tr>
+              <td><code>{int(c['id'])}</code></td>
+              <td>{sector['emoji']} <b>{esc(c['name'])}</b><br><span class='muted'>{esc(sector['name'])}</span></td>
+              <td>{user_chip(bot,g,c['owner_id'],c['owner_name'])}</td>
+              <td>{int(c['level'])}</td>
+              <td>{int(c['balance']):,}</td>
+              <td>{preview['net_company']:,}</td>
+              <td>{'✅ '+str(cycles)+' ready' if cycles else '⏳ '+companies_service.seconds_to_text(remaining)}</td>
+              <td><a class='btn' style='background:#334155' href='/dashboard/user?guild_id={g}&user_id={int(c['owner_id'])}'>Owner Profile</a></td>
+            </tr>
+            """
+
+        if not trs:
+            trs = "<tr><td colspan='8'>No companies yet.</td></tr>"
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Companies</div><div class='stat'>{len(rows):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Active</div><div class='stat'>{active:,}</div></div>
+          <div class='card'><div class='muted'>Company Balances</div><div class='stat'>{total_balance:,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Average Level</div><div class='stat'>{avg_level}</div></div>
+        </div>
+        <div class='card'>
+          <h3>Company System</h3>
+          <p class='muted'>Realistic economy layer: sectors, startup cost, taxes, payroll, employees, upgrades, and accumulated income every 6 hours.</p>
+          <code>!شرح_الشركات</code>
+          <code>!قطاعات_الشركات</code>
+          <code>!شركة_فتح tech Jaber Tech</code>
+        </div>
+        <div class='grid'>{sector_cards}</div>
+        <div class='card'>
+          <h3>Companies</h3>
+          <table><tr><th>ID</th><th>Company</th><th>Owner</th><th>Level</th><th>Balance</th><th>Net / 6h</th><th>Income</th><th>Action</th></tr>{trs}</table>
+        </div>
+        """
+        return page("Companies", body, g)
 
     @app.route("/dashboard/settings", methods=["GET", "POST"])
     def settings_page():
