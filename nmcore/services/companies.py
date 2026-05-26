@@ -235,6 +235,20 @@ def ensure_tables():
             created_at INTEGER NOT NULL DEFAULT 0
         )""")
 
+        cur.execute("""CREATE TABLE IF NOT EXISTS company_sector_settings (
+            guild_id INTEGER NOT NULL,
+            sector_key TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            start_cost INTEGER DEFAULT 0,
+            base_income INTEGER DEFAULT 0,
+            upgrade_base INTEGER DEFAULT 0,
+            tax_bps INTEGER DEFAULT 0,
+            payroll_bps INTEGER DEFAULT 0,
+            risk_bps INTEGER DEFAULT 0,
+            updated_at INTEGER DEFAULT 0,
+            PRIMARY KEY (guild_id, sector_key)
+        )""")
+
         cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_guild_owner ON companies(guild_id, owner_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_company_ledger_company ON company_ledger(guild_id, company_id, id)")
 
@@ -263,14 +277,130 @@ def ensure_tables():
     return _retry(work)
 
 
+
+def seed_sector_settings(guild_id:int):
+    ensure_tables()
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        now = int(time.time())
+        for key, s in SECTORS.items():
+            cur.execute("""INSERT OR IGNORE INTO company_sector_settings
+            (guild_id,sector_key,enabled,start_cost,base_income,upgrade_base,tax_bps,payroll_bps,risk_bps,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (int(guild_id), key, 1, int(s["start_cost"]), int(s["base_income"]), int(s["upgrade_base"]), int(s["tax_bps"]), int(s["payroll_bps"]), int(s["risk_bps"]), now))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    return _retry(work)
+
+
+def sector_settings(guild_id:int):
+    seed_sector_settings(guild_id)
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM company_sector_settings WHERE guild_id=?", (int(guild_id),))
+        rows = {str(r["sector_key"]): dict(r) for r in cur.fetchall()}
+        conn.close()
+        return rows
+
+    res = _retry(work)
+    return {} if isinstance(res, dict) and not res.get("ok") else res
+
+
+def sector_info_for_guild(guild_id:int, sector_key:str):
+    key = str(sector_key)
+    base = dict(SECTORS.get(key, SECTORS["logistics"]))
+    settings = sector_settings(guild_id).get(key)
+
+    if settings:
+        base["enabled"] = int(settings.get("enabled") or 0)
+        base["start_cost"] = int(settings.get("start_cost") or base["start_cost"])
+        base["base_income"] = int(settings.get("base_income") or base["base_income"])
+        base["upgrade_base"] = int(settings.get("upgrade_base") or base["upgrade_base"])
+        base["tax_bps"] = int(settings.get("tax_bps") or base["tax_bps"])
+        base["payroll_bps"] = int(settings.get("payroll_bps") or base["payroll_bps"])
+        base["risk_bps"] = int(settings.get("risk_bps") or base["risk_bps"])
+    else:
+        base["enabled"] = 1
+
+    return base
+
+
+def update_sector_settings(guild_id:int, sector_key:str, *, enabled=None, start_cost=None, base_income=None, upgrade_base=None, tax_bps=None, payroll_bps=None, risk_bps=None):
+    key = str(sector_key)
+    if key not in SECTORS:
+        return {"ok": False, "error": "sector not found"}
+
+    seed_sector_settings(guild_id)
+    current = sector_info_for_guild(guild_id, key)
+
+    data = {
+        "enabled": int(current.get("enabled", 1) if enabled is None else (1 if enabled else 0)),
+        "start_cost": max(0, int(current["start_cost"] if start_cost is None else start_cost)),
+        "base_income": max(0, int(current["base_income"] if base_income is None else base_income)),
+        "upgrade_base": max(0, int(current["upgrade_base"] if upgrade_base is None else upgrade_base)),
+        "tax_bps": max(0, min(10000, int(current["tax_bps"] if tax_bps is None else tax_bps))),
+        "payroll_bps": max(0, min(10000, int(current["payroll_bps"] if payroll_bps is None else payroll_bps))),
+        "risk_bps": max(0, min(10000, int(current["risk_bps"] if risk_bps is None else risk_bps))),
+    }
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""INSERT INTO company_sector_settings
+        (guild_id,sector_key,enabled,start_cost,base_income,upgrade_base,tax_bps,payroll_bps,risk_bps,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(guild_id, sector_key) DO UPDATE SET
+            enabled=excluded.enabled,
+            start_cost=excluded.start_cost,
+            base_income=excluded.base_income,
+            upgrade_base=excluded.upgrade_base,
+            tax_bps=excluded.tax_bps,
+            payroll_bps=excluded.payroll_bps,
+            risk_bps=excluded.risk_bps,
+            updated_at=excluded.updated_at
+        """, (int(guild_id), key, data["enabled"], data["start_cost"], data["base_income"], data["upgrade_base"], data["tax_bps"], data["payroll_bps"], data["risk_bps"], int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    return res if isinstance(res, dict) else {"ok": True}
+
+
+def active_company_count(guild_id:int, owner_id:int):
+    ensure_tables()
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) c FROM companies WHERE guild_id=? AND owner_id=? AND active=1", (int(guild_id), int(owner_id)))
+        row = cur.fetchone()
+        conn.close()
+        return int(row["c"] or 0) if row else 0
+
+    res = _retry(work)
+    return 0 if isinstance(res, dict) else int(res)
+
+
 def sector_info(sector_key):
     return SECTORS.get(str(sector_key), SECTORS["logistics"])
 
 
-def sectors_text():
+def sectors_text(guild_id:int=None):
     lines = []
-    for key, s in SECTORS.items():
-        lines.append(f"`{key}` {s['emoji']} **{s['name']}** — فتح: **{s['start_cost']:,}** — دخل كل 6h: **{s['base_income']:,}**")
+    keys = list(SECTORS.keys())
+    settings = sector_settings(guild_id) if guild_id else {}
+
+    for key in keys:
+        s = sector_info_for_guild(guild_id, key) if guild_id else dict(SECTORS[key])
+        enabled = "✅" if int(s.get("enabled", 1)) else "⛔"
+        lines.append(f"{enabled} `{key}` {s['emoji']} **{s['name']}** — فتح: **{s['start_cost']:,}** — دخل كل 6h: **{s['base_income']:,}**")
     return "\n".join(lines)
 
 
@@ -278,7 +408,11 @@ def create_company(guild_id:int, owner_id:int, owner_name:str, sector_key:str, n
     ensure_tables()
     sector_key = str(sector_key or "").lower().strip()
     if sector_key not in SECTORS:
-        return {"ok": False, "error": f"القطاع غير موجود. القطاعات:\n{sectors_text()}"}
+        return {"ok": False, "error": f"القطاع غير موجود. القطاعات:\n{sectors_text(guild_id)}"}
+
+    sector_cfg = sector_info_for_guild(guild_id, sector_key)
+    if not int(sector_cfg.get("enabled", 1)):
+        return {"ok": False, "error": "هذا القطاع مقفل من الداشبورد حاليًا."}
 
     name = str(name or "").strip()
     if len(name) < 2:
@@ -286,18 +420,10 @@ def create_company(guild_id:int, owner_id:int, owner_name:str, sector_key:str, n
     if len(name) > 40:
         name = name[:40]
 
-    def read_existing():
-        conn = db()
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM companies WHERE guild_id=? AND owner_id=? AND active=1", (int(guild_id), int(owner_id)))
-        row = cur.fetchone()
-        conn.close()
-        return row
+    if active_company_count(guild_id, owner_id) >= MAX_COMPANIES_PER_USER:
+        return {"ok": False, "error": f"وصلت الحد الأقصى: {MAX_COMPANIES_PER_USER} شركات فعالة لكل عضو."}
 
-    if _retry(read_existing):
-        return {"ok": False, "error": "عندك شركة فعالة بالفعل. تقدر تملك شركة واحدة فقط حاليًا."}
-
-    cost = int(SECTORS[sector_key]["start_cost"])
+    cost = int(sector_cfg["start_cost"])
     tx = debit(guild_id, owner_id, cost, "company_startup", user_name=owner_name, actor_id=owner_id, actor_name=owner_name, source_label=sector_key, reason=f"Start company {name}")
     if not tx.get("ok"):
         return {"ok": False, "error": "رصيدك ما يكفي لفتح الشركة."}
@@ -329,7 +455,7 @@ def create_company(guild_id:int, owner_id:int, owner_name:str, sector_key:str, n
 
     record(guild_id, owner_id, owner_name, "company", "Company created", f"{name} / {sector_key}", -cost)
     log_event(guild_id, "company_create", owner_id, owner_name, 0, "", "Company created", f"{name} ({sector_key})")
-    return {"ok": True, "id": int(company_id), "name": name, "sector": SECTORS[sector_key], "cost": cost}
+    return {"ok": True, "id": int(company_id), "name": name, "sector": sector_cfg, "cost": cost}
 
 
 def get_company_by_owner(guild_id:int, owner_id:int):
@@ -476,7 +602,7 @@ def business_event(company, cycles:int=1):
 
 
 def income_preview(company):
-    sector = sector_info(company["sector_key"])
+    sector = sector_info_for_guild(company["guild_id"], company["sector_key"])
     level = int(company["level"] or 1)
     employees = employee_count(company["guild_id"], company["id"])
 
@@ -681,7 +807,7 @@ def upgrade(guild_id:int, owner_id:int, owner_name:str):
     if not company:
         return {"ok": False, "error": "ما عندك شركة."}
 
-    sector = sector_info(company["sector_key"])
+    sector = sector_info_for_guild(company["guild_id"], company["sector_key"])
     level = int(company["level"] or 1)
     if level >= 10:
         return {"ok": False, "error": "الشركة وصلت أعلى مستوى 10."}
@@ -832,6 +958,77 @@ def decision_report(company):
         "security": company_stat(company, "security_level", 1),
         "innovation": company_stat(company, "innovation", 1),
         "strategy": strategy_name(company),
+    }
+
+
+
+def user_companies(guild_id:int, owner_id:int):
+    ensure_tables()
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM companies WHERE guild_id=? AND owner_id=? AND active=1 ORDER BY id DESC", (int(guild_id), int(owner_id)))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+
+    res = _retry(work)
+    return [] if isinstance(res, dict) else res
+
+
+def get_company_for_owner(guild_id:int, owner_id:int, company_id:int=None):
+    rows = user_companies(guild_id, owner_id)
+    if not rows:
+        return None
+
+    if company_id:
+        for r in rows:
+            if int(r["id"]) == int(company_id):
+                return r
+        return None
+
+    return rows[0]
+
+
+def sell_company(guild_id:int, owner_id:int, owner_name:str, company_id:int=None):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    sector = sector_info_for_guild(guild_id, company["sector_key"])
+    refund = int(int(sector["start_cost"]) * SELL_REFUND_BPS // 10000)
+    company_balance = int(company["balance"] or 0)
+    payout = refund + company_balance
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE companies SET active=0, balance=0 WHERE guild_id=? AND id=? AND owner_id=?",
+                    (int(guild_id), int(company["id"]), int(owner_id)))
+        cur.execute("""DELETE FROM company_members
+        WHERE guild_id=? AND company_id=?""", (int(guild_id), int(company["id"])))
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "sell_company", int(owner_id), int(owner_id), int(payout), company_balance, 0, f"Sold company refund={refund:,} company_balance={company_balance:,}", "", int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    tx = credit(guild_id, owner_id, payout, "company_sell", user_name=owner_name, actor_id=owner_id, actor_name=owner_name, source_label=str(company["id"]), reason=f"Sold company {company['name']}")
+
+    return {
+        "ok": True,
+        "company": dict(company),
+        "refund": refund,
+        "company_balance": company_balance,
+        "payout": payout,
+        "tx_id": tx.get("tx_id", ""),
     }
 
 
