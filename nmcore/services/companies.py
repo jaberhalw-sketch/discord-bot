@@ -6,6 +6,87 @@ from nmcore.services.activity import record, log_event
 INCOME_COOLDOWN_SECONDS = 6 * 60 * 60
 MAX_ACCUMULATED_CYCLES = 12
 
+COMPANY_DECISIONS = {
+    "marketing": {
+        "name": "Marketing Campaign",
+        "emoji": "📣",
+        "cost": 50000,
+        "field": "marketing",
+        "amount": 1,
+        "risk": 2,
+        "rep": 1,
+        "desc": "يزيد المبيعات والدخل، لكن يرفع المخاطرة شوي."
+    },
+    "quality": {
+        "name": "Product Quality",
+        "emoji": "⭐",
+        "cost": 70000,
+        "field": "product_quality",
+        "amount": 1,
+        "risk": -1,
+        "rep": 3,
+        "desc": "يرفع جودة الشركة والسمعة ويخلي نجاحها ثابت."
+    },
+    "automation": {
+        "name": "Automation Upgrade",
+        "emoji": "🤖",
+        "cost": 100000,
+        "field": "automation",
+        "amount": 1,
+        "risk": 1,
+        "rep": 1,
+        "desc": "يقلل ضغط الرواتب ويرفع صافي الربح."
+    },
+    "security": {
+        "name": "Security & Compliance",
+        "emoji": "🛡️",
+        "cost": 60000,
+        "field": "security_level",
+        "amount": 1,
+        "risk": -6,
+        "rep": 1,
+        "desc": "يقلل الفشل والمخاطر والضربات المفاجئة."
+    },
+    "innovation": {
+        "name": "Innovation Lab",
+        "emoji": "🧪",
+        "cost": 120000,
+        "field": "innovation",
+        "amount": 1,
+        "risk": 4,
+        "rep": 2,
+        "desc": "يزيد النمو والدخل، لكنه يخلي الشركة أكثر مخاطرة."
+    },
+    "safe": {
+        "name": "Safe Strategy",
+        "emoji": "🧘",
+        "cost": 30000,
+        "strategy": "safe",
+        "risk": -4,
+        "rep": 1,
+        "desc": "دخل أهدأ ومخاطر أقل."
+    },
+    "balanced": {
+        "name": "Balanced Strategy",
+        "emoji": "⚖️",
+        "cost": 15000,
+        "strategy": "balanced",
+        "risk": -1,
+        "rep": 0,
+        "desc": "توازن بين الربح والمخاطرة."
+    },
+    "aggressive": {
+        "name": "Aggressive Expansion",
+        "emoji": "🚀",
+        "cost": 30000,
+        "strategy": "aggressive",
+        "risk": 8,
+        "rep": 1,
+        "desc": "دخل أعلى لكن احتمال الفشل والخسائر أعلى."
+    },
+}
+
+
 SECTORS = {
     "tech": {
         "name": "Tech Startup",
@@ -157,6 +238,24 @@ def ensure_tables():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_companies_guild_owner ON companies(guild_id, owner_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_company_ledger_company ON company_ledger(guild_id, company_id, id)")
 
+        # Patch 56 migrations: decision-based company stats.
+        migrations = [
+            "ALTER TABLE companies ADD COLUMN strategy TEXT DEFAULT 'balanced'",
+            "ALTER TABLE companies ADD COLUMN marketing INTEGER DEFAULT 1",
+            "ALTER TABLE companies ADD COLUMN product_quality INTEGER DEFAULT 1",
+            "ALTER TABLE companies ADD COLUMN automation INTEGER DEFAULT 1",
+            "ALTER TABLE companies ADD COLUMN security_level INTEGER DEFAULT 1",
+            "ALTER TABLE companies ADD COLUMN innovation INTEGER DEFAULT 1",
+            "ALTER TABLE companies ADD COLUMN risk INTEGER DEFAULT 10",
+            "ALTER TABLE companies ADD COLUMN decisions INTEGER DEFAULT 0",
+            "ALTER TABLE companies ADD COLUMN failures INTEGER DEFAULT 0",
+        ]
+        for sql in migrations:
+            try:
+                cur.execute(sql)
+            except Exception:
+                pass
+
         conn.commit()
         conn.close()
         return {"ok": True}
@@ -276,23 +375,160 @@ def employee_count(guild_id:int, company_id:int):
     return max(0, len([m for m in company_members(guild_id, company_id) if m.get("role") != "owner"]))
 
 
+def company_stat(company, key, default=1):
+    try:
+        return int(company[key] or default)
+    except Exception:
+        return int(default)
+
+
+def decision_options_text():
+    lines = []
+    for key, d in COMPANY_DECISIONS.items():
+        lines.append(f"`{key}` {d['emoji']} **{d['name']}** — Cost **{d['cost']:,}** — {d['desc']}")
+    return "\n".join(lines)
+
+
+def strategy_name(company):
+    s = str(company["strategy"] or "balanced")
+    if s == "safe":
+        return "🧘 Safe"
+    if s == "aggressive":
+        return "🚀 Aggressive"
+    return "⚖️ Balanced"
+
+
+def success_score(company):
+    level = int(company["level"] or 1)
+    reputation = int(company["reputation"] or 0)
+    failures = int(company["failures"] or 0)
+    risk = company_stat(company, "risk", 10)
+
+    marketing = company_stat(company, "marketing", 1)
+    quality = company_stat(company, "product_quality", 1)
+    automation = company_stat(company, "automation", 1)
+    security = company_stat(company, "security_level", 1)
+    innovation = company_stat(company, "innovation", 1)
+    employees = employee_count(company["guild_id"], company["id"])
+
+    score = 35
+    score += level * 3
+    score += min(25, reputation // 4)
+    score += min(16, employees * 2)
+    score += min(18, quality * 3)
+    score += min(14, security * 3)
+    score += min(10, automation * 2)
+    score += min(10, marketing)
+    score += min(10, innovation * 2)
+    score -= min(25, risk // 2)
+    score -= min(20, failures * 3)
+
+    strategy = str(company["strategy"] or "balanced")
+    if strategy == "safe":
+        score += 8
+    elif strategy == "aggressive":
+        score -= 8
+
+    return max(5, min(98, int(score)))
+
+
+def business_event(company, cycles:int=1):
+    """
+    A light event system. Good decisions reduce bad events; aggressive/risky choices
+    increase possible profit but also increase failure chance.
+    """
+    risk = company_stat(company, "risk", 10)
+    security = company_stat(company, "security_level", 1)
+    quality = company_stat(company, "product_quality", 1)
+    strategy = str(company["strategy"] or "balanced")
+    score = success_score(company)
+
+    bad_threshold = max(4, min(45, risk - security * 3 + (10 if strategy == "aggressive" else 0) - (8 if strategy == "safe" else 0)))
+    good_threshold = max(6, min(45, score // 3 + quality + (8 if strategy == "aggressive" else 0)))
+
+    seed = (int(time.time()) // INCOME_COOLDOWN_SECONDS) + int(company["id"]) * 31 + int(cycles) * 7
+    roll = seed % 100
+
+    if roll < bad_threshold:
+        severity = 10 + min(35, (bad_threshold - roll))
+        return {
+            "type": "bad",
+            "label": "Operational Problem",
+            "impact_bps": -severity * 100,
+            "details": "قرارك/مخاطرتك سببت مشكلة تشغيلية وانخفض الربح."
+        }
+
+    if roll > 100 - good_threshold:
+        bonus = 8 + min(30, (roll - (100 - good_threshold)))
+        return {
+            "type": "good",
+            "label": "Business Breakthrough",
+            "impact_bps": bonus * 100,
+            "details": "قراراتك الجيدة رفعت الأداء وجابت فرصة ربح أعلى."
+        }
+
+    return {
+        "type": "normal",
+        "label": "Stable Operation",
+        "impact_bps": 0,
+        "details": "الشركة اشتغلت بشكل طبيعي."
+    }
+
+
 def income_preview(company):
     sector = sector_info(company["sector_key"])
     level = int(company["level"] or 1)
     employees = employee_count(company["guild_id"], company["id"])
 
-    gross = int(sector["base_income"] * level * (1 + min(employees, 8) * 0.08))
-    tax = gross * int(sector["tax_bps"]) // 10000
-    payroll_total = gross * min(employees, 8) * int(sector["payroll_bps"]) // 10000
-    net_company = max(0, gross - tax - payroll_total)
+    marketing = company_stat(company, "marketing", 1)
+    quality = company_stat(company, "product_quality", 1)
+    automation = company_stat(company, "automation", 1)
+    security = company_stat(company, "security_level", 1)
+    innovation = company_stat(company, "innovation", 1)
+    risk = company_stat(company, "risk", 10)
+    strategy = str(company["strategy"] or "balanced")
+
+    # Multipliers from decisions. This is what makes success depend on work/choices.
+    growth_bps = 10000
+    growth_bps += min(3500, marketing * 250)
+    growth_bps += min(4000, quality * 300)
+    growth_bps += min(2800, automation * 220)
+    growth_bps += min(4200, innovation * 320)
+    growth_bps += min(2200, employees * 800)
+
+    if strategy == "safe":
+        growth_bps -= 600
+    elif strategy == "aggressive":
+        growth_bps += 1500
+
+    gross = int(sector["base_income"] * level * growth_bps / 10000)
+
+    tax_bps = int(sector["tax_bps"])
+    if strategy == "aggressive":
+        tax_bps += 250
+    if strategy == "safe":
+        tax_bps -= 100
+
+    # Automation lowers payroll pressure.
+    payroll_bps = max(100, int(sector["payroll_bps"]) - automation * 35)
+    payroll_total = gross * min(employees, 8) * payroll_bps // 10000
+    tax = gross * max(0, tax_bps) // 10000
+
+    # Security/quality reduce operating cost from risk.
+    operating_risk_cost = max(0, (risk - security * 2 - quality) * gross // 10000)
+
+    net_company = max(0, gross - tax - payroll_total - operating_risk_cost)
 
     return {
         "gross": gross,
         "tax": tax,
         "payroll_total": payroll_total,
         "employee_bonus_each": (payroll_total // employees) if employees else 0,
+        "operating_risk_cost": operating_risk_cost,
         "net_company": net_company,
         "employees": employees,
+        "success_score": success_score(company),
+        "strategy": strategy_name(company),
     }
 
 
@@ -327,7 +563,10 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
 
     cycles = min(int(cycles), MAX_ACCUMULATED_CYCLES)
     preview = income_preview(company)
-    total_company = preview["net_company"] * cycles
+    event = business_event(company, cycles)
+    base_total_company = preview["net_company"] * cycles
+    event_delta = base_total_company * int(event["impact_bps"]) // 10000
+    total_company = max(0, base_total_company + event_delta)
     employee_each = preview["employee_bonus_each"] * cycles
     employees = [m for m in company_members(guild_id, company["id"]) if m.get("role") != "owner"]
 
@@ -340,12 +579,14 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
     def work():
         conn = db()
         cur = conn.cursor()
-        cur.execute("UPDATE companies SET balance=?, last_income_claim=?, reputation=reputation+? WHERE guild_id=? AND id=?",
-                    (after, new_last, cycles, int(guild_id), int(company["id"])))
+        rep_delta = cycles + (2 if event["type"] == "good" else 0)
+        fail_delta = 1 if event["type"] == "bad" else 0
+        cur.execute("UPDATE companies SET balance=?, last_income_claim=?, reputation=reputation+?, failures=failures+? WHERE guild_id=? AND id=?",
+                    (after, new_last, rep_delta, fail_delta, int(guild_id), int(company["id"])))
         cur.execute("""INSERT INTO company_ledger
         (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-        (int(guild_id), int(company["id"]), "income_collect", int(owner_id), int(owner_id), int(total_company), before, after, f"{cycles} cycles gross={preview['gross']:,} tax={preview['tax']:,} payroll={preview['payroll_total']:,}", "", now))
+        (int(guild_id), int(company["id"]), "income_collect", int(owner_id), int(owner_id), int(total_company), before, after, f"{cycles} cycles gross={preview['gross']:,} tax={preview['tax']:,} payroll={preview['payroll_total']:,} event={event['label']} impact={event_delta:,}", "", now))
         conn.commit()
         conn.close()
         return {"ok": True}
@@ -371,6 +612,8 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
         "paid_employees": paid_employees,
         "balance_after": after,
         "preview": preview,
+        "event": event,
+        "event_delta": event_delta,
     }
 
 
@@ -522,6 +765,74 @@ def fire(guild_id:int, owner_id:int, owner_name:str, member_id:int):
     if not changed:
         return {"ok": False, "error": "العضو مو موظف في شركتك."}
     return {"ok": True, "company": dict(company), "member_id": int(member_id)}
+
+
+
+def make_decision(guild_id:int, owner_id:int, owner_name:str, decision_key:str):
+    company = get_company_by_owner(guild_id, owner_id)
+    if not company:
+        return {"ok": False, "error": "ما عندك شركة."}
+
+    key = str(decision_key or "").lower().strip()
+    if key not in COMPANY_DECISIONS:
+        return {"ok": False, "error": "القرار غير موجود.\n" + decision_options_text()}
+
+    d = COMPANY_DECISIONS[key]
+    cost = int(d["cost"])
+    before = int(company["balance"] or 0)
+
+    if before < cost:
+        return {"ok": False, "error": f"رصيد الشركة ما يكفي. تكلفة القرار: {cost:,}. استخدم `!شركة_ايداع` إذا تحتاج تمويل."}
+
+    field = d.get("field")
+    strategy = d.get("strategy")
+    after = before - cost
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+
+        if field:
+            cur.execute(f"""UPDATE companies
+            SET balance=?, {field}=MIN(10,{field}+?), risk=MAX(0,MIN(100,risk+?)), reputation=reputation+?, decisions=decisions+1
+            WHERE guild_id=? AND id=?""",
+            (after, int(d.get("amount", 1)), int(d.get("risk", 0)), int(d.get("rep", 0)), int(guild_id), int(company["id"])))
+        elif strategy:
+            cur.execute("""UPDATE companies
+            SET balance=?, strategy=?, risk=MAX(0,MIN(100,risk+?)), reputation=reputation+?, decisions=decisions+1
+            WHERE guild_id=? AND id=?""",
+            (after, str(strategy), int(d.get("risk", 0)), int(d.get("rep", 0)), int(guild_id), int(company["id"])))
+
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "decision", int(owner_id), int(owner_id), -cost, before, after, f"{key}: {d['name']}", "", int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    return {"ok": True, "decision": d, "key": key, "cost": cost, "balance_after": after}
+
+
+def decision_report(company):
+    preview = income_preview(company)
+    event = business_event(company, 1)
+    return {
+        "company": dict(company),
+        "preview": preview,
+        "next_event_preview": event,
+        "risk": company_stat(company, "risk", 10),
+        "marketing": company_stat(company, "marketing", 1),
+        "quality": company_stat(company, "product_quality", 1),
+        "automation": company_stat(company, "automation", 1),
+        "security": company_stat(company, "security_level", 1),
+        "innovation": company_stat(company, "innovation", 1),
+        "strategy": strategy_name(company),
+    }
 
 
 def top_companies(guild_id:int, limit:int=10):
