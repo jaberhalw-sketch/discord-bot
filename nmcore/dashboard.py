@@ -2922,9 +2922,9 @@ DASHBOARD_BASE_URL</pre>
         </div>
 
         <div class='card'>
-          <h3>Company System Settings</h3>
-          <p class='muted'>غيّر أسعار فتح الشركات والدخل والضرائب والرواتب والمخاطرة من هنا. التغييرات محفوظة في قاعدة البيانات وتبقى بعد الريستارت.</p>
-          <p>Limit: <b>{companies_service.MAX_COMPANIES_PER_USER}</b> companies per member • Sell refund: <b>30%</b> of current start cost + company balance.</p>
+          <h3>🏢 Pro Company Control Center</h3>
+          <p class='muted'>لوحة تحكم الشركات الاحترافية: تعديل الأسعار، الدخل، الضرائب، الرواتب، المخاطرة، فتح/إغلاق القطاعات، ومراقبة الشركات. كل تغيير محفوظ في قاعدة البيانات ويبقى بعد الريستارت.</p>
+          <p>Balance safety: <b>{companies_service.MAX_COMPANIES_PER_USER}</b> شركات كحد أقصى لكل عضو • البيع يرجع <b>30%</b> فقط + رصيد الشركة • القرارات تؤثر على النجاح والمخاطرة.</p>
         </div>
 
         <div class='card'>
