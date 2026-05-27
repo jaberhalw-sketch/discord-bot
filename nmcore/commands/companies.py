@@ -253,6 +253,34 @@ class CompanyPagerView(OwnerOnlyView):
             e.add_field(name="🧾 آخر الحركات", value="\n".join(f"• `{r['action']}` — `{fmt(r['amount'])}`" for r in logs[:5]), inline=False)
         await interaction.response.edit_message(embed=e, view=self)
 
+    @discord.ui.button(label="⬆️ تطوير الشركة", style=discord.ButtonStyle.primary, row=2)
+    async def upgrade_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        c = self.current_company()
+        if not c:
+            await interaction.response.send_message("❌ ما عندك شركة.", ephemeral=True)
+            return
+
+        res = companies.upgrade_company(
+            interaction.guild.id,
+            interaction.user.id,
+            interaction.user.display_name,
+            int(c["id"])
+        )
+
+        if not res["ok"]:
+            await interaction.response.send_message(res["error"], ephemeral=True)
+            return
+
+        refreshed = companies.get_company_for_owner(interaction.guild.id, interaction.user.id, int(c["id"]))
+        e = company_embed(self.ctx, refreshed)
+        e.add_field(
+            name="⬆️ تم تطوير الشركة",
+            value=f"الشركة: **{res['company']['name']}**\nالمستوى الجديد: **{res['level']}**\nالتكلفة: {coin(interaction.guild.id, res['cost'])}\nرصيد الشركة: {coin(interaction.guild.id, res['balance_after'])}",
+            inline=False
+        )
+        await interaction.response.edit_message(embed=e, view=self)
+
+
     @discord.ui.button(label="🏪 متجر الشركات", style=discord.ButtonStyle.secondary, row=2)
     async def market_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         view = CompanyMarketView(self.ctx)
@@ -476,7 +504,7 @@ def setup(bot):
             for c in rows:
                 sec = companies.sector_info_for_guild(ctx.guild.id, c['sector_key'])
                 lines.append(f"`#{c['id']}` {sec['emoji']} **{c['name']}** — L{int(c['level'])} — Balance `{fmt(c['balance'])}`")
-            await ctx.reply(embed=embed('⬆️ اختر الشركة اللي تبي تطورها', "\n".join(lines) + "\n\nاستخدم: `!شركة_ترقية COMPANY_ID`", 'info', ctx.author))
+            await ctx.reply(embed=embed('⬆️ اختر الشركة اللي تبي تطورها', "\n".join(lines) + "\n\nاستخدم: `!شركاتي` ثم زر ⬆️ تطوير الشركة", 'info', ctx.author))
             return
 
         target_id = company_id or int(rows[0]['id'])
@@ -720,14 +748,26 @@ def setup(bot):
         view = CompanyMarketView(ctx)
         await ctx.reply(embed=view.embed(), view=view)
 
+    @bot.command(name='ادارة_الشركات', aliases=['إدارة_الشركات', 'company_manage'])
+    async def manage_companies(ctx):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+        if not rows:
+            await ctx.reply(embed=embed('🏢 إدارة الشركات', 'ما عندك شركات. افتح شركة من `!متجر_الشركات`.', 'warn', ctx.author))
+            return
+
+        await ctx.reply(
+            embed=company_embed(ctx, rows[0]),
+            view=CompanyPagerView(ctx, rows, 0)
+        )
+
     @bot.command(name='شرح_الشركات', aliases=['companies_help'])
     async def help_companies(ctx):
         e = embed('🏢 شرح نظام الشركات', 'كل أوامر الشركات في مكان واحد بشكل مرتب وواضح.', 'info', ctx.author)
         e.add_field(name='1) البداية', value='`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`', inline=True)
         e.add_field(name='2) متابعة شركاتك', value='`!شركتي`\n`!شركاتي`\n`!شركة_تحليل`', inline=True)
-        e.add_field(name='3) الأرباح والتطوير', value='`!شركة_دخل`\n`!شركة_ترقية COMPANY_ID`\n`!شركة_ايداع COMPANY_ID 50000`\n`!شركة_سحب COMPANY_ID 50000`', inline=True)
+        e.add_field(name='3) الأرباح والتطوير', value='`!شركة_دخل`\n`!شركاتي` ثم زر ⬆️ تطوير الشركة\n`!شركة_ايداع COMPANY_ID 50000`\n`!شركة_سحب COMPANY_ID 50000`', inline=True)
         e.add_field(name='4) الموظفون', value='`!شركة_توظيف COMPANY_ID @user`\n`!شركة_طرد COMPANY_ID @user`', inline=True)
         e.add_field(name='5) القرارات', value='`!قرارات_الشركة`\n`!شركة_قرار marketing`', inline=True)
         e.add_field(name='6) البيع والترتيب', value='`!شركة_بيع COMPANY_ID`\n`!الشركات`', inline=True)
-        e.add_field(name='معلومة', value='العضو يقدر يملك حتى **3 شركات**، والأسعار قابلة للتعديل من الداشبورد.', inline=False)
+        e.add_field(name='معلومة', value='العضو يقدر يملك حتى **3 شركات**. للتطوير بدون كتابة ID استخدم `!شركاتي` أو `!ادارة_الشركات` واضغط زر **⬆️ تطوير الشركة**.', inline=False)
         await ctx.reply(embed=e)
