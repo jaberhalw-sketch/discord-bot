@@ -5,6 +5,8 @@ from nmcore.services.activity import record, log_event
 
 INCOME_COOLDOWN_SECONDS = 6 * 60 * 60
 MAX_ACCUMULATED_CYCLES = 12
+MAX_COMPANIES_PER_USER = 3
+SELL_REFUND_BPS = 3000
 
 COMPANY_DECISIONS = {
     "marketing": {
@@ -88,94 +90,25 @@ COMPANY_DECISIONS = {
 
 
 SECTORS = {
-    "tech": {
-        "name": "Tech Startup",
-        "emoji": "💻",
-        "start_cost": 150000,
-        "base_income": 9000,
-        "upgrade_base": 100000,
-        "tax_bps": 1200,
-        "payroll_bps": 600,
-        "risk_bps": 700,
-        "desc": "دخل جيد ونمو ثابت."
-    },
-    "real_estate": {
-        "name": "Real Estate Agency",
-        "emoji": "🏢",
-        "start_cost": 250000,
-        "base_income": 16000,
-        "upgrade_base": 160000,
-        "tax_bps": 1400,
-        "payroll_bps": 500,
-        "risk_bps": 500,
-        "desc": "دخل عالي لكن رأس المال كبير."
-    },
-    "logistics": {
-        "name": "Logistics Company",
-        "emoji": "🚚",
-        "start_cost": 120000,
-        "base_income": 7500,
-        "upgrade_base": 85000,
-        "tax_bps": 1000,
-        "payroll_bps": 700,
-        "risk_bps": 600,
-        "desc": "شركة متوازنة ومناسبة للبداية."
-    },
-    "security": {
-        "name": "Security Firm",
-        "emoji": "🛡️",
-        "start_cost": 180000,
-        "base_income": 11000,
-        "upgrade_base": 120000,
-        "tax_bps": 1100,
-        "payroll_bps": 650,
-        "risk_bps": 400,
-        "desc": "دخل ثابت ومخاطر قليلة."
-    },
-    "media": {
-        "name": "Media Studio",
-        "emoji": "🎬",
-        "start_cost": 90000,
-        "base_income": 5500,
-        "upgrade_base": 65000,
-        "tax_bps": 900,
-        "payroll_bps": 550,
-        "risk_bps": 800,
-        "desc": "رخيص ومناسب للأعضاء الجدد."
-    },
-    "finance": {
-        "name": "Investment Office",
-        "emoji": "📈",
-        "start_cost": 350000,
-        "base_income": 24000,
-        "upgrade_base": 230000,
-        "tax_bps": 1800,
-        "payroll_bps": 450,
-        "risk_bps": 1200,
-        "desc": "دخل ضخم لكن مخاطره أعلى."
-    },
-    "food": {
-        "name": "Restaurant Chain",
-        "emoji": "🍔",
-        "start_cost": 110000,
-        "base_income": 6500,
-        "upgrade_base": 75000,
-        "tax_bps": 950,
-        "payroll_bps": 800,
-        "risk_bps": 500,
-        "desc": "دخل متوسط وتوظيف مفيد."
-    },
-    "casino": {
-        "name": "Entertainment Group",
-        "emoji": "🎰",
-        "start_cost": 300000,
-        "base_income": 19000,
-        "upgrade_base": 200000,
-        "tax_bps": 2000,
-        "payroll_bps": 500,
-        "risk_bps": 1500,
-        "desc": "دخل عالي لكن ضريبة ومخاطر عالية."
-    },
+    "media": {"name":"Media Studio","emoji":"🎬","start_cost":90000,"base_income":5500,"upgrade_base":65000,"tax_bps":900,"payroll_bps":550,"risk_bps":800,"desc":"رخيص ومناسب للأعضاء الجدد."},
+    "grocery": {"name":"Abu Jaber Grocery","emoji":"🧃","start_cost":75000,"base_income":4200,"upgrade_base":50000,"tax_bps":700,"payroll_bps":600,"risk_bps":350,"desc":"بداية رخيصة ومضحكة للمفلسين."},
+    "talabat": {"name":"Talabat Rejects","emoji":"🛵","start_cost":85000,"base_income":5200,"upgrade_base":58000,"tax_bps":850,"payroll_bps":750,"risk_bps":700,"desc":"توصيل سريع ودخل متوسط."},
+    "food": {"name":"Restaurant Chain","emoji":"🍔","start_cost":110000,"base_income":6500,"upgrade_base":75000,"tax_bps":950,"payroll_bps":800,"risk_bps":500,"desc":"بداية ممتازة ودخل ثابت."},
+    "logistics": {"name":"Logistics Company","emoji":"🚚","start_cost":120000,"base_income":7500,"upgrade_base":85000,"tax_bps":1000,"payroll_bps":700,"risk_bps":600,"desc":"شركة متوازنة ومناسبة للبداية."},
+    "security": {"name":"Security Firm","emoji":"🛡️","start_cost":180000,"base_income":11000,"upgrade_base":120000,"tax_bps":1100,"payroll_bps":650,"risk_bps":400,"desc":"دخل ثابت ومخاطر قليلة."},
+    "tech": {"name":"Tech Startup","emoji":"💻","start_cost":180000,"base_income":10500,"upgrade_base":100000,"tax_bps":1200,"payroll_bps":600,"risk_bps":700,"desc":"دخل جيد وينجح مع automation و innovation."},
+    "laundry": {"name":"Money Laundry","emoji":"🧼","start_cost":220000,"base_income":15000,"upgrade_base":145000,"tax_bps":1800,"payroll_bps":450,"risk_bps":2200,"desc":"ربح عالي بس Risk عالي جدًا."},
+    "real_estate": {"name":"Real Estate Agency","emoji":"🏢","start_cost":250000,"base_income":16000,"upgrade_base":160000,"tax_bps":1400,"payroll_bps":500,"risk_bps":500,"desc":"دخل عالي ويرتبط بفكرة العقارات."},
+    "shady_real_estate": {"name":"Shady Real Estate Office","emoji":"🏚️","start_cost":280000,"base_income":21000,"upgrade_base":175000,"tax_bps":1600,"payroll_bps":450,"risk_bps":1800,"desc":"دخل قوي لكن مخاطرة أعلى."},
+    "casino": {"name":"Entertainment Group","emoji":"🎰","start_cost":300000,"base_income":19000,"upgrade_base":200000,"tax_bps":2000,"payroll_bps":500,"risk_bps":1500,"desc":"دخل عالي بس ضريبة ومخاطرة عالية."},
+    "finance": {"name":"Investment Office","emoji":"📈","start_cost":350000,"base_income":24000,"upgrade_base":230000,"tax_bps":1800,"payroll_bps":450,"risk_bps":1200,"desc":"دخل ضخم لكن مخاطره أعلى."},
+    "monkey": {"name":"Monkey Holding","emoji":"🦍","start_cost":450000,"base_income":26000,"upgrade_base":260000,"tax_bps":1300,"payroll_bps":500,"risk_bps":1700,"desc":"شركة meme دخلها عشوائي ومضحك."},
+    "scam": {"name":"Scam Investment LLC","emoji":"💀","start_cost":500000,"base_income":38000,"upgrade_base":300000,"tax_bps":2500,"payroll_bps":350,"risk_bps":3500,"desc":"ربح عالي جدًا ومخاطرة عالية جدًا."},
+    "factory": {"name":"Factory","emoji":"🏭","start_cost":750000,"base_income":42000,"upgrade_base":420000,"tax_bps":1500,"payroll_bps":900,"risk_bps":900,"desc":"مصنع قوي وينجح مع automation."},
+    "bank": {"name":"Private Bank","emoji":"🏦","start_cost":1000000,"base_income":60000,"upgrade_base":600000,"tax_bps":2200,"payroll_bps":400,"risk_bps":1600,"desc":"شركة فخمة تفتح باب القروض مستقبلًا."},
+    "airline": {"name":"Airline","emoji":"✈️","start_cost":1500000,"base_income":85000,"upgrade_base":850000,"tax_bps":1800,"payroll_bps":1100,"risk_bps":1300,"desc":"دخل عالي و prestige."},
+    "oil": {"name":"Oil Company","emoji":"🛢️","start_cost":2000000,"base_income":120000,"upgrade_base":1100000,"tax_bps":2600,"payroll_bps":600,"risk_bps":2000,"desc":"شركة نخبة ودخل ضخم."},
+    "holding": {"name":"Holding Group","emoji":"🏙️","start_cost":3000000,"base_income":180000,"upgrade_base":1500000,"tax_bps":2300,"payroll_bps":500,"risk_bps":1900,"desc":"الشركة النهائية للأغنياء جدًا."},
 }
 
 
@@ -1030,6 +963,110 @@ def sell_company(guild_id:int, owner_id:int, owner_name:str, company_id:int=None
         "payout": payout,
         "tx_id": tx.get("tx_id", ""),
     }
+
+
+
+def collect_income_for_company(guild_id:int, owner_id:int, owner_name:str, company_id:int):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    cycles, remaining = rent_like_remaining(company)
+    if cycles <= 0:
+        return {"ok": False, "error": f"دخل الشركة غير جاهز. باقي: {seconds_to_text(remaining)}"}
+
+    cycles = min(int(cycles), MAX_ACCUMULATED_CYCLES)
+    preview = income_preview(company)
+    event = business_event(company, cycles)
+    base_total_company = preview["net_company"] * cycles
+    event_delta = base_total_company * int(event["impact_bps"]) // 10000
+    total_company = max(0, base_total_company + event_delta)
+    employee_each = preview["employee_bonus_each"] * cycles
+    employees = [m for m in company_members(guild_id, company["id"]) if m.get("role") != "owner"]
+
+    before = int(company["balance"] or 0)
+    after = before + total_company
+    now = int(time.time())
+    last = int(company["last_income_claim"] or company["created_at"] or now)
+    new_last = last + cycles * INCOME_COOLDOWN_SECONDS
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        rep_delta = cycles + (2 if event["type"] == "good" else 0)
+        fail_delta = 1 if event["type"] == "bad" else 0
+        cur.execute("UPDATE companies SET balance=?, last_income_claim=?, reputation=reputation+?, failures=failures+? WHERE guild_id=? AND id=? AND owner_id=?",
+                    (after, new_last, rep_delta, fail_delta, int(guild_id), int(company["id"]), int(owner_id)))
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "income_collect", int(owner_id), int(owner_id), int(total_company), before, after, f"{cycles} cycles event={event['label']} impact={event_delta:,}", "", now))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة، جرب بعد ثواني."}
+
+    paid_employees = 0
+    if employee_each > 0:
+        for m in employees:
+            tx = credit(guild_id, int(m["user_id"]), employee_each, "company_salary", user_name=m.get("user_name",""), actor_id=owner_id, actor_name=owner_name, source_label=str(company["id"]), reason=f"Salary from {company['name']}")
+            if tx.get("ok"):
+                paid_employees += 1
+
+    record(guild_id, owner_id, owner_name, "company_income", "Company income collected", f"{company['name']} +{total_company:,}", total_company)
+    return {"ok": True, "company": dict(company), "cycles": cycles, "company_amount": total_company, "employee_each": employee_each, "paid_employees": paid_employees, "balance_after": after, "preview": preview, "event": event, "event_delta": event_delta}
+
+
+def make_decision_for_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, decision_key:str):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    key = str(decision_key or "").lower().strip()
+    if key not in COMPANY_DECISIONS:
+        return {"ok": False, "error": "القرار غير موجود. استخدم !قرارات_الشركة"}
+
+    d = COMPANY_DECISIONS[key]
+    cost = int(d["cost"])
+    before = int(company["balance"] or 0)
+
+    if before < cost:
+        return {"ok": False, "error": f"رصيد الشركة ما يكفي. تكلفة القرار: {cost:,}. استخدم `!شركة_ايداع` إذا تحتاج تمويل."}
+
+    field = d.get("field")
+    strategy = d.get("strategy")
+    after = before - cost
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        if field:
+            cur.execute(f"""UPDATE companies
+            SET balance=?, {field}=MIN(10,{field}+?), risk=MAX(0,MIN(100,risk+?)), reputation=reputation+?, decisions=decisions+1
+            WHERE guild_id=? AND id=? AND owner_id=?""",
+            (after, int(d.get("amount", 1)), int(d.get("risk", 0)), int(d.get("rep", 0)), int(guild_id), int(company["id"]), int(owner_id)))
+        elif strategy:
+            cur.execute("""UPDATE companies
+            SET balance=?, strategy=?, risk=MAX(0,MIN(100,risk+?)), reputation=reputation+?, decisions=decisions+1
+            WHERE guild_id=? AND id=? AND owner_id=?""",
+            (after, str(strategy), int(d.get("risk", 0)), int(d.get("rep", 0)), int(guild_id), int(company["id"]), int(owner_id)))
+
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "decision", int(owner_id), int(owner_id), -cost, before, after, f"{key}: {d['name']}", "", int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    return {"ok": True, "decision": d, "key": key, "cost": cost, "balance_after": after}
 
 
 def top_companies(guild_id:int, limit:int=10):
