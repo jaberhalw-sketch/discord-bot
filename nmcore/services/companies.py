@@ -1271,3 +1271,4 @@ def ledger(guild_id:int, company_id:int, limit:int=25):
         return rows
     res = _retry(work)
     return [] if isinstance(res, dict) else res
+
