@@ -1069,6 +1069,168 @@ def make_decision_for_company(guild_id:int, owner_id:int, owner_name:str, compan
     return {"ok": True, "decision": d, "key": key, "cost": cost, "balance_after": after}
 
 
+
+def deposit_to_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, amount:int):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    amount = max(1, int(amount))
+    tx = debit(guild_id, owner_id, amount, "company_deposit", user_name=owner_name, actor_id=owner_id, actor_name=owner_name, source_label=str(company["id"]), reason=f"Deposit to {company['name']}")
+    if not tx.get("ok"):
+        return {"ok": False, "error": "رصيدك ما يكفي."}
+
+    before = int(company["balance"] or 0)
+    after = before + amount
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE companies SET balance=? WHERE guild_id=? AND id=? AND owner_id=?", (after, int(guild_id), int(company["id"]), int(owner_id)))
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "deposit", int(owner_id), int(owner_id), amount, before, after, "Owner deposit", tx.get("tx_id",""), int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    return {"ok": True, "company": dict(company), "amount": amount, "balance_after": after}
+
+
+def withdraw_from_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, amount:int):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    amount = max(1, int(amount))
+    before = int(company["balance"] or 0)
+    if amount > before:
+        return {"ok": False, "error": "رصيد الشركة ما يكفي."}
+
+    after = before - amount
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE companies SET balance=? WHERE guild_id=? AND id=? AND owner_id=?", (after, int(guild_id), int(company["id"]), int(owner_id)))
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "withdraw", int(owner_id), int(owner_id), -amount, before, after, "Owner withdraw", "", int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    tx = credit(guild_id, owner_id, amount, "company_withdraw", user_name=owner_name, actor_id=owner_id, actor_name=owner_name, source_label=str(company["id"]), reason=f"Withdraw from {company['name']}")
+    return {"ok": True, "company": dict(company), "amount": amount, "balance_after": after, "tx_id": tx.get("tx_id","")}
+
+
+def upgrade_company(guild_id:int, owner_id:int, owner_name:str, company_id:int):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    sector = sector_info_for_guild(company["guild_id"], company["sector_key"])
+    level = int(company["level"] or 1)
+    if level >= 10:
+        return {"ok": False, "error": "الشركة وصلت أعلى مستوى 10."}
+
+    cost = int(sector["upgrade_base"] * (level ** 1.35))
+    before = int(company["balance"] or 0)
+    if before < cost:
+        return {"ok": False, "error": f"رصيد الشركة ما يكفي. تكلفة الترقية: {cost:,}"}
+
+    after = before - cost
+    new_level = level + 1
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("UPDATE companies SET balance=?, level=? WHERE guild_id=? AND id=? AND owner_id=?", (after, new_level, int(guild_id), int(company["id"]), int(owner_id)))
+        cur.execute("""INSERT INTO company_ledger
+        (guild_id,company_id,action,actor_id,user_id,amount,balance_before,balance_after,details,money_tx_id,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        (int(guild_id), int(company["id"]), "upgrade", int(owner_id), int(owner_id), -cost, before, after, f"Level {level} -> {new_level}", "", int(time.time())))
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    res = _retry(work)
+    if isinstance(res, dict) and not res.get("ok"):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+
+    return {"ok": True, "company": dict(company), "cost": cost, "level": new_level, "balance_after": after}
+
+
+def hire_for_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, member_id:int, member_name:str):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    if int(member_id) == int(owner_id):
+        return {"ok": False, "error": "مالك الشركة موجود تلقائيًا."}
+
+    members = company_members(guild_id, company["id"])
+    if len(members) >= 9:
+        return {"ok": False, "error": "الحد الأقصى 8 موظفين + المالك."}
+
+    now = int(time.time())
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("""INSERT OR IGNORE INTO company_members
+        (guild_id,company_id,user_id,user_name,role,joined_at)
+        VALUES (?,?,?,?,?,?)""", (int(guild_id), int(company["id"]), int(member_id), str(member_name)[:120], "employee", now))
+        changed = cur.rowcount
+        conn.commit()
+        conn.close()
+        return changed
+
+    changed = _retry(work)
+    if isinstance(changed, dict):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+    if not changed:
+        return {"ok": False, "error": "هذا العضو موظف بالفعل في هذه الشركة."}
+
+    return {"ok": True, "company": dict(company), "member_id": int(member_id), "member_name": member_name}
+
+
+def fire_from_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, member_id:int):
+    company = get_company_for_owner(guild_id, owner_id, company_id)
+    if not company:
+        return {"ok": False, "error": "الشركة غير موجودة أو ليست ملكك."}
+
+    if int(member_id) == int(owner_id):
+        return {"ok": False, "error": "ما تقدر تطرد المالك."}
+
+    def work():
+        conn = db()
+        cur = conn.cursor()
+        cur.execute("DELETE FROM company_members WHERE guild_id=? AND company_id=? AND user_id=? AND role!='owner'",
+                    (int(guild_id), int(company["id"]), int(member_id)))
+        changed = cur.rowcount
+        conn.commit()
+        conn.close()
+        return changed
+
+    changed = _retry(work)
+    if isinstance(changed, dict):
+        return {"ok": False, "error": "قاعدة البيانات مشغولة."}
+    if not changed:
+        return {"ok": False, "error": "العضو مو موظف في هذه الشركة."}
+
+    return {"ok": True, "company": dict(company), "member_id": int(member_id)}
+
 def top_companies(guild_id:int, limit:int=10):
     ensure_tables()
     def work():
