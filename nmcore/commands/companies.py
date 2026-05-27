@@ -465,69 +465,163 @@ def setup(bot):
         await ctx.reply(embed=e)
 
     @bot.command(name='شركة_ترقية', aliases=['ترقية_الشركة', 'company_upgrade'])
-    async def upgrade(ctx):
-        res = companies.upgrade(ctx.guild.id, ctx.author.id, ctx.author.display_name)
+    async def upgrade(ctx, company_id: int = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+        if not rows:
+            await ctx.reply(embed=embed('⬆️ ترقية الشركة', 'ما عندك شركة.', 'warn', ctx.author))
+            return
+
+        if len(rows) > 1 and not company_id:
+            lines = []
+            for c in rows:
+                sec = companies.sector_info_for_guild(ctx.guild.id, c['sector_key'])
+                lines.append(f"`#{c['id']}` {sec['emoji']} **{c['name']}** — L{int(c['level'])} — Balance `{fmt(c['balance'])}`")
+            await ctx.reply(embed=embed('⬆️ اختر الشركة اللي تبي تطورها', "\n".join(lines) + "\n\nاستخدم: `!شركة_ترقية COMPANY_ID`", 'info', ctx.author))
+            return
+
+        target_id = company_id or int(rows[0]['id'])
+        res = companies.upgrade_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, target_id)
         if not res['ok']:
             await ctx.reply(embed=embed('⬆️ فشل ترقية الشركة', res['error'], 'bad', ctx.author))
             return
-        e = embed('⬆️ تمت ترقية الشركة', 'تم رفع مستوى الشركة بنجاح.', 'ok', ctx.author)
+
+        e = embed('⬆️ تمت ترقية الشركة', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
         e.add_field(name='المستوى الجديد', value=f"`{res['level']}`", inline=True)
         e.add_field(name='تكلفة الترقية', value=coin(ctx.guild.id, res['cost']), inline=True)
         e.add_field(name='رصيد الشركة', value=coin(ctx.guild.id, res['balance_after']), inline=True)
         await ctx.reply(embed=e)
 
+
     @bot.command(name='شركة_ايداع', aliases=['ايداع_شركة', 'company_deposit'])
-    async def deposit(ctx, amount: int = None):
-        if not amount or amount <= 0:
-            await ctx.reply(embed=embed('💼 إيداع للشركة', 'استخدم: `!شركة_ايداع 50000`', 'info', ctx.author))
+    async def deposit(ctx, first: int = None, second: int = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+
+        if not rows:
+            await ctx.reply(embed=embed('💼 إيداع للشركة', 'ما عندك شركة.', 'warn', ctx.author))
             return
-        res = companies.deposit(ctx.guild.id, ctx.author.id, ctx.author.display_name, amount)
+
+        if first is None or first <= 0:
+            await ctx.reply(embed=embed('💼 إيداع للشركة', 'الاستخدام:\n`!شركة_ايداع AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_ايداع COMPANY_ID AMOUNT`', 'info', ctx.author))
+            return
+
+        if second is None:
+            if len(rows) > 1:
+                lines = []
+                for c in rows:
+                    lines.append(f"`#{c['id']}` **{c['name']}** — Balance `{fmt(c['balance'])}`")
+                await ctx.reply(embed=embed('💼 اختر شركة للإيداع', "\n".join(lines) + "\n\nاستخدم: `!شركة_ايداع COMPANY_ID AMOUNT`", 'info', ctx.author))
+                return
+            company_id = int(rows[0]['id'])
+            amount = int(first)
+        else:
+            company_id = int(first)
+            amount = int(second)
+
+        res = companies.deposit_to_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, amount)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل الإيداع', res['error'], 'bad', ctx.author))
             return
-        e = embed('✅ تم الإيداع', 'تم تحويل المبلغ من محفظتك إلى الشركة.', 'ok', ctx.author)
+
+        e = embed('✅ تم الإيداع', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
         e.add_field(name='المبلغ', value=coin(ctx.guild.id, res['amount']), inline=True)
         e.add_field(name='رصيد الشركة', value=coin(ctx.guild.id, res['balance_after']), inline=True)
         await ctx.reply(embed=e)
 
+
     @bot.command(name='شركة_سحب', aliases=['سحب_شركة', 'company_withdraw'])
-    async def withdraw(ctx, amount: int = None):
-        if not amount or amount <= 0:
-            await ctx.reply(embed=embed('💼 سحب من الشركة', 'استخدم: `!شركة_سحب 50000`', 'info', ctx.author))
+    async def withdraw(ctx, first: int = None, second: int = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+
+        if not rows:
+            await ctx.reply(embed=embed('💼 سحب من الشركة', 'ما عندك شركة.', 'warn', ctx.author))
             return
-        res = companies.withdraw(ctx.guild.id, ctx.author.id, ctx.author.display_name, amount)
+
+        if first is None or first <= 0:
+            await ctx.reply(embed=embed('💼 سحب من الشركة', 'الاستخدام:\n`!شركة_سحب AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_سحب COMPANY_ID AMOUNT`', 'info', ctx.author))
+            return
+
+        if second is None:
+            if len(rows) > 1:
+                lines = []
+                for c in rows:
+                    lines.append(f"`#{c['id']}` **{c['name']}** — Balance `{fmt(c['balance'])}`")
+                await ctx.reply(embed=embed('💼 اختر شركة للسحب', "\n".join(lines) + "\n\nاستخدم: `!شركة_سحب COMPANY_ID AMOUNT`", 'info', ctx.author))
+                return
+            company_id = int(rows[0]['id'])
+            amount = int(first)
+        else:
+            company_id = int(first)
+            amount = int(second)
+
+        res = companies.withdraw_from_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, amount)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل السحب', res['error'], 'bad', ctx.author))
             return
-        e = embed('✅ تم السحب', 'تم تحويل المبلغ من الشركة إلى محفظتك.', 'ok', ctx.author)
+
+        e = embed('✅ تم السحب', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
         e.add_field(name='المبلغ', value=coin(ctx.guild.id, res['amount']), inline=True)
         e.add_field(name='رصيد الشركة', value=coin(ctx.guild.id, res['balance_after']), inline=True)
         await ctx.reply(embed=e)
 
+
     @bot.command(name='شركة_توظيف', aliases=['توظيف_شركة', 'company_hire'])
-    async def hire(ctx, member: discord.Member = None):
-        if not member:
-            await ctx.reply(embed=embed('👥 توظيف', 'استخدم: `!شركة_توظيف @user`', 'info', ctx.author))
+    async def hire(ctx, company_id: int = None, member: discord.Member = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+
+        if not rows:
+            await ctx.reply(embed=embed('👥 توظيف', 'ما عندك شركة.', 'warn', ctx.author))
             return
+
+        if member is None:
+            # Backward compatibility: if only member was mentioned, company_id becomes missing.
+            if ctx.message.mentions and len(rows) == 1:
+                member = ctx.message.mentions[0]
+                company_id = int(rows[0]['id'])
+            else:
+                lines = []
+                for c in rows:
+                    lines.append(f"`#{c['id']}` **{c['name']}**")
+                await ctx.reply(embed=embed('👥 اختر شركة للتوظيف', "\n".join(lines) + "\n\nالاستخدام: `!شركة_توظيف COMPANY_ID @user`", 'info', ctx.author))
+                return
+
         if member.bot:
             await ctx.reply(embed=embed('❌ لا يمكن', 'ما تقدر توظف بوت.', 'bad', ctx.author))
             return
-        res = companies.hire(ctx.guild.id, ctx.author.id, ctx.author.display_name, member.id, member.display_name)
+
+        res = companies.hire_for_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, member.id, member.display_name)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل التوظيف', res['error'], 'bad', ctx.author))
             return
-        await ctx.reply(embed=embed('✅ تم التوظيف', f'{member.mention} صار موظف في شركتك.\nالموظفين يساهمون في دخل الشركة ويستلمون رواتب عند تجميع الدخل.', 'ok', ctx.author))
+
+        await ctx.reply(embed=embed('✅ تم التوظيف', f"{member.mention} صار موظف في شركة **{res['company']['name']}**.", 'ok', ctx.author))
+
 
     @bot.command(name='شركة_طرد', aliases=['طرد_شركة', 'company_fire'])
-    async def fire(ctx, member: discord.Member = None):
-        if not member:
-            await ctx.reply(embed=embed('👥 طرد موظف', 'استخدم: `!شركة_طرد @user`', 'info', ctx.author))
+    async def fire(ctx, company_id: int = None, member: discord.Member = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+
+        if not rows:
+            await ctx.reply(embed=embed('👥 طرد موظف', 'ما عندك شركة.', 'warn', ctx.author))
             return
-        res = companies.fire(ctx.guild.id, ctx.author.id, ctx.author.display_name, member.id)
+
+        if member is None:
+            if ctx.message.mentions and len(rows) == 1:
+                member = ctx.message.mentions[0]
+                company_id = int(rows[0]['id'])
+            else:
+                lines = []
+                for c in rows:
+                    lines.append(f"`#{c['id']}` **{c['name']}**")
+                await ctx.reply(embed=embed('👥 اختر شركة للطرد', "\n".join(lines) + "\n\nالاستخدام: `!شركة_طرد COMPANY_ID @user`", 'info', ctx.author))
+                return
+
+        res = companies.fire_from_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, member.id)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل الطرد', res['error'], 'bad', ctx.author))
             return
-        await ctx.reply(embed=embed('✅ تم طرد الموظف', f'تم إخراج {member.mention} من شركتك.', 'ok', ctx.author))
+
+        await ctx.reply(embed=embed('✅ تم طرد الموظف', f"تم إخراج {member.mention} من شركة **{res['company']['name']}**.", 'ok', ctx.author))
+
 
     @bot.command(name='قرارات_الشركة', aliases=['company_decisions'])
     async def company_decisions(ctx):
@@ -631,8 +725,8 @@ def setup(bot):
         e = embed('🏢 شرح نظام الشركات', 'كل أوامر الشركات في مكان واحد بشكل مرتب وواضح.', 'info', ctx.author)
         e.add_field(name='1) البداية', value='`!قطاعات_الشركات`\n`!شركة_فتح tech Jaber Tech`', inline=True)
         e.add_field(name='2) متابعة شركاتك', value='`!شركتي`\n`!شركاتي`\n`!شركة_تحليل`', inline=True)
-        e.add_field(name='3) الأرباح والتطوير', value='`!شركة_دخل`\n`!شركة_ترقية`\n`!شركة_ايداع 50000`\n`!شركة_سحب 50000`', inline=True)
-        e.add_field(name='4) الموظفون', value='`!شركة_توظيف @user`\n`!شركة_طرد @user`', inline=True)
+        e.add_field(name='3) الأرباح والتطوير', value='`!شركة_دخل`\n`!شركة_ترقية COMPANY_ID`\n`!شركة_ايداع COMPANY_ID 50000`\n`!شركة_سحب COMPANY_ID 50000`', inline=True)
+        e.add_field(name='4) الموظفون', value='`!شركة_توظيف COMPANY_ID @user`\n`!شركة_طرد COMPANY_ID @user`', inline=True)
         e.add_field(name='5) القرارات', value='`!قرارات_الشركة`\n`!شركة_قرار marketing`', inline=True)
         e.add_field(name='6) البيع والترتيب', value='`!شركة_بيع COMPANY_ID`\n`!الشركات`', inline=True)
         e.add_field(name='معلومة', value='العضو يقدر يملك حتى **3 شركات**، والأسعار قابلة للتعديل من الداشبورد.', inline=False)
