@@ -3,8 +3,8 @@ from nmcore.db import db
 from nmcore.services.economy import credit, debit, get_balance
 from nmcore.services.activity import record, log_event
 
-INCOME_COOLDOWN_SECONDS = 6 * 60 * 60
-MAX_ACCUMULATED_CYCLES = 12
+INCOME_COOLDOWN_SECONDS = 3 * 60 * 60
+MAX_ACCUMULATED_CYCLES = 24
 MAX_COMPANIES_PER_USER = 3
 SELL_REFUND_BPS = 3000
 
@@ -333,7 +333,7 @@ def sectors_text(guild_id:int=None):
     for key in keys:
         s = sector_info_for_guild(guild_id, key) if guild_id else dict(SECTORS[key])
         enabled = "✅" if int(s.get("enabled", 1)) else "⛔"
-        lines.append(f"{enabled} `{key}` {s['emoji']} **{s['name']}** — فتح: **{s['start_cost']:,}** — دخل كل 6h: **{s['base_income']:,}**")
+        lines.append(f"{enabled} `{key}` {s['emoji']} **{s['name']}** — فتح: **{s['start_cost']:,}** — دخل كل 3h: **{s['base_income']:,}**")
     return "\n".join(lines)
 
 
@@ -609,6 +609,19 @@ def seconds_to_text(seconds:int):
     if m:
         return f"{m} دقيقة"
     return f"{seconds} ثانية"
+
+
+def claimable_income_estimate(company, cycles:int=None):
+    preview = income_preview(company)
+    if cycles is None:
+        cycles, _ = rent_like_remaining(company)
+    cycles = max(0, min(int(cycles or 0), MAX_ACCUMULATED_CYCLES))
+    return {
+        "cycles": cycles,
+        "per_cycle": int(preview.get("net_company", 0) or 0),
+        "estimated_total": int(preview.get("net_company", 0) or 0) * cycles,
+        "preview": preview,
+    }
 
 
 def collect_income(guild_id:int, owner_id:int, owner_name:str):
@@ -915,15 +928,22 @@ def get_company_for_owner(guild_id:int, owner_id:int, company_id:int=None):
     if not rows:
         return None
 
-    if company_id:
-        for r in rows:
-            if int(r["id"]) == int(company_id):
-                return r
+    if company_id is not None:
+        selector = str(company_id).strip().replace('#', '')
+        if selector:
+            try:
+                selector_int = int(selector)
+            except Exception:
+                selector_int = None
+            if selector_int is not None:
+                for r in rows:
+                    if int(r["id"]) == selector_int:
+                        return r
+                if 1 <= selector_int <= len(rows):
+                    return rows[selector_int - 1]
         return None
 
     return rows[0]
-
-
 def sell_company(guild_id:int, owner_id:int, owner_name:str, company_id:int=None):
     company = get_company_for_owner(guild_id, owner_id, company_id)
     if not company:
@@ -1271,4 +1291,3 @@ def ledger(guild_id:int, company_id:int, limit:int=25):
         return rows
     res = _retry(work)
     return [] if isinstance(res, dict) else res
-
