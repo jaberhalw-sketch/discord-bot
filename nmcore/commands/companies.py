@@ -16,22 +16,56 @@ def yes_no(flag):
     return "✅ مفتوح" if int(flag or 0) else "⛔ مقفل"
 
 
+def parse_int_token(value):
+    if value is None:
+        return None
+    text = str(value).strip().replace('#', '')
+    if not text:
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
+def resolve_owned_company(rows, selector=None):
+    rows = list(rows or [])
+    if not rows:
+        return None
+    if selector is None:
+        return rows[0]
+    number = parse_int_token(selector)
+    if number is None:
+        return None
+    for company in rows:
+        if int(company.get('id', 0) or 0) == number:
+            return company
+    if 1 <= number <= len(rows):
+        return rows[number - 1]
+    return None
+
+
+def company_ready_text(company):
+    cycles, remaining = companies.rent_like_remaining(company)
+    estimate = companies.claimable_income_estimate(company, cycles)
+    if cycles > 0:
+        return f"جاهز `{cycles}` • متوقع {fmt(estimate['estimated_total'])}"
+    return f"بعد {companies.seconds_to_text(remaining)}"
 def sector_field_value(guild_id, key):
     s = companies.sector_info_for_guild(guild_id, key)
     return (
         f"**المفتاح:** `{key}`\n"
         f"**الحالة:** {yes_no(s.get('enabled', 1))}\n"
         f"**سعر الفتح:** {coin(guild_id, s['start_cost'])}\n"
-        f"**دخل كل 6 ساعات:** {coin(guild_id, s['base_income'])}\n"
+        f"**دخل كل 3 ساعات:** {coin(guild_id, s['base_income'])}\n"
         f"**أساس الترقية:** {coin(guild_id, s['upgrade_base'])}"
     )
-
-
 def company_embed(ctx, c):
     sector = companies.sector_info_for_guild(ctx.guild.id, c["sector_key"])
     preview = companies.income_preview(c)
     report = companies.decision_report(c)
     cycles, remaining = companies.rent_like_remaining(c)
+    ready = companies.claimable_income_estimate(c, cycles)
     members = companies.company_members(ctx.guild.id, c["id"])
     employees = [m for m in members if str(m.get('role')) != 'owner']
 
@@ -39,40 +73,50 @@ def company_embed(ctx, c):
         f"{sector['emoji']} {c['name']}",
         f"**القطاع:** {sector['name']} • `{c['sector_key']}`\n"
         f"**المالك:** <@{int(c['owner_id'])}>\n"
-        f"**معرّف الشركة:** `{int(c['id'])}`",
+        f"**ID الشركة:** `#{int(c['id'])}` • **الدخل يتجمع كل:** `3 ساعات`",
         "purple",
         ctx.author,
     )
 
     e.add_field(
-        name="🏢 نظرة عامة",
+        name="🏢 المعلومات الأساسية",
         value=(
             f"**المستوى:** `{int(c['level'] or 1)}`\n"
             f"**الاستراتيجية:** `{report['strategy']}`\n"
             f"**السمعة:** `{int(c['reputation'] or 0)}`\n"
-            f"**القرارات المتخذة:** `{int(c.get('decisions', 0) or 0)}`"
+            f"**القرارات:** `{int(c.get('decisions', 0) or 0)}`"
         ),
         inline=True,
     )
     e.add_field(
-        name="💰 المالية",
+        name="💰 ملخص المال",
         value=(
             f"**رصيد الشركة:** {coin(ctx.guild.id, int(c['balance'] or 0))}\n"
-            f"**الدخل الإجمالي:** `{fmt(preview['gross'])}`\n"
-            f"**صافي دخل الشركة:** `{fmt(preview['net_company'])}`\n"
-            f"**العائد للموظف:** `{fmt(preview['employee_bonus_each'])}`"
+            f"**صافي كل 3 ساعات:** {coin(ctx.guild.id, int(preview['net_company'] or 0))}\n"
+            f"**الإجمالي الخام:** `{fmt(preview['gross'])}`\n"
+            f"**الجاهز الآن:** {coin(ctx.guild.id, int(ready['estimated_total'] or 0))}"
         ),
         inline=True,
     )
     e.add_field(
-        name="👥 الفريق",
+        name="👥 الفريق والتشغيل",
         value=(
             f"**الموظفون:** `{len(employees)}` / `8`\n"
-            f"**المالك محسوب:** نعم\n"
-            f"**رواتب الموظفين:** `{fmt(preview['payroll_total'])}`\n"
-            f"**المخاطرة التشغيلية:** `{fmt(preview.get('operating_risk_cost', 0))}`"
+            f"**إجمالي الرواتب:** `{fmt(preview['payroll_total'])}`\n"
+            f"**عائد كل موظف:** `{fmt(preview['employee_bonus_each'])}`\n"
+            f"**تكلفة المخاطرة:** `{fmt(preview.get('operating_risk_cost', 0))}`"
         ),
         inline=True,
+    )
+
+    e.add_field(
+        name="📦 الاستلام الحالي",
+        value=(
+            f"**الدفعات الجاهزة:** `{cycles}`\n"
+            f"**قيمة الاستلام المتوقعة:** {coin(ctx.guild.id, int(ready['estimated_total'] or 0))}\n"
+            f"**التالي بعد:** {companies.seconds_to_text(remaining) if cycles <= 0 else 'جاهز الآن'}"
+        ),
+        inline=False,
     )
 
     e.add_field(
@@ -91,49 +135,43 @@ def company_embed(ctx, c):
         name="📈 دورة الدخل",
         value=(
             f"**الضريبة:** `{fmt(preview['tax'])}`\n"
-            f"**النجاح:** `{preview.get('success_score', 0)}/100`\n"
+            f"**درجة النجاح:** `{preview.get('success_score', 0)}/100`\n"
             f"**الحدث المتوقع:** **{report['next_event_preview']['label']}**\n"
             f"{report['next_event_preview']['details']}"
         ),
         inline=False,
     )
 
-    if cycles > 0:
-        timing = f"✅ **دفعات جاهزة الآن:** `{cycles}`"
-    else:
-        timing = f"⏳ **الدخل القادم بعد:** {companies.seconds_to_text(remaining)}"
-    e.add_field(name="⏰ التوقيت", value=timing, inline=False)
-
     if members:
         team_lines = []
         for m in members[:10]:
             role = "المالك" if str(m.get('role')) == 'owner' else 'موظف'
             team_lines.append(f"• <@{int(m['user_id'])}> — `{role}`")
-        e.add_field(name="📋 قائمة الفريق", value="\n".join(team_lines), inline=False)
+        e.add_field(name="📋 أعضاء الشركة", value="\n".join(team_lines), inline=False)
 
     e.set_footer(text="NM System Companies • واضح ومرتب")
     return e
-
-
 def list_companies_embed(ctx, rows, title='🏢 شركاتك'):
     e = embed(title, "ملخص واضح لكل شركاتك الحالية.", "purple", ctx.author)
-    for c in rows[:10]:
+    for slot, c in enumerate(rows[:10], 1):
         sector = companies.sector_info_for_guild(ctx.guild.id, c['sector_key'])
         preview = companies.income_preview(c)
         cycles, remaining = companies.rent_like_remaining(c)
+        ready = companies.claimable_income_estimate(c, cycles)
         status = f"جاهز `{cycles}`" if cycles > 0 else f"بعد {companies.seconds_to_text(remaining)}"
         e.add_field(
-            name=f"{sector['emoji']} #{int(c['id'])} • {c['name']}",
+            name=f"{slot}) {sector['emoji']} #{int(c['id'])} • {c['name']}",
             value=(
                 f"**القطاع:** `{c['sector_key']}`\n"
                 f"**المستوى:** `{int(c['level'] or 1)}`\n"
-                f"**الرصيد:** {coin(ctx.guild.id, int(c['balance'] or 0))}\n"
-                f"**صافي / 6 ساعات:** `{fmt(preview['net_company'])}`\n"
-                f"**الدخل:** {status}"
+                f"**الرصيد الحالي:** {coin(ctx.guild.id, int(c['balance'] or 0))}\n"
+                f"**الصافي / 3 ساعات:** {coin(ctx.guild.id, int(preview['net_company'] or 0))}\n"
+                f"**الجاهز للاستلام:** {coin(ctx.guild.id, int(ready['estimated_total'] or 0))}\n"
+                f"**الحالة:** {status}"
             ),
             inline=True,
         )
-    e.add_field(name='ملاحظة', value='الحد الأقصى لكل عضو هو **3 شركات فعالة**.', inline=False)
+    e.add_field(name='ملاحظة', value='الحد الأقصى لكل عضو هو **3 شركات فعالة**. تقدر تستخدم `!شركة_دخل` لاستلام دخل شركة معيّنة أو كل الشركات الجاهزة.', inline=False)
     return e
 
 
@@ -325,7 +363,7 @@ class CompanySectorSelect(discord.ui.Select):
         for key in parent.page_keys():
             s = companies.sector_info_for_guild(parent.ctx.guild.id, key)
             if int(s.get("enabled", 1)):
-                opts.append(discord.SelectOption(label=s["name"][:100], value=key, description=f"فتح {s['start_cost']:,} • دخل {s['base_income']:,}/6h", emoji=s["emoji"]))
+                opts.append(discord.SelectOption(label=s["name"][:100], value=key, description=f"فتح {s['start_cost']:,} • دخل {s['base_income']:,}/3h", emoji=s["emoji"]))
         if not opts:
             opts = [discord.SelectOption(label="No enabled sectors", value="none", description="لا يوجد قطاعات مفتوحة")]
         super().__init__(placeholder="اختر قطاع لفتح شركة", min_values=1, max_values=1, options=opts[:25])
@@ -371,7 +409,7 @@ class CompanyMarketView(OwnerOnlyView):
             status = "✅ متاح" if int(s.get("enabled", 1)) else "⛔ مقفل"
             e.add_field(
                 name=f"{s['emoji']} {s['name']}",
-                value=f"**المفتاح:** `{key}`\n**الحالة:** {status}\n**سعر الفتح:** {coin(self.ctx.guild.id, s['start_cost'])}\n**دخل / 6h:** {coin(self.ctx.guild.id, s['base_income'])}\n**المخاطرة:** `{int(s['risk_bps'])/100:.1f}%`",
+                value=f"**المفتاح:** `{key}`\n**الحالة:** {status}\n**سعر الفتح:** {coin(self.ctx.guild.id, s['start_cost'])}\n**دخل / 3h:** {coin(self.ctx.guild.id, s['base_income'])}\n**المخاطرة:** `{int(s['risk_bps'])/100:.1f}%`",
                 inline=True
             )
         e.set_footer(text=f"Page {self.page+1}/{self.max_page()+1} • كل عضو يملك حتى 3 شركات")
@@ -468,28 +506,85 @@ def setup(bot):
                     f"**المالك:** <@{int(c['owner_id'])}>\n"
                     f"**المستوى:** `{int(c['level'])}`\n"
                     f"**الرصيد:** {coin(ctx.guild.id, int(c['balance'] or 0))}\n"
-                    f"**الصافي / 6 ساعات:** `{fmt(preview['net_company'])}`"
+                    f"**الصافي / 3 ساعات:** `{fmt(preview['net_company'])}`"
                 ),
                 inline=True,
             )
         await ctx.reply(embed=e)
 
     @bot.command(name='شركة_دخل', aliases=['دخل_الشركة', 'company_income'])
-    async def collect_income(ctx):
-        res = companies.collect_income(ctx.guild.id, ctx.author.id, ctx.author.display_name)
-        if not res['ok']:
-            await ctx.reply(embed=embed('📈 دخل الشركة', res['error'], 'warn', ctx.author))
+    async def collect_income(ctx, company_selector: str = None):
+        rows = companies.user_companies(ctx.guild.id, ctx.author.id)
+        if not rows:
+            await ctx.reply(embed=embed('📈 دخل الشركة', 'ما عندك شركات.', 'warn', ctx.author))
             return
-        event = res.get('event', {})
-        e = embed('📈 تم استلام دخل الشركة', 'تمت إضافة دخل الشركة بنجاح.', 'ok', ctx.author)
-        e.add_field(name='الدفعات المتجمعة', value=f"`{res['cycles']}`", inline=True)
-        e.add_field(name='دخل الشركة الصافي', value=coin(ctx.guild.id, res['company_amount']), inline=True)
-        e.add_field(name='الرصيد بعد الاستلام', value=coin(ctx.guild.id, res['balance_after']), inline=True)
-        e.add_field(name='الحدث الحالي', value=f"**{event.get('label', 'Stable Operation')}**\n{event.get('details', '')}", inline=False)
-        if int(res.get('event_delta', 0)):
-            e.add_field(name='تأثير الحدث', value=coin(ctx.guild.id, res.get('event_delta', 0)), inline=True)
-        if res.get('paid_employees'):
-            e.add_field(name='رواتب الموظفين', value=f"الموظفون المدفوع لهم: `{res['paid_employees']}`\nلكل موظف: {coin(ctx.guild.id, res['employee_each'])}", inline=True)
+
+        targets = []
+        if company_selector is None:
+            if len(rows) == 1:
+                targets = [rows[0]]
+            else:
+                targets = [c for c in rows if companies.rent_like_remaining(c)[0] > 0]
+                if not targets:
+                    lines = [f"`#{c['id']}` **{c['name']}** — {company_ready_text(c)}" for c in rows]
+                    await ctx.reply(embed=embed('📈 دخل الشركات', 'ولا شركة عندك جاهزة الآن.\n\n' + "\n".join(lines), 'warn', ctx.author))
+                    return
+        else:
+            chosen = resolve_owned_company(rows, company_selector)
+            if not chosen:
+                lines = [f"`#{c['id']}` **{c['name']}** — {company_ready_text(c)}" for c in rows]
+                await ctx.reply(embed=embed('📈 اختر شركة صحيحة', "\n".join(lines) + "\n\nالاستخدام: `!شركة_دخل` أو `!شركة_دخل #ID`", 'info', ctx.author))
+                return
+            targets = [chosen]
+
+        results = []
+        failed = []
+        total_collected = 0
+        total_cycles = 0
+        total_paid = 0
+        for company in targets:
+            res = companies.collect_income_for_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, int(company['id']))
+            if res.get('ok'):
+                results.append(res)
+                total_collected += int(res.get('company_amount', 0) or 0)
+                total_cycles += int(res.get('cycles', 0) or 0)
+                total_paid += int(res.get('paid_employees', 0) or 0)
+            else:
+                failed.append((company, res.get('error', 'Unknown error')))
+
+        if not results:
+            msg = failed[0][1] if failed else 'ما فيه دخل جاهز الآن.'
+            await ctx.reply(embed=embed('📈 دخل الشركة', msg, 'warn', ctx.author))
+            return
+
+        if len(results) == 1:
+            res = results[0]
+            event = res.get('event', {})
+            e = embed('📈 تم استلام دخل الشركة', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
+            e.add_field(name='الدفعات المتجمعة', value=f"`{res['cycles']}`", inline=True)
+            e.add_field(name='دخل الشركة الصافي', value=coin(ctx.guild.id, res['company_amount']), inline=True)
+            e.add_field(name='الرصيد بعد الاستلام', value=coin(ctx.guild.id, res['balance_after']), inline=True)
+            e.add_field(name='الحدث الحالي', value=f"**{event.get('label', 'Stable Operation')}**\n{event.get('details', '')}", inline=False)
+            if int(res.get('event_delta', 0)):
+                e.add_field(name='تأثير الحدث', value=coin(ctx.guild.id, res.get('event_delta', 0)), inline=True)
+            if res.get('paid_employees'):
+                e.add_field(name='رواتب الموظفين', value=f"الموظفون المدفوع لهم: `{res['paid_employees']}`\nلكل موظف: {coin(ctx.guild.id, res['employee_each'])}", inline=True)
+            await ctx.reply(embed=e)
+            return
+
+        e = embed('📈 تم استلام دخل الشركات', 'تم جمع دخل أكثر من شركة دفعة وحدة.', 'ok', ctx.author)
+        e.add_field(name='إجمالي الشركات', value=f"`{len(results)}`", inline=True)
+        e.add_field(name='إجمالي الدفعات', value=f"`{total_cycles}`", inline=True)
+        e.add_field(name='إجمالي الدخل', value=coin(ctx.guild.id, total_collected), inline=True)
+        if total_paid:
+            e.add_field(name='الموظفون المدفوع لهم', value=f"`{total_paid}`", inline=True)
+        lines = []
+        for res in results[:10]:
+            lines.append(f"• `#{int(res['company']['id'])}` **{res['company']['name']}** — +{fmt(res['company_amount'])} من `{res['cycles']}` دفعات")
+        e.add_field(name='تفاصيل الشركات', value="\n".join(lines), inline=False)
+        if failed:
+            fail_lines = [f"• `#{int(c['id'])}` **{c['name']}** — {err}" for c, err in failed[:5]]
+            e.add_field(name='شركات ما استلمت', value="\n".join(fail_lines), inline=False)
         await ctx.reply(embed=e)
 
     @bot.command(name='شركة_ترقية', aliases=['ترقية_الشركة', 'company_upgrade'])
@@ -520,75 +615,99 @@ def setup(bot):
         await ctx.reply(embed=e)
 
 
-    @bot.command(name='شركة_ايداع', aliases=['ايداع_شركة', 'company_deposit'])
-    async def deposit(ctx, first: int = None, second: int = None):
+    @bot.command(name='شركة_ايداع', aliases=['شركة_إيداع', 'ايداع_شركة', 'إيداع_شركة', 'company_deposit'])
+    async def deposit(ctx, first: str = None, second: str = None):
         rows = companies.user_companies(ctx.guild.id, ctx.author.id)
 
         if not rows:
             await ctx.reply(embed=embed('💼 إيداع للشركة', 'ما عندك شركة.', 'warn', ctx.author))
             return
 
-        if first is None or first <= 0:
-            await ctx.reply(embed=embed('💼 إيداع للشركة', 'الاستخدام:\n`!شركة_ايداع AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_ايداع COMPANY_ID AMOUNT`', 'info', ctx.author))
+        if first is None:
+            await ctx.reply(embed=embed('💼 إيداع للشركة', 'الاستخدام:\n`!شركة_ايداع AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_ايداع #ID AMOUNT`', 'info', ctx.author))
             return
 
         if second is None:
-            if len(rows) > 1:
-                lines = []
-                for c in rows:
-                    lines.append(f"`#{c['id']}` **{c['name']}** — Balance `{fmt(c['balance'])}`")
-                await ctx.reply(embed=embed('💼 اختر شركة للإيداع', "\n".join(lines) + "\n\nاستخدم: `!شركة_ايداع COMPANY_ID AMOUNT`", 'info', ctx.author))
+            amount = parse_int_token(first)
+            if amount is None or amount <= 0:
+                await ctx.reply(embed=embed('💼 إيداع للشركة', 'المبلغ غير صحيح.', 'bad', ctx.author))
                 return
-            company_id = int(rows[0]['id'])
-            amount = int(first)
+            if len(rows) > 1:
+                lines = [f"`#{c['id']}` **{c['name']}** — {company_ready_text(c)}" for c in rows]
+                await ctx.reply(embed=embed('💼 اختر شركة للإيداع', "\n".join(lines) + "\n\nاستخدم: `!شركة_ايداع #ID AMOUNT`", 'info', ctx.author))
+                return
+            target = rows[0]
         else:
-            company_id = int(first)
-            amount = int(second)
+            amount = parse_int_token(second)
+            target = resolve_owned_company(rows, first)
+            if not target:
+                lines = [f"`#{c['id']}` **{c['name']}**" for c in rows]
+                await ctx.reply(embed=embed('❌ فشل الإيداع', "ما لقيت الشركة المطلوبة.\n\n" + "\n".join(lines), 'bad', ctx.author))
+                return
+            if amount is None or amount <= 0:
+                await ctx.reply(embed=embed('❌ فشل الإيداع', 'المبلغ غير صحيح.', 'bad', ctx.author))
+                return
 
-        res = companies.deposit_to_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, amount)
+        res = companies.deposit_to_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, int(target['id']), amount)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل الإيداع', res['error'], 'bad', ctx.author))
             return
 
+        refreshed = companies.get_company_for_owner(ctx.guild.id, ctx.author.id, int(target['id']))
         e = embed('✅ تم الإيداع', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
+        e.add_field(name='ID الشركة', value=f"`#{int(target['id'])}`", inline=True)
         e.add_field(name='المبلغ', value=coin(ctx.guild.id, res['amount']), inline=True)
         e.add_field(name='رصيد الشركة', value=coin(ctx.guild.id, res['balance_after']), inline=True)
+        if refreshed:
+            e.add_field(name='الدخل الحالي', value=company_ready_text(refreshed), inline=False)
         await ctx.reply(embed=e)
 
 
     @bot.command(name='شركة_سحب', aliases=['سحب_شركة', 'company_withdraw'])
-    async def withdraw(ctx, first: int = None, second: int = None):
+    async def withdraw(ctx, first: str = None, second: str = None):
         rows = companies.user_companies(ctx.guild.id, ctx.author.id)
 
         if not rows:
             await ctx.reply(embed=embed('💼 سحب من الشركة', 'ما عندك شركة.', 'warn', ctx.author))
             return
 
-        if first is None or first <= 0:
-            await ctx.reply(embed=embed('💼 سحب من الشركة', 'الاستخدام:\n`!شركة_سحب AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_سحب COMPANY_ID AMOUNT`', 'info', ctx.author))
+        if first is None:
+            await ctx.reply(embed=embed('💼 سحب من الشركة', 'الاستخدام:\n`!شركة_سحب AMOUNT`\nأو إذا عندك أكثر من شركة:\n`!شركة_سحب #ID AMOUNT`', 'info', ctx.author))
             return
 
         if second is None:
-            if len(rows) > 1:
-                lines = []
-                for c in rows:
-                    lines.append(f"`#{c['id']}` **{c['name']}** — Balance `{fmt(c['balance'])}`")
-                await ctx.reply(embed=embed('💼 اختر شركة للسحب', "\n".join(lines) + "\n\nاستخدم: `!شركة_سحب COMPANY_ID AMOUNT`", 'info', ctx.author))
+            amount = parse_int_token(first)
+            if amount is None or amount <= 0:
+                await ctx.reply(embed=embed('💼 سحب من الشركة', 'المبلغ غير صحيح.', 'bad', ctx.author))
                 return
-            company_id = int(rows[0]['id'])
-            amount = int(first)
+            if len(rows) > 1:
+                lines = [f"`#{c['id']}` **{c['name']}** — Balance `{fmt(c['balance'])}`" for c in rows]
+                await ctx.reply(embed=embed('💼 اختر شركة للسحب', "\n".join(lines) + "\n\nاستخدم: `!شركة_سحب #ID AMOUNT`", 'info', ctx.author))
+                return
+            target = rows[0]
         else:
-            company_id = int(first)
-            amount = int(second)
+            amount = parse_int_token(second)
+            target = resolve_owned_company(rows, first)
+            if not target:
+                lines = [f"`#{c['id']}` **{c['name']}**" for c in rows]
+                await ctx.reply(embed=embed('❌ فشل السحب', "ما لقيت الشركة المطلوبة.\n\n" + "\n".join(lines), 'bad', ctx.author))
+                return
+            if amount is None or amount <= 0:
+                await ctx.reply(embed=embed('❌ فشل السحب', 'المبلغ غير صحيح.', 'bad', ctx.author))
+                return
 
-        res = companies.withdraw_from_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, company_id, amount)
+        res = companies.withdraw_from_company(ctx.guild.id, ctx.author.id, ctx.author.display_name, int(target['id']), amount)
         if not res['ok']:
             await ctx.reply(embed=embed('❌ فشل السحب', res['error'], 'bad', ctx.author))
             return
 
+        refreshed = companies.get_company_for_owner(ctx.guild.id, ctx.author.id, int(target['id']))
         e = embed('✅ تم السحب', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
+        e.add_field(name='ID الشركة', value=f"`#{int(target['id'])}`", inline=True)
         e.add_field(name='المبلغ', value=coin(ctx.guild.id, res['amount']), inline=True)
         e.add_field(name='رصيد الشركة', value=coin(ctx.guild.id, res['balance_after']), inline=True)
+        if refreshed:
+            e.add_field(name='الدخل الحالي', value=company_ready_text(refreshed), inline=False)
         await ctx.reply(embed=e)
 
 
