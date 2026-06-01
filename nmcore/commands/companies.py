@@ -562,8 +562,8 @@ def setup(bot):
             event = res.get('event', {})
             e = embed('📈 تم استلام دخل الشركة', f"الشركة: **{res['company']['name']}**", 'ok', ctx.author)
             e.add_field(name='الدفعات المتجمعة', value=f"`{res['cycles']}`", inline=True)
-            e.add_field(name='دخل الشركة الصافي', value=coin(ctx.guild.id, res['company_amount']), inline=True)
-            e.add_field(name='الرصيد بعد الاستلام', value=coin(ctx.guild.id, res['balance_after']), inline=True)
+            e.add_field(name='دخل وصل لمحفظتك', value=coin(ctx.guild.id, res['company_amount']), inline=True)
+            e.add_field(name='وصل لمحفظتك', value=coin(ctx.guild.id, res['balance_after']), inline=True)
             e.add_field(name='الحدث الحالي', value=f"**{event.get('label', 'Stable Operation')}**\n{event.get('details', '')}", inline=False)
             if int(res.get('event_delta', 0)):
                 e.add_field(name='تأثير الحدث', value=coin(ctx.guild.id, res.get('event_delta', 0)), inline=True)
@@ -572,10 +572,10 @@ def setup(bot):
             await ctx.reply(embed=e)
             return
 
-        e = embed('📈 تم استلام دخل الشركات', 'تم جمع دخل أكثر من شركة دفعة وحدة.', 'ok', ctx.author)
+        e = embed('📈 تم استلام دخل الشركات', 'تم تحويل دخل الشركات الجاهزة إلى محفظتك مباشرة.', 'ok', ctx.author)
         e.add_field(name='إجمالي الشركات', value=f"`{len(results)}`", inline=True)
         e.add_field(name='إجمالي الدفعات', value=f"`{total_cycles}`", inline=True)
-        e.add_field(name='إجمالي الدخل', value=coin(ctx.guild.id, total_collected), inline=True)
+        e.add_field(name='إجمالي وصل لمحفظتك', value=coin(ctx.guild.id, total_collected), inline=True)
         if total_paid:
             e.add_field(name='الموظفون المدفوع لهم', value=f"`{total_paid}`", inline=True)
         lines = []
