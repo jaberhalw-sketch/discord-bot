@@ -642,8 +642,11 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
     employee_each = preview["employee_bonus_each"] * cycles
     employees = [m for m in company_members(guild_id, company["id"]) if m.get("role") != "owner"]
 
+    # HOTFIX 63:
+    # Company income must reach the owner's wallet directly.
+    # Company balance stays only for deposits/upgrades/decisions.
     before = int(company["balance"] or 0)
-    after = before + total_company
+    after = before
     now = int(time.time())
     last = int(company["last_income_claim"] or company["created_at"] or now)
     new_last = last + cycles * INCOME_COOLDOWN_SECONDS
@@ -667,6 +670,20 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
     if isinstance(res, dict) and not res.get("ok"):
         return {"ok": False, "error": "قاعدة البيانات مشغولة، جرب بعد ثواني."}
 
+    owner_tx = credit(
+        guild_id,
+        owner_id,
+        total_company,
+        "company_income",
+        user_name=owner_name,
+        actor_id=owner_id,
+        actor_name=owner_name,
+        source_label=str(company["id"]),
+        reason=f"Company income payout from {company['name']}"
+    )
+    if not owner_tx.get("ok"):
+        return {"ok": False, "error": owner_tx.get("error", "تعذر تحويل دخل الشركة لمحفظتك.")}
+
     paid_employees = 0
     if employee_each > 0:
         for m in employees:
@@ -683,6 +700,7 @@ def collect_income(guild_id:int, owner_id:int, owner_name:str):
         "employee_each": employee_each,
         "paid_employees": paid_employees,
         "balance_after": after,
+        "wallet_amount": total_company,
         "preview": preview,
         "event": event,
         "event_delta": event_delta,
@@ -1004,8 +1022,11 @@ def collect_income_for_company(guild_id:int, owner_id:int, owner_name:str, compa
     employee_each = preview["employee_bonus_each"] * cycles
     employees = [m for m in company_members(guild_id, company["id"]) if m.get("role") != "owner"]
 
+    # HOTFIX 63:
+    # Company income must reach the owner's wallet directly.
+    # Company balance stays only for deposits/upgrades/decisions.
     before = int(company["balance"] or 0)
-    after = before + total_company
+    after = before
     now = int(time.time())
     last = int(company["last_income_claim"] or company["created_at"] or now)
     new_last = last + cycles * INCOME_COOLDOWN_SECONDS
@@ -1029,6 +1050,20 @@ def collect_income_for_company(guild_id:int, owner_id:int, owner_name:str, compa
     if isinstance(res, dict) and not res.get("ok"):
         return {"ok": False, "error": "قاعدة البيانات مشغولة، جرب بعد ثواني."}
 
+    owner_tx = credit(
+        guild_id,
+        owner_id,
+        total_company,
+        "company_income",
+        user_name=owner_name,
+        actor_id=owner_id,
+        actor_name=owner_name,
+        source_label=str(company["id"]),
+        reason=f"Company income payout from {company['name']}"
+    )
+    if not owner_tx.get("ok"):
+        return {"ok": False, "error": owner_tx.get("error", "تعذر تحويل دخل الشركة لمحفظتك.")}
+
     paid_employees = 0
     if employee_each > 0:
         for m in employees:
@@ -1037,7 +1072,7 @@ def collect_income_for_company(guild_id:int, owner_id:int, owner_name:str, compa
                 paid_employees += 1
 
     record(guild_id, owner_id, owner_name, "company_income", "Company income collected", f"{company['name']} +{total_company:,}", total_company)
-    return {"ok": True, "company": dict(company), "cycles": cycles, "company_amount": total_company, "employee_each": employee_each, "paid_employees": paid_employees, "balance_after": after, "preview": preview, "event": event, "event_delta": event_delta}
+    return {"ok": True, "company": dict(company), "cycles": cycles, "company_amount": total_company, "employee_each": employee_each, "paid_employees": paid_employees, "balance_after": after, "wallet_amount": total_company, "preview": preview, "event": event, "event_delta": event_delta}
 
 
 def make_decision_for_company(guild_id:int, owner_id:int, owner_name:str, company_id:int, decision_key:str):
