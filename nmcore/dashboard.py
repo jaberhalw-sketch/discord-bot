@@ -864,6 +864,7 @@ DASHBOARD_BASE_URL</pre>
 
         return page("Economy", body, g)
 
+
     @app.route("/dashboard/money-tracker")
     def money_tracker():
         d = require_login()
@@ -871,6 +872,7 @@ DASHBOARD_BASE_URL</pre>
             return d
 
         g = gid(bot)
+
         uid = request.args.get("user_id", "").strip()
         source = request.args.get("source", "").strip()
         actor_id = request.args.get("actor_id", "").strip()
@@ -886,25 +888,11 @@ DASHBOARD_BASE_URL</pre>
         except Exception:
             limit = 300
 
-        def money_category(src):
-            s = str(src or "").lower()
-            if s.startswith("dashboard"):
-                return "Dashboard"
-            if s.startswith("casino") or s in {"blackjack", "bj", "gamble"}:
-                return "Casino"
-            if s.startswith("company"):
-                return "Companies"
-            if s.startswith("real_estate") or "rent" in s or "property" in s:
-                return "Real Estate"
-            if "salary" in s or "daily" in s:
-                return "Salary"
-            if "boost" in s or "post" in s:
-                return "Rewards"
-            if "transfer" in s:
-                return "Transfers"
-            if "admin" in s:
-                return "Admin"
-            return "Other"
+        def safe_int(value, default=0):
+            try:
+                return int(value or default)
+            except Exception:
+                return default
 
         def tx_time(ts):
             try:
@@ -912,102 +900,323 @@ DASHBOARD_BASE_URL</pre>
             except Exception:
                 return "-"
 
-        q = "SELECT * FROM money_ledger WHERE guild_id=?"
+        def money_category(src):
+            s = str(src or "").lower()
+
+            if s.startswith("dashboard"):
+                return "Dashboard"
+
+            if (
+                s.startswith("casino")
+                or s in {"blackjack", "bj", "gamble"}
+                or "blackjack" in s
+                or "_bj" in s
+                or "bj_" in s
+            ):
+                return "Casino"
+
+            if s.startswith("company"):
+                return "Companies"
+
+            if (
+                s.startswith("real_estate")
+                or "real_estate" in s
+                or "rent" in s
+                or "property" in s
+            ):
+                return "Real Estate"
+
+            if "salary" in s or "daily" in s:
+                return "Salary"
+
+            if "boost" in s or "post" in s or "reward" in s:
+                return "Rewards"
+
+            if "transfer" in s:
+                return "Transfers"
+
+            if "admin" in s:
+                return "Admin"
+
+            return "Other"
+
+        def amount_html(amount):
+            amount = safe_int(amount)
+            if amount >= 0:
+                return f"<b style='color:#22c55e'>+{amount:,}</b>"
+            return f"<b style='color:#ef4444'>{amount:,}</b>"
+
+        def ledger_table(rows_list, show_user=True):
+            head_user = "<th>User</th>" if show_user else ""
+            out = ""
+
+            for r in rows_list:
+                user_cell = ""
+                if show_user:
+                    user_cell = f"<td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>"
+
+                out += f"""
+                <tr>
+                    <td>
+                        <code>{esc(str(r["tx_id"])[:10])}</code>
+                        <br>
+                        <span class='muted'>{tx_time(r["created_at"])}</span>
+                    </td>
+                    {user_cell}
+                    <td>{amount_html(r["amount"])}</td>
+                    <td>{safe_int(r["balance_before"]):,}</td>
+                    <td>{safe_int(r["balance_after"]):,}</td>
+                    <td>
+                        {esc(money_category(r["source_type"]))}
+                        <br>
+                        <code>{esc(r["source_type"])}</code>
+                    </td>
+                    <td>{esc(r["source_label"])}</td>
+                    <td>{esc(r["reason"])}</td>
+                    <td>{user_chip(bot, g, r["actor_id"], r["actor_name"]) if safe_int(r["actor_id"]) else "-"}</td>
+                    <td>
+                        <code>{esc(r["reference_type"])}</code>
+                        <br>
+                        {esc(r["reference_id"])}
+                    </td>
+                </tr>
+                """
+
+            if not out:
+                colspan = 10 if show_user else 9
+                out = f"<tr><td colspan='{colspan}'>No transactions found.</td></tr>"
+
+            return f"""
+            <table>
+                <tr>
+                    <th>TX / Time</th>
+                    {head_user}
+                    <th>Amount</th>
+                    <th>Before</th>
+                    <th>After</th>
+                    <th>Category / Source</th>
+                    <th>Label</th>
+                    <th>Reason</th>
+                    <th>Actor</th>
+                    <th>Reference</th>
+                </tr>
+                {out}
+            </table>
+            """
+
+        def totals_cards(title, totals):
+            return f"""
+            <div class='card'>
+                <h3>{esc(title)}</h3>
+                <div class='grid'>
+                    <div class='card kpi-info'>
+                        <div class='muted'>Rows</div>
+                        <div class='stat'>{safe_int(totals["rows"]):,}</div>
+                    </div>
+                    <div class='card kpi-good'>
+                        <div class='muted'>Money In</div>
+                        <div class='stat'>{safe_int(totals["money_in"]):,}</div>
+                    </div>
+                    <div class='card kpi-bad'>
+                        <div class='muted'>Money Out</div>
+                        <div class='stat'>{safe_int(totals["money_out"]):,}</div>
+                    </div>
+                    <div class='card kpi-warn'>
+                        <div class='muted'>Net</div>
+                        <div class='stat'>{safe_int(totals["net"]):,}</div>
+                    </div>
+                </div>
+            </div>
+            """
+
+        where = "WHERE guild_id=?"
         params = [g]
 
         if uid.isdigit():
-            q += " AND user_id=?"
+            where += " AND user_id=?"
             params.append(int(uid))
 
         if actor_id.isdigit():
-            q += " AND actor_id=?"
+            where += " AND actor_id=?"
             params.append(int(actor_id))
 
         if source:
-            q += " AND source_type LIKE ?"
+            where += " AND source_type LIKE ?"
             params.append(f"{source}%")
 
         if category:
-            # SQLite side category filter, matching the same groups above.
             if category == "Dashboard":
-                q += " AND source_type LIKE 'dashboard%'"
+                where += " AND source_type LIKE 'dashboard%'"
+
             elif category == "Casino":
-                q += " AND source_type LIKE 'casino%'"
+                where += " AND (source_type LIKE 'casino%' OR source_type LIKE '%blackjack%' OR source_type LIKE '%bj%')"
+
             elif category == "Companies":
-                q += " AND source_type LIKE 'company%'"
+                where += " AND source_type LIKE 'company%'"
+
             elif category == "Real Estate":
-                q += " AND (source_type LIKE 'real_estate%' OR source_type LIKE 'property%' OR source_type LIKE '%rent%')"
+                where += " AND (source_type LIKE 'real_estate%' OR source_type LIKE 'property%' OR source_type LIKE '%rent%')"
+
             elif category == "Salary":
-                q += " AND source_type LIKE '%salary%'"
+                where += " AND (source_type LIKE '%salary%' OR source_type LIKE '%daily%')"
+
             elif category == "Rewards":
-                q += " AND (source_type LIKE '%boost%' OR source_type LIKE '%post%')"
+                where += " AND (source_type LIKE '%boost%' OR source_type LIKE '%post%' OR source_type LIKE '%reward%')"
+
             elif category == "Transfers":
-                q += " AND source_type LIKE '%transfer%'"
+                where += " AND source_type LIKE '%transfer%'"
+
             elif category == "Admin":
-                q += " AND source_type LIKE '%admin%'"
+                where += " AND source_type LIKE '%admin%'"
 
         if direction == "in":
-            q += " AND amount > 0"
+            where += " AND amount > 0"
+
         elif direction == "out":
-            q += " AND amount < 0"
+            where += " AND amount < 0"
 
         if min_amount.lstrip("-").isdigit():
-            q += " AND ABS(amount) >= ?"
+            where += " AND ABS(amount) >= ?"
             params.append(abs(int(min_amount)))
 
         if max_amount.lstrip("-").isdigit():
-            q += " AND ABS(amount) <= ?"
+            where += " AND ABS(amount) <= ?"
             params.append(abs(int(max_amount)))
 
         if q_text:
-            q += " AND (source_type LIKE ? OR source_label LIKE ? OR reason LIKE ? OR user_name LIKE ? OR actor_name LIKE ? OR tx_id LIKE ?)"
+            where += """
+            AND (
+                source_type LIKE ?
+                OR source_label LIKE ?
+                OR reason LIKE ?
+                OR user_name LIKE ?
+                OR actor_name LIKE ?
+                OR tx_id LIKE ?
+                OR reference_type LIKE ?
+                OR reference_id LIKE ?
+            )
+            """
             like = f"%{q_text}%"
-            params += [like, like, like, like, like, like]
-
-        q += " ORDER BY id DESC LIMIT ?"
-        params.append(limit)
+            params += [like, like, like, like, like, like, like, like]
 
         conn = db()
         cur = conn.cursor()
-        cur.execute(q, params)
+
+        cur.execute(f"""
+            SELECT *
+            FROM money_ledger
+            {where}
+            ORDER BY id DESC
+            LIMIT ?
+        """, params + [limit])
         rows = cur.fetchall()
 
-        # Filtered totals.
-        total_q = q.rsplit(" ORDER BY", 1)[0].replace("SELECT *", """SELECT
-        COUNT(*) rows,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) money_in,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) money_out,
-        COALESCE(SUM(amount),0) net""")
-        cur.execute(total_q, params[:-1])
+        cur.execute(f"""
+            SELECT
+                COUNT(*) rows,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                COALESCE(SUM(amount), 0) net
+            FROM money_ledger
+            {where}
+        """, params)
         filtered_totals = cur.fetchone()
 
-        # Overall source summary.
-        cur.execute("""SELECT source_type, COUNT(*) c,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) paid,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=? GROUP BY source_type ORDER BY c DESC LIMIT 60""", (g,))
-        source_rows = cur.fetchall()
-
-        cur.execute("""SELECT
-        COUNT(*) rows,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) money_in,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) money_out,
-        COALESCE(SUM(amount),0) net
-        FROM money_ledger WHERE guild_id=?""", (g,))
+        cur.execute("""
+            SELECT
+                COUNT(*) rows,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                COALESCE(SUM(amount), 0) net
+            FROM money_ledger
+            WHERE guild_id=?
+        """, (g,))
         totals = cur.fetchone()
 
-        # Category summary in Python, from all source rows.
+        cur.execute("""
+            SELECT
+                source_type,
+                COUNT(*) rows,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                COALESCE(SUM(amount), 0) net
+            FROM money_ledger
+            WHERE guild_id=?
+            GROUP BY source_type
+            ORDER BY rows DESC
+            LIMIT 100
+        """, (g,))
+        source_rows = cur.fetchall()
+
         cat = {}
         for r in source_rows:
             c_name = money_category(r["source_type"])
-            cat.setdefault(c_name, {"rows": 0, "paid": 0, "took": 0, "net": 0})
-            cat[c_name]["rows"] += int(r["c"] or 0)
-            cat[c_name]["paid"] += int(r["paid"] or 0)
-            cat[c_name]["took"] += int(r["took"] or 0)
-            cat[c_name]["net"] += int(r["net"] or 0)
+            cat.setdefault(c_name, {"rows": 0, "money_in": 0, "money_out": 0, "net": 0})
+            cat[c_name]["rows"] += safe_int(r["rows"])
+            cat[c_name]["money_in"] += safe_int(r["money_in"])
+            cat[c_name]["money_out"] += safe_int(r["money_out"])
+            cat[c_name]["net"] += safe_int(r["net"])
 
-        # User profile if searching a user.
+        selected_source_stats = None
+        selected_source_users = []
+        selected_source_recent = []
+        selected_source_actors = []
+
+        if source:
+            cur.execute("""
+                SELECT
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                    COALESCE(SUM(amount), 0) net
+                FROM money_ledger
+                WHERE guild_id=? AND source_type LIKE ?
+            """, (g, f"{source}%"))
+            selected_source_stats = cur.fetchone()
+
+            cur.execute("""
+                SELECT
+                    user_id,
+                    user_name,
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                    COALESCE(SUM(amount), 0) net,
+                    COALESCE(SUM(ABS(amount)), 0) volume,
+                    COALESCE(MAX(created_at), 0) last_tx
+                FROM money_ledger
+                WHERE guild_id=? AND source_type LIKE ?
+                GROUP BY user_id, user_name
+                ORDER BY volume DESC
+                LIMIT 80
+            """, (g, f"{source}%"))
+            selected_source_users = cur.fetchall()
+
+            cur.execute("""
+                SELECT
+                    actor_id,
+                    actor_name,
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) gave,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) took,
+                    COALESCE(SUM(ABS(amount)), 0) volume
+                FROM money_ledger
+                WHERE guild_id=? AND source_type LIKE ? AND actor_id != 0
+                GROUP BY actor_id, actor_name
+                ORDER BY volume DESC
+                LIMIT 30
+            """, (g, f"{source}%"))
+            selected_source_actors = cur.fetchall()
+
+            cur.execute("""
+                SELECT *
+                FROM money_ledger
+                WHERE guild_id=? AND source_type LIKE ?
+                ORDER BY id DESC
+                LIMIT 200
+            """, (g, f"{source}%"))
+            selected_source_recent = cur.fetchall()
+
         profile = None
         profile_sources = []
         profile_recent = []
@@ -1015,121 +1224,168 @@ DASHBOARD_BASE_URL</pre>
         profile_actors = []
         profile_biggest_in = []
         profile_biggest_out = []
+
         if uid.isdigit():
             user_id_int = int(uid)
 
-            cur.execute("SELECT balance FROM balances WHERE guild_id=? AND user_id=?", (g, user_id_int))
+            cur.execute(
+                "SELECT balance FROM balances WHERE guild_id=? AND user_id=?",
+                (g, user_id_int)
+            )
             balrow = cur.fetchone()
-            profile_balance = int(balrow["balance"] or 0) if balrow else 0
+            profile_balance = safe_int(balrow["balance"]) if balrow else 0
 
-            cur.execute("""SELECT
-            COUNT(*) rows,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
-            COALESCE(SUM(amount),0) net,
-            COALESCE(MAX(created_at),0) last_tx
-            FROM money_ledger WHERE guild_id=? AND user_id=?""", (g, user_id_int))
+            cur.execute("""
+                SELECT
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                    COALESCE(SUM(amount), 0) net,
+                    COALESCE(MAX(created_at), 0) last_tx
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=?
+            """, (g, user_id_int))
             profile = cur.fetchone()
 
-            cur.execute("""SELECT source_type, COUNT(*) rows,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gained,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) lost,
-            COALESCE(SUM(amount),0) net,
-            COALESCE(MAX(created_at),0) last_tx
-            FROM money_ledger
-            WHERE guild_id=? AND user_id=?
-            GROUP BY source_type ORDER BY rows DESC LIMIT 50""", (g, user_id_int))
+            cur.execute("""
+                SELECT
+                    source_type,
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) money_in,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) money_out,
+                    COALESCE(SUM(amount), 0) net,
+                    COALESCE(MAX(created_at), 0) last_tx
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=?
+                GROUP BY source_type
+                ORDER BY rows DESC
+                LIMIT 80
+            """, (g, user_id_int))
             profile_sources = cur.fetchall()
 
-            cur.execute("""SELECT actor_id, actor_name, COUNT(*) rows,
-            COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) gave,
-            COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) took,
-            COALESCE(SUM(ABS(amount)),0) volume
-            FROM money_ledger
-            WHERE guild_id=? AND user_id=? AND actor_id != 0
-            GROUP BY actor_id, actor_name ORDER BY volume DESC LIMIT 20""", (g, user_id_int))
+            cur.execute("""
+                SELECT
+                    actor_id,
+                    actor_name,
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) gave,
+                    COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) took,
+                    COALESCE(SUM(ABS(amount)), 0) volume
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=? AND actor_id != 0
+                GROUP BY actor_id, actor_name
+                ORDER BY volume DESC
+                LIMIT 30
+            """, (g, user_id_int))
             profile_actors = cur.fetchall()
 
-            cur.execute("""SELECT * FROM money_ledger
-            WHERE guild_id=? AND user_id=? AND amount>0
-            ORDER BY amount DESC LIMIT 10""", (g, user_id_int))
+            cur.execute("""
+                SELECT *
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=? AND amount > 0
+                ORDER BY amount DESC
+                LIMIT 15
+            """, (g, user_id_int))
             profile_biggest_in = cur.fetchall()
 
-            cur.execute("""SELECT * FROM money_ledger
-            WHERE guild_id=? AND user_id=? AND amount<0
-            ORDER BY amount ASC LIMIT 10""", (g, user_id_int))
+            cur.execute("""
+                SELECT *
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=? AND amount < 0
+                ORDER BY amount ASC
+                LIMIT 15
+            """, (g, user_id_int))
             profile_biggest_out = cur.fetchall()
 
-            cur.execute("""SELECT * FROM money_ledger
-            WHERE guild_id=? AND user_id=?
-            ORDER BY id DESC LIMIT 100""", (g, user_id_int))
+            cur.execute("""
+                SELECT *
+                FROM money_ledger
+                WHERE guild_id=? AND user_id=?
+                ORDER BY id DESC
+                LIMIT 150
+            """, (g, user_id_int))
             profile_recent = cur.fetchall()
 
-        cur.execute("""SELECT user_id,
-        COALESCE(SUM(amount),0) net,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COUNT(*) rows
-        FROM money_ledger WHERE guild_id=?
-        GROUP BY user_id ORDER BY received DESC LIMIT 10""", (g,))
+        cur.execute("""
+            SELECT
+                user_id,
+                COALESCE(SUM(amount), 0) net,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) received,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) spent,
+                COUNT(*) rows
+            FROM money_ledger
+            WHERE guild_id=?
+            GROUP BY user_id
+            ORDER BY received DESC
+            LIMIT 15
+        """, (g,))
         top_received = cur.fetchall()
 
-        cur.execute("""SELECT user_id,
-        COALESCE(SUM(CASE WHEN amount<0 THEN -amount ELSE 0 END),0) spent,
-        COALESCE(SUM(CASE WHEN amount>0 THEN amount ELSE 0 END),0) received,
-        COALESCE(SUM(amount),0) net,
-        COUNT(*) rows
-        FROM money_ledger WHERE guild_id=?
-        GROUP BY user_id ORDER BY spent DESC LIMIT 10""", (g,))
+        cur.execute("""
+            SELECT
+                user_id,
+                COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) spent,
+                COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) received,
+                COALESCE(SUM(amount), 0) net,
+                COUNT(*) rows
+            FROM money_ledger
+            WHERE guild_id=?
+            GROUP BY user_id
+            ORDER BY spent DESC
+            LIMIT 15
+        """, (g,))
         top_spent = cur.fetchall()
 
-        cur.execute("""SELECT actor_id, actor_name, COUNT(*) c,
-        COALESCE(SUM(ABS(amount)),0) volume
-        FROM money_ledger WHERE guild_id=? AND actor_id != 0
-        GROUP BY actor_id, actor_name ORDER BY volume DESC LIMIT 10""", (g,))
+        cur.execute("""
+            SELECT
+                actor_id,
+                actor_name,
+                COUNT(*) rows,
+                COALESCE(SUM(ABS(amount)), 0) volume
+            FROM money_ledger
+            WHERE guild_id=? AND actor_id != 0
+            GROUP BY actor_id, actor_name
+            ORDER BY volume DESC
+            LIMIT 15
+        """, (g,))
         top_actors = cur.fetchall()
 
         conn.close()
 
         category_buttons = "".join(
-            f"<a class='btn' style='margin:4px;background:{'#2563eb' if category == c_name else '#334155'}' href='/dashboard/money-tracker?guild_id={g}&category={urllib.parse.quote(c_name)}'>{esc(c_name)} ({int(v['rows']):,})</a>"
+            f"<a class='btn' style='margin:4px;background:{'#2563eb' if category == c_name else '#334155'}' href='/dashboard/money-tracker?guild_id={g}&category={urllib.parse.quote(c_name)}'>{esc(c_name)} ({safe_int(v['rows']):,})</a>"
             for c_name, v in sorted(cat.items(), key=lambda kv: kv[1]["rows"], reverse=True)
         )
 
         chips = "".join(
-            f"<a class='btn' style='margin:4px;background:#334155' href='/dashboard/money-tracker?guild_id={g}&source={esc(r['source_type'])}'>{esc(r['source_type'])} ({int(r['c'])})</a>"
-            for r in source_rows[:40]
+            f"<a class='btn' style='margin:4px;background:{'#7c3aed' if source == str(r['source_type']) else '#334155'}' href='/dashboard/money-tracker?guild_id={g}&source={urllib.parse.quote(str(r['source_type']))}#selected-source'>{esc(r['source_type'])} ({safe_int(r['rows']):,})</a>"
+            for r in source_rows[:80]
         )
 
         cat_trs = "".join(
-            f"<tr><td>{esc(c_name)}</td><td>{int(v['rows']):,}</td><td>{int(v['paid']):,}</td><td>{int(v['took']):,}</td><td>{int(v['net']):,}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&category={urllib.parse.quote(c_name)}'>Open</a></td></tr>"
+            f"<tr><td>{esc(c_name)}</td><td>{safe_int(v['rows']):,}</td><td>{safe_int(v['money_in']):,}</td><td>{safe_int(v['money_out']):,}</td><td>{safe_int(v['net']):,}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&category={urllib.parse.quote(c_name)}'>Open</a></td></tr>"
             for c_name, v in sorted(cat.items(), key=lambda kv: kv[1]["rows"], reverse=True)
         )
 
         source_trs = "".join(
-            f"<tr><td>{esc(r['source_type'])}</td><td>{esc(money_category(r['source_type']))}</td><td>{int(r['c']):,}</td><td>{int(r['paid']):,}</td><td>{int(r['took']):,}</td><td>{int(r['net']):,}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&source={esc(r['source_type'])}'>Open</a></td></tr>"
+            f"<tr><td>{esc(r['source_type'])}</td><td>{esc(money_category(r['source_type']))}</td><td>{safe_int(r['rows']):,}</td><td>{safe_int(r['money_in']):,}</td><td>{safe_int(r['money_out']):,}</td><td>{safe_int(r['net']):,}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&source={urllib.parse.quote(str(r['source_type']))}#selected-source'>Open</a></td></tr>"
             for r in source_rows
         )
 
         received_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['received']):,}</td><td>{int(r['spent']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            f"<tr><td>{user_chip(bot, g, r['user_id'])}</td><td>{safe_int(r['received']):,}</td><td>{safe_int(r['spent']):,}</td><td>{safe_int(r['net']):,}</td><td>{safe_int(r['rows']):,}</td></tr>"
             for r in top_received
         )
 
         spent_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['user_id'])}</td><td>{int(r['spent']):,}</td><td>{int(r['received']):,}</td><td>{int(r['net']):,}</td><td>{int(r['rows']):,}</td></tr>"
+            f"<tr><td>{user_chip(bot, g, r['user_id'])}</td><td>{safe_int(r['spent']):,}</td><td>{safe_int(r['received']):,}</td><td>{safe_int(r['net']):,}</td><td>{safe_int(r['rows']):,}</td></tr>"
             for r in top_spent
         )
 
         actor_trs = "".join(
-            f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['volume']):,}</td><td>{int(r['c']):,}</td></tr>"
+            f"<tr><td>{user_chip(bot, g, r['actor_id'], r['actor_name'])}</td><td>{safe_int(r['volume']):,}</td><td>{safe_int(r['rows']):,}</td></tr>"
             for r in top_actors
         )
-
-        trs = "".join(
-            f"<tr><td><code>{r['tx_id'][:10]}</code><br><span class='muted'>{tx_time(r['created_at'])}</span></td><td>{user_chip(bot,g,r['user_id'],r['user_name'])}</td><td>{'<b style=\"color:#22c55e\">+' if int(r['amount'])>0 else '<b style=\"color:#ef4444\">'}{int(r['amount']):,}</b></td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(money_category(r['source_type']))}<br><code>{esc(r['source_type'])}</code></td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name']) if int(r['actor_id'] or 0) else '-'}</td><td><code>{esc(r['reference_type'])}</code><br>{esc(r['reference_id'])}</td></tr>"
-            for r in rows
-        ) or "<tr><td colspan='10'>No ledger rows found.</td></tr>"
 
         form = f"""
         <div class='card'>
@@ -1138,7 +1394,7 @@ DASHBOARD_BASE_URL</pre>
             <input type=hidden name=guild_id value='{g}'>
             <input name=user_id placeholder='User ID' value='{esc(uid)}'>
             <input name=actor_id placeholder='Actor/Admin ID' value='{esc(actor_id)}'>
-            <input name=source placeholder='source_type مثل dashboard_give / casino' value='{esc(source)}'>
+            <input name=source placeholder='source_type مثل dashboard_give / casino_bet' value='{esc(source)}'>
             <input name=q placeholder='Search reason / label / tx' value='{esc(q_text)}'>
             <select name=category>
               <option value='' {'selected' if category == '' else ''}>All categories</option>
@@ -1161,31 +1417,106 @@ DASHBOARD_BASE_URL</pre>
 
         body = server_pill_html(g, bot) + form
 
+        body += f"""
+        <div class='grid'>
+          <div class='card'><div class='muted'>All Ledger Rows</div><div class='stat'>{safe_int(totals['rows']):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>All Money In</div><div class='stat'>{safe_int(totals['money_in']):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>All Money Out</div><div class='stat'>{safe_int(totals['money_out']):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>All Net</div><div class='stat'>{safe_int(totals['net']):,}</div></div>
+        </div>
+
+        <div class='grid'>
+          <div class='card kpi-info'><div class='muted'>Filtered Rows</div><div class='stat'>{safe_int(filtered_totals['rows']):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Filtered In</div><div class='stat'>{safe_int(filtered_totals['money_in']):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Filtered Out</div><div class='stat'>{safe_int(filtered_totals['money_out']):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Filtered Net</div><div class='stat'>{safe_int(filtered_totals['net']):,}</div></div>
+        </div>
+        """
+
+        body += f"<div class='card'><h3>Quick Source Filters</h3>{chips}</div>"
+
+        if source and selected_source_stats:
+            source_user_rows = "".join(
+                f"""
+                <tr>
+                  <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
+                  <td>{safe_int(r['rows']):,}</td>
+                  <td>{safe_int(r['money_in']):,}</td>
+                  <td>{safe_int(r['money_out']):,}</td>
+                  <td>{safe_int(r['net']):,}</td>
+                  <td>{tx_time(r['last_tx'])}</td>
+                  <td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&user_id={safe_int(r['user_id'])}&source={urllib.parse.quote(source)}#selected-source'>Open User</a></td>
+                </tr>
+                """
+                for r in selected_source_users
+            ) or "<tr><td colspan='7'>No users found.</td></tr>"
+
+            source_actor_rows = "".join(
+                f"""
+                <tr>
+                  <td>{user_chip(bot, g, r['actor_id'], r['actor_name'])}</td>
+                  <td>{safe_int(r['rows']):,}</td>
+                  <td>{safe_int(r['gave']):,}</td>
+                  <td>{safe_int(r['took']):,}</td>
+                  <td>{safe_int(r['volume']):,}</td>
+                </tr>
+                """
+                for r in selected_source_actors
+            ) or "<tr><td colspan='5'>No actor/admin data.</td></tr>"
+
+            body += f"""
+            <div id='selected-source' class='card' style='border:1px solid #7c3aed'>
+              <h3>🔎 Selected Source: <code>{esc(source)}</code></h3>
+              <p class='muted'>هذا ملخص المصدر اللي ضغطت عليه. هنا تشوف من أخذ، من خسر، ومن الأدمن اللي عطى أو أخذ.</p>
+
+              <div class='grid'>
+                <div class='card kpi-info'><div class='muted'>Times</div><div class='stat'>{safe_int(selected_source_stats['rows']):,}</div></div>
+                <div class='card kpi-good'><div class='muted'>Money In</div><div class='stat'>{safe_int(selected_source_stats['money_in']):,}</div></div>
+                <div class='card kpi-bad'><div class='muted'>Money Out</div><div class='stat'>{safe_int(selected_source_stats['money_out']):,}</div></div>
+                <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{safe_int(selected_source_stats['net']):,}</div></div>
+              </div>
+
+              <h3>Users in this source</h3>
+              <table>
+                <tr><th>User</th><th>Times</th><th>Money In</th><th>Money Out</th><th>Net</th><th>Last</th><th></th></tr>
+                {source_user_rows}
+              </table>
+
+              <br>
+              <h3>Actors/Admins in this source</h3>
+              <table>
+                <tr><th>Actor</th><th>Times</th><th>Gave</th><th>Took</th><th>Volume</th></tr>
+                {source_actor_rows}
+              </table>
+
+              <br>
+              <h3>Recent source transactions</h3>
+              {ledger_table(selected_source_recent, show_user=True)}
+            </div>
+            """
+
+        body += f"<div class='card'><h3>Category Filters</h3>{category_buttons}</div>"
+
         if profile and uid.isdigit():
             info = member_info(bot, g, int(uid))
 
             profile_source_trs = "".join(
-                f"<tr><td>{esc(r['source_type'])}</td><td>{esc(money_category(r['source_type']))}</td><td>{int(r['rows']):,}</td><td>{int(r['gained']):,}</td><td>{int(r['lost']):,}</td><td>{int(r['net']):,}</td><td>{tx_time(r['last_tx'])}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&user_id={int(uid)}&source={esc(r['source_type'])}'>Details</a></td></tr>"
+                f"<tr><td>{esc(r['source_type'])}</td><td>{esc(money_category(r['source_type']))}</td><td>{safe_int(r['rows']):,}</td><td>{safe_int(r['money_in']):,}</td><td>{safe_int(r['money_out']):,}</td><td>{safe_int(r['net']):,}</td><td>{tx_time(r['last_tx'])}</td><td><a class='btn' href='/dashboard/money-tracker?guild_id={g}&user_id={int(uid)}&source={urllib.parse.quote(str(r['source_type']))}#selected-source'>Details</a></td></tr>"
                 for r in profile_sources
             ) or "<tr><td colspan='8'>No data.</td></tr>"
 
             profile_actor_trs = "".join(
-                f"<tr><td>{user_chip(bot,g,r['actor_id'],r['actor_name'])}</td><td>{int(r['rows']):,}</td><td>{int(r['gave']):,}</td><td>{int(r['took']):,}</td><td>{int(r['volume']):,}</td></tr>"
+                f"<tr><td>{user_chip(bot, g, r['actor_id'], r['actor_name'])}</td><td>{safe_int(r['rows']):,}</td><td>{safe_int(r['gave']):,}</td><td>{safe_int(r['took']):,}</td><td>{safe_int(r['volume']):,}</td></tr>"
                 for r in profile_actors
             ) or "<tr><td colspan='5'>No actor data.</td></tr>"
 
-            profile_recent_trs = "".join(
-                f"<tr><td><code>{r['tx_id'][:10]}</code><br><span class='muted'>{tx_time(r['created_at'])}</span></td><td>{'<b style=\"color:#22c55e\">+' if int(r['amount'])>0 else '<b style=\"color:#ef4444\">'}{int(r['amount']):,}</b></td><td>{int(r['balance_before']):,}</td><td>{int(r['balance_after']):,}</td><td>{esc(money_category(r['source_type']))}<br><code>{esc(r['source_type'])}</code></td><td>{esc(r['source_label'])}</td><td>{esc(r['reason'])}</td><td>{user_chip(bot,g,r['actor_id'],r['actor_name']) if int(r['actor_id'] or 0) else '-'}</td></tr>"
-                for r in profile_recent
-            ) or "<tr><td colspan='8'>No data.</td></tr>"
-
             biggest_in_trs = "".join(
-                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td><td>{tx_time(r['created_at'])}</td></tr>"
+                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{safe_int(r['amount']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td><td>{tx_time(r['created_at'])}</td></tr>"
                 for r in profile_biggest_in
             ) or "<tr><td colspan='5'>No data.</td></tr>"
 
             biggest_out_trs = "".join(
-                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{int(r['amount']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td><td>{tx_time(r['created_at'])}</td></tr>"
+                f"<tr><td><code>{r['tx_id'][:10]}</code></td><td>{safe_int(r['amount']):,}</td><td>{esc(r['source_type'])}</td><td>{esc(r['reason'])}</td><td>{tx_time(r['created_at'])}</td></tr>"
                 for r in profile_biggest_out
             ) or "<tr><td colspan='5'>No data.</td></tr>"
 
@@ -1209,10 +1540,10 @@ DASHBOARD_BASE_URL</pre>
 
             <div class='grid'>
               <div class='card kpi-info'><div class='muted'>Current Balance</div><div class='stat'>{profile_balance:,}</div></div>
-              <div class='card kpi-good'><div class='muted'>Total Money In</div><div class='stat'>{int(profile['gained'] or 0):,}</div></div>
-              <div class='card kpi-bad'><div class='muted'>Total Money Out</div><div class='stat'>{int(profile['lost'] or 0):,}</div></div>
-              <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{int(profile['net'] or 0):,}</div></div>
-              <div class='card'><div class='muted'>Transactions</div><div class='stat'>{int(profile['rows'] or 0):,}</div></div>
+              <div class='card kpi-good'><div class='muted'>Total Money In</div><div class='stat'>{safe_int(profile['money_in']):,}</div></div>
+              <div class='card kpi-bad'><div class='muted'>Total Money Out</div><div class='stat'>{safe_int(profile['money_out']):,}</div></div>
+              <div class='card kpi-warn'><div class='muted'>Net</div><div class='stat'>{safe_int(profile['net']):,}</div></div>
+              <div class='card'><div class='muted'>Transactions</div><div class='stat'>{safe_int(profile['rows']):,}</div></div>
             </div>
 
             <div class='card'>
@@ -1232,35 +1563,17 @@ DASHBOARD_BASE_URL</pre>
 
             <div class='card'>
               <h3>كل عمليات هذا الشخص</h3>
-              <table><tr><th>TX / Time</th><th>Amount</th><th>Before</th><th>After</th><th>Category / Source</th><th>Label</th><th>Reason</th><th>Actor</th></tr>{profile_recent_trs}</table>
+              {ledger_table(profile_recent, show_user=False)}
             </div>
             """
 
-        body += f"""
-        <div class='grid'>
-          <div class='card'><div class='muted'>All Ledger Rows</div><div class='stat'>{int(totals['rows'] or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>All Money In</div><div class='stat'>{int(totals['money_in'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>All Money Out</div><div class='stat'>{int(totals['money_out'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>All Net</div><div class='stat'>{int(totals['net'] or 0):,}</div></div>
-        </div>
-
-        <div class='grid'>
-          <div class='card kpi-info'><div class='muted'>Filtered Rows</div><div class='stat'>{int(filtered_totals['rows'] or 0):,}</div></div>
-          <div class='card kpi-good'><div class='muted'>Filtered In</div><div class='stat'>{int(filtered_totals['money_in'] or 0):,}</div></div>
-          <div class='card kpi-bad'><div class='muted'>Filtered Out</div><div class='stat'>{int(filtered_totals['money_out'] or 0):,}</div></div>
-          <div class='card kpi-warn'><div class='muted'>Filtered Net</div><div class='stat'>{int(filtered_totals['net'] or 0):,}</div></div>
-        </div>
-        """
-
-        body += f"<div class='card'><h3>Category Filters</h3>{category_buttons}</div>"
-        body += f"<div class='card'><h3>Quick Source Filters</h3>{chips}</div>"
         body += f"<div class='card'><h3>Category Summary</h3><table><tr><th>Category</th><th>Times</th><th>Money In</th><th>Money Out</th><th>Net</th><th></th></tr>{cat_trs}</table></div>"
         body += f"<div class='card'><h3>Source Summary</h3><table><tr><th>Source</th><th>Category</th><th>Times</th><th>In</th><th>Out</th><th>Net</th><th></th></tr>{source_trs}</table></div>"
         body += f"<div class='grid'><div class='card'><h3>Top Received</h3><table><tr><th>User</th><th>In</th><th>Out</th><th>Net</th><th>Rows</th></tr>{received_trs}</table></div><div class='card'><h3>Top Spent / Lost</h3><table><tr><th>User</th><th>Spent</th><th>Received</th><th>Net</th><th>Rows</th></tr>{spent_trs}</table></div></div>"
         body += f"<div class='card'><h3>Top Actors / Admins</h3><table><tr><th>Actor</th><th>Volume</th><th>Rows</th></tr>{actor_trs}</table></div>"
-        body += f"<div class='card'><h3>Detailed Ledger Rows</h3><table><tr><th>TX / Time</th><th>User</th><th>Amount</th><th>Before</th><th>After</th><th>Category / Source</th><th>Label</th><th>Reason</th><th>Actor</th><th>Reference</th></tr>{trs}</table></div>"
-        return page("Advanced Money Tracker", body, g)
+        body += f"<div class='card'><h3>Detailed Ledger Rows</h3>{ledger_table(rows, show_user=True)}</div>"
 
+        return page("Advanced Money Tracker", body, g)
     @app.route("/dashboard/casino")
     def casino_page():
         d = require_login()
