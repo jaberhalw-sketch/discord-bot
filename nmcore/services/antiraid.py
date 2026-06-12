@@ -1,4 +1,5 @@
 import time
+import json
 from collections import defaultdict, deque
 from nmcore.db import db
 
@@ -46,6 +47,23 @@ DANGEROUS_PERMS = [
 ]
 
 
+ACTION_RISK_POINTS = {
+    "kick": 12,
+    "ban": 18,
+    "role_delete": 20,
+    "role_update": 10,
+    "dangerous_role_update": 28,
+    "member_role_update": 8,
+    "channel_create": 8,
+    "channel_delete": 18,
+    "channel_update": 8,
+    "webhook_create": 22,
+    "webhook_update": 14,
+    "webhook_delete": 18,
+    "bot_add": 30,
+}
+
+
 def ensure_schema():
     conn = db()
     cur = conn.cursor()
@@ -86,6 +104,40 @@ def ensure_schema():
         except Exception:
             pass
 
+    cur.execute("""CREATE TABLE IF NOT EXISTS admin_audit_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        action_type TEXT NOT NULL,
+        executor_id INTEGER DEFAULT 0,
+        executor_name TEXT DEFAULT '',
+        target_id INTEGER DEFAULT 0,
+        target_text TEXT DEFAULT '',
+        reason TEXT DEFAULT '',
+        count INTEGER DEFAULT 0,
+        threshold INTEGER DEFAULT 0,
+        window INTEGER DEFAULT 0,
+        triggered INTEGER DEFAULT 0,
+        duplicate INTEGER DEFAULT 0,
+        trusted INTEGER DEFAULT 0,
+        punishment TEXT DEFAULT '',
+        risk_points INTEGER DEFAULT 0,
+        metadata TEXT DEFAULT '',
+        created_at INTEGER DEFAULT 0
+    )""")
+
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_guild_time ON admin_audit_events (guild_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_executor ON admin_audit_events (guild_id, executor_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_action ON admin_audit_events (guild_id, action_type, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_admin_audit_triggered ON admin_audit_events (guild_id, triggered, created_at)",
+    ]
+
+    for sql in indexes:
+        try:
+            cur.execute(sql)
+        except Exception:
+            pass
+
     conn.commit()
     conn.close()
 
@@ -94,7 +146,10 @@ def get_settings(guild_id:int) -> dict:
     ensure_schema()
     conn = db()
     cur = conn.cursor()
-    cur.execute("INSERT OR IGNORE INTO antiraid_settings (guild_id,updated_at) VALUES (?,?)", (int(guild_id), int(time.time())))
+    cur.execute(
+        "INSERT OR IGNORE INTO antiraid_settings (guild_id,updated_at) VALUES (?,?)",
+        (int(guild_id), int(time.time()))
+    )
     conn.commit()
     cur.execute("SELECT * FROM antiraid_settings WHERE guild_id=?", (int(guild_id),))
     row = cur.fetchone()
@@ -172,6 +227,21 @@ def feature_enabled(settings, action_type):
     return bool(int(settings.get("enabled", 1) or 0)) and bool(int(settings.get(key, 1) or 0))
 
 
+def risk_points_for(action_type:str, triggered=False, duplicate=False, trusted=False):
+    if duplicate:
+        return 0
+
+    base = int(ACTION_RISK_POINTS.get(str(action_type or ""), 5) or 5)
+
+    if trusted:
+        return max(1, base // 4)
+
+    if triggered:
+        return base + 35
+
+    return base
+
+
 def is_duplicate_action(guild_id:int, user_id:int, action_type:str, target_key:str="", seconds:int=10) -> bool:
     """
     Prevent the same Discord audit-log action from being counted twice.
@@ -186,7 +256,6 @@ def is_duplicate_action(guild_id:int, user_id:int, action_type:str, target_key:s
     now = time.time()
     seconds = max(3, int(seconds or 10))
 
-    # Light cleanup so memory does not grow forever.
     expire_after = seconds * 6
     for key, last in list(_recent_action_keys.items()):
         try:
@@ -229,6 +298,65 @@ def record_action(guild_id:int, user_id:int, action_type:str, settings:dict):
     }
 
 
+def log_admin_event(
+    guild_id:int,
+    action_type:str,
+    executor_id:int=0,
+    executor_name:str="",
+    target_id:int=0,
+    target_text:str="",
+    reason:str="",
+    count:int=0,
+    threshold:int=0,
+    window:int=0,
+    triggered=False,
+    duplicate=False,
+    trusted=False,
+    punishment:str="",
+    metadata=None,
+):
+    ensure_schema()
+
+    try:
+        meta_text = json.dumps(metadata or {}, ensure_ascii=False)[:4000]
+    except Exception:
+        meta_text = "{}"
+
+    triggered_i = 1 if triggered else 0
+    duplicate_i = 1 if duplicate else 0
+    trusted_i = 1 if trusted else 0
+    risk = risk_points_for(action_type, triggered=triggered_i, duplicate=duplicate_i, trusted=trusted_i)
+
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""INSERT INTO admin_audit_events
+    (guild_id, action_type, executor_id, executor_name, target_id, target_text, reason,
+     count, threshold, window, triggered, duplicate, trusted, punishment, risk_points, metadata, created_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+        int(guild_id or 0),
+        str(action_type or "")[:80],
+        int(executor_id or 0),
+        str(executor_name or "")[:160],
+        int(target_id or 0),
+        str(target_text or "")[:600],
+        str(reason or "")[:800],
+        int(count or 0),
+        int(threshold or 0),
+        int(window or 0),
+        triggered_i,
+        duplicate_i,
+        trusted_i,
+        str(punishment or "")[:160],
+        int(risk or 0),
+        meta_text,
+        int(time.time()),
+    ))
+    conn.commit()
+    row_id = cur.lastrowid
+    conn.close()
+    return row_id
+
+
 def dangerous_perms_added(before_perms, after_perms):
     added = []
     for name in DANGEROUS_PERMS:
@@ -243,7 +371,7 @@ def dangerous_perms_added(before_perms, after_perms):
 async def punish_member(member, settings):
     action = str(settings.get("punish_action") or "log_only")
 
-    if not member or action == "log_only":
+    if not member or action in {"log_only", "none"}:
         return "log_only"
 
     if action == "remove_roles":
@@ -278,3 +406,60 @@ def settings_summary(guild_id:int):
         "window": int(s.get("window", 60) or 60),
         "punish_action": str(s.get("punish_action") or "log_only"),
     }
+
+
+def risk_label(score:int):
+    score = int(score or 0)
+    if score >= 180:
+        return "Critical"
+    if score >= 90:
+        return "High"
+    if score >= 40:
+        return "Medium"
+    return "Low"
+
+
+def admin_audit_totals(guild_id:int):
+    ensure_schema()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""SELECT
+        COUNT(*) events,
+        COUNT(DISTINCT executor_id) admins,
+        COALESCE(SUM(CASE WHEN triggered=1 THEN 1 ELSE 0 END),0) triggered,
+        COALESCE(SUM(CASE WHEN duplicate=1 THEN 1 ELSE 0 END),0) duplicates,
+        COALESCE(SUM(CASE WHEN trusted=1 THEN 1 ELSE 0 END),0) trusted,
+        COALESCE(SUM(risk_points),0) risk
+    FROM admin_audit_events
+    WHERE guild_id=?""", (int(guild_id),))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else {"events":0,"admins":0,"triggered":0,"duplicates":0,"trusted":0,"risk":0}
+
+
+def admin_audit_summary(guild_id:int, limit:int=50):
+    ensure_schema()
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""SELECT
+        executor_id,
+        executor_name,
+        COUNT(*) events,
+        COALESCE(SUM(risk_points),0) risk,
+        COALESCE(SUM(CASE WHEN triggered=1 THEN 1 ELSE 0 END),0) triggered,
+        COALESCE(SUM(CASE WHEN duplicate=1 THEN 1 ELSE 0 END),0) duplicates,
+        COALESCE(SUM(CASE WHEN trusted=1 THEN 1 ELSE 0 END),0) trusted,
+        COALESCE(SUM(CASE WHEN created_at >= strftime('%s','now') - 86400 THEN 1 ELSE 0 END),0) last_24h,
+        COALESCE(MAX(created_at),0) last_seen
+    FROM admin_audit_events
+    WHERE guild_id=? AND executor_id != 0
+    GROUP BY executor_id, executor_name
+    ORDER BY risk DESC, events DESC
+    LIMIT ?""", (int(guild_id), max(1, min(int(limit or 50), 200))))
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    for row in rows:
+        row["risk_label"] = risk_label(row.get("risk", 0))
+
+    return rows
