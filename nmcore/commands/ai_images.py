@@ -305,7 +305,7 @@ async def generate_image_command(ctx, prompt: str):
             await ctx.reply(embed=embed("📛 Server Limit", "السيرفر وصل الحد اليومي لطلبات الصور.", "bad", ctx.author))
             return
 
-    await ctx.channel.trigger_typing()
+    pass  # typing indicator disabled for compatibility
 
     try:
         raw = openai_generate(prompt, settings)
@@ -425,3 +425,4 @@ def setup(bot: commands.Bot):
             f"Size: `{s.get('image_size')}`"
         )
         await ctx.reply(embed=embed("🖼️ AI Images Status", desc, "info", ctx.author))
+ 
