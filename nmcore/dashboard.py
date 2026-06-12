@@ -3,7 +3,7 @@ from flask import Flask, request, redirect, session
 from nmcore.config import DASHBOARD_SECRET_KEY, DB_FILE
 from nmcore.db import db, init_db
 from nmcore.ui import page
-from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled
+from nmcore.services.settings import ensure_guild, get_coin_name, set_coin_name, all_toggles, set_system_enabled, get_guild_settings, update_channel, set_dev_mode_enabled, is_dev_mode_enabled, get_ai_image_settings, update_ai_image_settings
 from nmcore.services import real_estate
 from nmcore.services import economy as economy_service
 from nmcore.services import antiraid
@@ -3652,6 +3652,263 @@ DASHBOARD_BASE_URL</pre>
         </div>
         """
         return page("Companies", body, g)
+
+
+    @app.route("/dashboard/ai", methods=["GET", "POST"])
+    def ai_images_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+
+        if request.method == "POST":
+            action = request.form.get("action", "").strip()
+
+            if action == "save_ai_images":
+                try:
+                    image_channel_id = int(request.form.get("image_channel_id") or 0)
+                except Exception:
+                    image_channel_id = 0
+
+                try:
+                    log_channel_id = int(request.form.get("log_channel_id") or 0)
+                except Exception:
+                    log_channel_id = 0
+
+                try:
+                    daily_limit_per_user = max(0, int(request.form.get("daily_limit_per_user") or 5))
+                except Exception:
+                    daily_limit_per_user = 5
+
+                try:
+                    daily_limit_server = max(0, int(request.form.get("daily_limit_server") or 30))
+                except Exception:
+                    daily_limit_server = 30
+
+                try:
+                    cooldown_seconds = max(0, int(request.form.get("cooldown_seconds") or 60))
+                except Exception:
+                    cooldown_seconds = 60
+
+                image_size = request.form.get("image_size") or "1024x1024"
+                if image_size not in {"1024x1024", "1536x1024", "1024x1536"}:
+                    image_size = "1024x1024"
+
+                image_quality = request.form.get("image_quality") or "medium"
+                if image_quality not in {"low", "medium", "high"}:
+                    image_quality = "medium"
+
+                image_model = (request.form.get("image_model") or "gpt-image-1").strip()[:80] or "gpt-image-1"
+
+                update_ai_image_settings(
+                    g,
+                    enabled=1 if request.form.get("enabled") else 0,
+                    image_channel_id=image_channel_id,
+                    log_channel_id=log_channel_id,
+                    daily_limit_per_user=daily_limit_per_user,
+                    daily_limit_server=daily_limit_server,
+                    cooldown_seconds=cooldown_seconds,
+                    image_size=image_size,
+                    image_quality=image_quality,
+                    image_model=image_model,
+                    allowed_role_ids=(request.form.get("allowed_role_ids") or "").strip(),
+                    block_bad_prompts=1 if request.form.get("block_bad_prompts") else 0,
+                )
+
+                log_event(
+                    g,
+                    "dashboard_ai_images_settings",
+                    *dashboard_actor(),
+                    0,
+                    "",
+                    "AI Images settings updated",
+                    f"Channel={image_channel_id}, Cooldown={cooldown_seconds}, Quality={image_quality}, Size={image_size}"
+                )
+
+                return redirect(f"/dashboard/ai?guild_id={g}")
+
+        s = get_ai_image_settings(g)
+
+        conn = db()
+        cur = conn.cursor()
+
+        try:
+            cur.execute("""
+                SELECT
+                    COUNT(*) rows,
+                    COALESCE(SUM(CASE WHEN status='ok' THEN 1 ELSE 0 END), 0) ok_rows,
+                    COALESCE(SUM(CASE WHEN status!='ok' THEN 1 ELSE 0 END), 0) failed_rows
+                FROM ai_image_logs
+                WHERE guild_id=?
+            """, (g,))
+            stats = cur.fetchone()
+
+            cur.execute("""
+                SELECT *
+                FROM ai_image_logs
+                WHERE guild_id=?
+                ORDER BY id DESC
+                LIMIT 150
+            """, (g,))
+            rows = cur.fetchall()
+
+            cur.execute("""
+                SELECT user_id, user_name, COUNT(*) c
+                FROM ai_image_logs
+                WHERE guild_id=? AND status='ok' AND created_at >= ?
+                GROUP BY user_id, user_name
+                ORDER BY c DESC
+                LIMIT 20
+            """, (g, int(time.time()) - 86400))
+            top_today = cur.fetchall()
+        except Exception:
+            stats = {"rows": 0, "ok_rows": 0, "failed_rows": 0}
+            rows = []
+            top_today = []
+
+        conn.close()
+
+        def selected(current, value):
+            return "selected" if str(current or "") == str(value) else ""
+
+        def checked(v):
+            return "checked" if int(v or 0) else ""
+
+        channel_id = int(s.get("image_channel_id") or 0)
+        log_channel_id = int(s.get("log_channel_id") or 0)
+
+        top_trs = "".join(
+            f"<tr><td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td><td>{int(r['c'] or 0):,}</td></tr>"
+            for r in top_today
+        ) or "<tr><td colspan='2'>No AI image requests today.</td></tr>"
+
+        trs = ""
+        for r in rows:
+            status = str(r["status"] or "")
+            status_cls = "ok" if status == "ok" else "bad"
+            created = "-"
+            try:
+                created = time.strftime("%Y-%m-%d %H:%M", time.localtime(int(r["created_at"] or 0)))
+            except Exception:
+                pass
+
+            trs += f"""
+            <tr>
+              <td><code>{int(r['id'])}</code><br><span class='muted'>{esc(created)}</span></td>
+              <td>{user_chip(bot, g, r['user_id'], r['user_name'])}</td>
+              <td><code>{esc(r['action_type'])}</code></td>
+              <td><span class='pill {status_cls}'>{esc(status)}</span><br><span class='muted'>{esc(r['error_message'] or '')}</span></td>
+              <td><code>{esc(r['image_quality'])}</code><br><code>{esc(r['image_size'])}</code></td>
+              <td>{esc(str(r['prompt'] or '')[:500])}</td>
+            </tr>
+            """
+
+        if not trs:
+            trs = "<tr><td colspan='6'>No AI image logs yet.</td></tr>"
+
+        api_ready = bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='grid'>
+          <div class='card {'kpi-good' if int(s.get('enabled') or 0) else 'kpi-bad'}'>
+            <div class='muted'>AI Images</div>
+            <div class='stat'>{'ON' if int(s.get('enabled') or 0) else 'OFF'}</div>
+          </div>
+          <div class='card {'kpi-good' if api_ready else 'kpi-bad'}'>
+            <div class='muted'>OPENAI_API_KEY</div>
+            <div class='stat'>{'OK' if api_ready else 'Missing'}</div>
+          </div>
+          <div class='card'><div class='muted'>Image Room</div><div class='stat'>{f'<#{channel_id}>' if channel_id else 'Not set'}</div></div>
+          <div class='card'><div class='muted'>Cooldown</div><div class='stat'>{int(s.get('cooldown_seconds') or 60)}s</div></div>
+          <div class='card'><div class='muted'>Requests</div><div class='stat'>{int(stats['rows'] or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Success</div><div class='stat'>{int(stats['ok_rows'] or 0):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Failed</div><div class='stat'>{int(stats['failed_rows'] or 0):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>🖼️ AI Image Room Settings</h3>
+          <p class='muted'>الأوامر: <code>!صورة وصف الصورة</code> أو <code>!img prompt</code>. الصور ما تنحذف. الكول داون على الكل إلا صاحب البوت وصاحب السيرفر.</p>
+
+          <form method='post'>
+            <input type='hidden' name='guild_id' value='{g}'>
+            <input type='hidden' name='action' value='save_ai_images'>
+
+            <label><input type='checkbox' name='enabled' {checked(s.get('enabled'))}> Enabled / تشغيل صور AI</label><br><br>
+            <label><input type='checkbox' name='block_bad_prompts' {checked(s.get('block_bad_prompts'))}> Block bad prompts using Protection bad-words</label><br><br>
+
+            AI Image Channel ID<br>
+            <input name='image_channel_id' value='{channel_id}' placeholder='مثال: 123456789'><br>
+            <div class='muted'>إذا حطيته، البوت ما يقبل <code>!صورة</code> إلا في هذا الروم.</div><br>
+
+            AI Logs Channel ID<br>
+            <input name='log_channel_id' value='{log_channel_id}' placeholder='اختياري'><br><br>
+
+            Allowed Role IDs<br>
+            <textarea name='allowed_role_ids' style='width:100%;height:70px' placeholder='اختياري: اكتب IDs مفصولة بفواصل. اتركه فاضي للجميع.'>{esc(s.get('allowed_role_ids') or '')}</textarea><br><br>
+
+            <div class='grid'>
+              <div>
+                Daily Limit Per User<br>
+                <input name='daily_limit_per_user' type='number' min='0' value='{int(s.get('daily_limit_per_user') or 5)}'>
+              </div>
+              <div>
+                Daily Server Limit<br>
+                <input name='daily_limit_server' type='number' min='0' value='{int(s.get('daily_limit_server') or 30)}'>
+              </div>
+              <div>
+                Cooldown Seconds<br>
+                <input name='cooldown_seconds' type='number' min='0' value='{int(s.get('cooldown_seconds') or 60)}'>
+              </div>
+            </div>
+            <br>
+
+            <div class='grid'>
+              <div>
+                Image Size<br>
+                <select name='image_size'>
+                  <option value='1024x1024' {selected(s.get('image_size'), '1024x1024')}>1024x1024</option>
+                  <option value='1536x1024' {selected(s.get('image_size'), '1536x1024')}>1536x1024</option>
+                  <option value='1024x1536' {selected(s.get('image_size'), '1024x1536')}>1024x1536</option>
+                </select>
+              </div>
+              <div>
+                Quality<br>
+                <select name='image_quality'>
+                  <option value='low' {selected(s.get('image_quality'), 'low')}>low</option>
+                  <option value='medium' {selected(s.get('image_quality'), 'medium')}>medium</option>
+                  <option value='high' {selected(s.get('image_quality'), 'high')}>high</option>
+                </select>
+              </div>
+              <div>
+                Model<br>
+                <input name='image_model' value='{esc(s.get('image_model') or 'gpt-image-1')}'>
+              </div>
+            </div>
+            <br>
+            <button>Save AI Images</button>
+          </form>
+        </div>
+
+        <div class='card'>
+          <h3>Quick Commands</h3>
+          <p><code>!ai_روم {channel_id or 'CHANNEL_ID'}</code></p>
+          <p><code>!ai_تشغيل</code> / <code>!ai_ايقاف</code> / <code>!ai_صور</code></p>
+          <p><code>!صورة قطة لابسة شماغ بأسلوب واقعي</code></p>
+        </div>
+
+        <div class='card'>
+          <h3>Top Users Today</h3>
+          <table><tr><th>User</th><th>Images Today</th></tr>{top_trs}</table>
+        </div>
+
+        <div class='card'>
+          <h3>AI Image Logs</h3>
+          <table><tr><th>ID / Time</th><th>User</th><th>Action</th><th>Status</th><th>Quality / Size</th><th>Prompt</th></tr>{trs}</table>
+        </div>
+        """
+        return page("AI Images", body, g)
+
 
     @app.route("/dashboard/settings", methods=["GET", "POST"])
     def settings_page():
