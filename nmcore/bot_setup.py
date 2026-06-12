@@ -116,7 +116,7 @@ async def get_latest_audit(guild, action, target_id=None):
     return None
 
 
-async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason=""):
+async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason="", dedupe_key=None):
     try:
         settings = antiraid.get_settings(guild.id)
 
@@ -128,6 +128,10 @@ async def handle_antiraid_action(bot, guild, action_type, executor, target_text,
 
         member = guild.get_member(int(executor.id))
         if antiraid.is_trusted(settings, member):
+            return
+
+        dedupe_key = str(dedupe_key or target_text or "")
+        if antiraid.is_duplicate_action(guild.id, executor.id, action_type, dedupe_key):
             return
 
         state = antiraid.record_action(guild.id, executor.id, action_type, settings)
@@ -594,13 +598,35 @@ def setup_bot(bot):
         if member.bot:
             entry = await get_latest_audit(member.guild, discord.AuditLogAction.bot_add, member.id)
             if entry:
-                await handle_antiraid_action(bot, member.guild, "bot_add", entry.user, f"Bot `{member}` (`{member.id}`)", entry.reason or "")
+                await handle_antiraid_action(
+                    bot,
+                    member.guild,
+                    "bot_add",
+                    entry.user,
+                    f"Bot `{member}` (`{member.id}`)",
+                    entry.reason or "",
+                    dedupe_key=f"bot:{member.id}",
+                )
 
     @bot.event
     async def on_member_remove(member):
         leave_type, moderator, reason = await detect_leave_type(member)
-        if leave_type in {"kick", "ban"} and moderator:
-            await handle_antiraid_action(bot, member.guild, leave_type, moderator, f"Member `{member}` (`{member.id}`)", reason)
+
+        # Important:
+        # Discord can fire both on_member_remove and on_member_ban for the same ban.
+        # So bans are counted only inside on_member_ban.
+        # on_member_remove counts kicks only. This prevents one ban from becoming Count 2/2.
+        if leave_type == "kick" and moderator:
+            await handle_antiraid_action(
+                bot,
+                member.guild,
+                "kick",
+                moderator,
+                f"Member `{member}` (`{member.id}`)",
+                reason,
+                dedupe_key=f"member:{member.id}",
+            )
+
         title = "📤 Member Left"
         color = "warn"
 
@@ -630,7 +656,15 @@ def setup_bot(bot):
     async def on_member_ban(guild, user):
         moderator, reason = await audit_reason(guild, discord.AuditLogAction.ban, user.id)
         if moderator:
-            await handle_antiraid_action(bot, guild, "ban", moderator, f"User `{user}` (`{user.id}`)", reason)
+            await handle_antiraid_action(
+                bot,
+                guild,
+                "ban",
+                moderator,
+                f"User `{user}` (`{user.id}`)",
+                reason,
+                dedupe_key=f"user:{user.id}",
+            )
         mod_text = f"{moderator.mention} (`{moderator.id}`)" if moderator else "Unknown"
 
         log_event(guild.id, "member_ban", user.id, str(user), title="Member banned", details=f"By={mod_text}, Reason={reason}")
@@ -672,7 +706,7 @@ def setup_bot(bot):
             if action:
                 entry = await get_latest_audit(after.guild, action, after.id)
                 if entry:
-                    await handle_antiraid_action(bot, after.guild, "member_role_update", entry.user, f"Member `{after}` (`{after.id}`)", entry.reason or "")
+                    await handle_antiraid_action(bot, after.guild, "member_role_update", entry.user, f"Member `{after}` (`{after.id}`)", entry.reason or "", dedupe_key=f"member:{after.id}")
             log_event(after.guild.id, "member_roles_update", after.id, after.display_name, title="Roles changed", details=details)
             await send_log(bot, after.guild, "roles", "🎭 Roles Updated", details, "info", after)
 
@@ -686,7 +720,7 @@ def setup_bot(bot):
     async def on_guild_role_delete(role):
         entry = await get_latest_audit(role.guild, discord.AuditLogAction.role_delete, role.id)
         if entry:
-            await handle_antiraid_action(bot, role.guild, "role_delete", entry.user, f"Role `{role.name}` (`{role.id}`)", entry.reason or "")
+            await handle_antiraid_action(bot, role.guild, "role_delete", entry.user, f"Role `{role.name}` (`{role.id}`)", entry.reason or "", dedupe_key=f"role:{role.id}")
 
     @bot.event
     async def on_guild_role_update(before, after):
@@ -700,9 +734,10 @@ def setup_bot(bot):
                     "dangerous_role_update",
                     entry.user,
                     f"Role `{after.name}` (`{after.id}`) added dangerous perms: {', '.join(added_perms)}",
-                    entry.reason or ""
+                    entry.reason or "",
+                    dedupe_key=f"role:{after.id}:dangerous",
                 )
-            await handle_antiraid_action(bot, after.guild, "role_update", entry.user, f"Role `{after.name}` (`{after.id}`)", entry.reason or "")
+            await handle_antiraid_action(bot, after.guild, "role_update", entry.user, f"Role `{after.name}` (`{after.id}`)", entry.reason or "", dedupe_key=f"role:{after.id}")
 
     @bot.event
     async def on_guild_channel_create(channel):
@@ -711,7 +746,7 @@ def setup_bot(bot):
 
         entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_create, channel.id)
         if entry:
-            await handle_antiraid_action(bot, channel.guild, "channel_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+            await handle_antiraid_action(bot, channel.guild, "channel_create", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "", dedupe_key=f"channel:{channel.id}")
 
     @bot.event
     async def on_guild_channel_delete(channel):
@@ -720,13 +755,13 @@ def setup_bot(bot):
 
         entry = await get_latest_audit(channel.guild, discord.AuditLogAction.channel_delete, channel.id)
         if entry:
-            await handle_antiraid_action(bot, channel.guild, "channel_delete", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+            await handle_antiraid_action(bot, channel.guild, "channel_delete", entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "", dedupe_key=f"channel:{channel.id}")
 
     @bot.event
     async def on_guild_channel_update(before, after):
         entry = await get_latest_audit(after.guild, discord.AuditLogAction.channel_update, after.id)
         if entry:
-            await handle_antiraid_action(bot, after.guild, "channel_update", entry.user, f"Channel `{after.name}` (`{after.id}`)", entry.reason or "")
+            await handle_antiraid_action(bot, after.guild, "channel_update", entry.user, f"Channel `{after.name}` (`{after.id}`)", entry.reason or "", dedupe_key=f"channel:{after.id}")
 
     @bot.event
     async def on_webhooks_update(channel):
@@ -737,7 +772,7 @@ def setup_bot(bot):
         ]:
             entry = await get_latest_audit(channel.guild, audit_action, None)
             if entry:
-                await handle_antiraid_action(bot, channel.guild, action_type, entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "")
+                await handle_antiraid_action(bot, channel.guild, action_type, entry.user, f"Channel `{channel.name}` (`{channel.id}`)", entry.reason or "", dedupe_key=f"webhook:{channel.id}:{action_type}")
                 break
 
 
