@@ -665,6 +665,7 @@ DASHBOARD_BASE_URL</pre>
           <div>
             <a class='btn' href='/dashboard/money-tracker?guild_id={g}'>Open Money Tracker</a>
             <a class='btn' style='background:#334155' href='/dashboard/security?guild_id={g}'>Security</a>
+            <a class='btn' style='background:#7c3aed' href='/dashboard/admin-audit?guild_id={g}'>Admin Audit</a>
           </div>
         </div>
         """ + guild_selector_html(g) + f"""
@@ -2373,6 +2374,254 @@ DASHBOARD_BASE_URL</pre>
 
 
 
+
+    @app.route("/dashboard/admin-audit")
+    def admin_audit_page():
+        d = require_login()
+        if d:
+            return d
+
+        g = gid(bot)
+        antiraid.ensure_schema()
+
+        user_filter = request.args.get("user_id", "").strip()
+        action_filter = request.args.get("action", "").strip()
+        status_filter = request.args.get("status", "").strip()
+        limit_raw = request.args.get("limit", "250").strip()
+
+        try:
+            limit = max(25, min(int(limit_raw or 250), 1000))
+        except Exception:
+            limit = 250
+
+        def ts_fmt(ts):
+            try:
+                return time.strftime("%Y-%m-%d %H:%M", time.localtime(int(ts or 0)))
+            except Exception:
+                return "-"
+
+        def risk_class(score):
+            score = int(score or 0)
+            if score >= 180:
+                return "bad"
+            if score >= 90:
+                return "warn"
+            if score >= 40:
+                return "info"
+            return "ok"
+
+        def event_badge(r):
+            if int(r["triggered"] or 0):
+                return "<span class='pill bad'>Triggered</span>"
+            if int(r["duplicate"] or 0):
+                return "<span class='pill info'>Duplicate Blocked</span>"
+            if int(r["trusted"] or 0):
+                return "<span class='pill ok'>Trusted Ignored</span>"
+            return "<span class='pill warn'>Watched</span>"
+
+        conn = db()
+        cur = conn.cursor()
+
+        where = "WHERE guild_id=?"
+        params = [g]
+
+        if user_filter.isdigit():
+            where += " AND executor_id=?"
+            params.append(int(user_filter))
+
+        if action_filter:
+            where += " AND action_type=?"
+            params.append(action_filter)
+
+        if status_filter == "triggered":
+            where += " AND triggered=1"
+        elif status_filter == "duplicate":
+            where += " AND duplicate=1"
+        elif status_filter == "trusted":
+            where += " AND trusted=1"
+        elif status_filter == "watched":
+            where += " AND triggered=0 AND duplicate=0 AND trusted=0"
+
+        cur.execute(f"""SELECT * FROM admin_audit_events
+        {where}
+        ORDER BY id DESC
+        LIMIT ?""", params + [limit])
+        events = cur.fetchall()
+
+        cur.execute("""SELECT
+            COUNT(*) events,
+            COUNT(DISTINCT executor_id) admins,
+            COALESCE(SUM(CASE WHEN triggered=1 THEN 1 ELSE 0 END),0) triggered,
+            COALESCE(SUM(CASE WHEN duplicate=1 THEN 1 ELSE 0 END),0) duplicates,
+            COALESCE(SUM(CASE WHEN trusted=1 THEN 1 ELSE 0 END),0) trusted,
+            COALESCE(SUM(risk_points),0) risk
+        FROM admin_audit_events
+        WHERE guild_id=?""", (g,))
+        totals = cur.fetchone()
+
+        cur.execute("""SELECT
+            executor_id,
+            executor_name,
+            COUNT(*) events,
+            COALESCE(SUM(risk_points),0) risk,
+            COALESCE(SUM(CASE WHEN triggered=1 THEN 1 ELSE 0 END),0) triggered,
+            COALESCE(SUM(CASE WHEN duplicate=1 THEN 1 ELSE 0 END),0) duplicates,
+            COALESCE(SUM(CASE WHEN trusted=1 THEN 1 ELSE 0 END),0) trusted,
+            COALESCE(SUM(CASE WHEN created_at >= strftime('%s','now') - 86400 THEN 1 ELSE 0 END),0) last_24h,
+            COALESCE(MAX(created_at),0) last_seen
+        FROM admin_audit_events
+        WHERE guild_id=? AND executor_id != 0
+        GROUP BY executor_id, executor_name
+        ORDER BY risk DESC, events DESC
+        LIMIT 80""", (g,))
+        admins = cur.fetchall()
+
+        cur.execute("""SELECT
+            action_type,
+            COUNT(*) events,
+            COALESCE(SUM(CASE WHEN triggered=1 THEN 1 ELSE 0 END),0) triggered,
+            COALESCE(SUM(CASE WHEN duplicate=1 THEN 1 ELSE 0 END),0) duplicates,
+            COALESCE(SUM(risk_points),0) risk
+        FROM admin_audit_events
+        WHERE guild_id=?
+        GROUP BY action_type
+        ORDER BY risk DESC, events DESC""", (g,))
+        actions = cur.fetchall()
+
+        cur.execute("""SELECT DISTINCT action_type
+        FROM admin_audit_events
+        WHERE guild_id=?
+        ORDER BY action_type""", (g,))
+        action_options = [str(r["action_type"] or "") for r in cur.fetchall()]
+        conn.close()
+
+        admin_rows = ""
+        for r in admins:
+            score = int(r["risk"] or 0)
+            admin_rows += f"""
+            <tr>
+              <td>{user_chip(bot, g, r["executor_id"], r["executor_name"])}</td>
+              <td><span class='pill {risk_class(score)}'>{score:,} / {esc(antiraid.risk_label(score))}</span></td>
+              <td>{int(r["events"] or 0):,}</td>
+              <td>{int(r["triggered"] or 0):,}</td>
+              <td>{int(r["duplicates"] or 0):,}</td>
+              <td>{int(r["trusted"] or 0):,}</td>
+              <td>{int(r["last_24h"] or 0):,}</td>
+              <td>{ts_fmt(r["last_seen"])}</td>
+              <td><a class='btn' href='/dashboard/admin-audit?guild_id={g}&user_id={int(r["executor_id"] or 0)}'>Open</a></td>
+            </tr>
+            """
+
+        if not admin_rows:
+            admin_rows = "<tr><td colspan='9'>No admin audit data yet.</td></tr>"
+
+        action_rows = ""
+        for r in actions:
+            action_rows += f"""
+            <tr>
+              <td><code>{esc(r["action_type"])}</code></td>
+              <td>{int(r["events"] or 0):,}</td>
+              <td>{int(r["triggered"] or 0):,}</td>
+              <td>{int(r["duplicates"] or 0):,}</td>
+              <td>{int(r["risk"] or 0):,}</td>
+              <td><a class='btn' href='/dashboard/admin-audit?guild_id={g}&action={urllib.parse.quote(str(r["action_type"]))}'>Open</a></td>
+            </tr>
+            """
+
+        if not action_rows:
+            action_rows = "<tr><td colspan='6'>No action data yet.</td></tr>"
+
+        event_rows = ""
+        for r in events:
+            event_rows += f"""
+            <tr>
+              <td>{event_badge(r)}<br><span class='muted'>{ts_fmt(r["created_at"])}</span></td>
+              <td>{user_chip(bot, g, r["executor_id"], r["executor_name"])}</td>
+              <td><code>{esc(r["action_type"])}</code></td>
+              <td>{esc(r["target_text"])}</td>
+              <td>{int(r["count"] or 0):,}/{int(r["threshold"] or 0):,} in {int(r["window"] or 0):,}s</td>
+              <td>{esc(r["reason"] or "-")}</td>
+              <td>{esc(r["punishment"] or "-")}</td>
+              <td>{int(r["risk_points"] or 0):,}</td>
+            </tr>
+            """
+
+        if not event_rows:
+            event_rows = "<tr><td colspan='8'>No events found.</td></tr>"
+
+        action_select_options = "".join(
+            f"<option value='{esc(a)}' {'selected' if action_filter == a else ''}>{esc(a)}</option>"
+            for a in action_options
+        )
+
+        body = server_pill_html(g, bot) + f"""
+        <div class='card'>
+          <h3>Admin Audit + Anti-Raid Pro</h3>
+          <p class='muted'>هنا تشوف أي أدمن يسوي ban/kick/channel/role/webhook/bot actions، مع Risk Score و duplicate detection.</p>
+          <form>
+            <input type=hidden name=guild_id value='{g}'>
+            <input name=user_id placeholder='Executor/Admin ID' value='{esc(user_filter)}'>
+            <select name=action>
+              <option value='' {'selected' if action_filter == '' else ''}>All actions</option>
+              {action_select_options}
+            </select>
+            <select name=status>
+              <option value='' {'selected' if status_filter == '' else ''}>All statuses</option>
+              <option value='watched' {'selected' if status_filter == 'watched' else ''}>Watched</option>
+              <option value='triggered' {'selected' if status_filter == 'triggered' else ''}>Triggered</option>
+              <option value='duplicate' {'selected' if status_filter == 'duplicate' else ''}>Duplicate Blocked</option>
+              <option value='trusted' {'selected' if status_filter == 'trusted' else ''}>Trusted Ignored</option>
+            </select>
+            <input name=limit placeholder='Limit' value='{limit}' style='width:90px'>
+            <button>Filter</button>
+            <a class='btn' style='background:#334155' href='/dashboard/admin-audit?guild_id={g}'>Reset</a>
+          </form>
+          <br>
+          <a class='btn' href='/dashboard/protection?guild_id={g}'>Anti-Raid Settings</a>
+          <a class='btn' style='background:#334155' href='/dashboard/security?guild_id={g}'>Security Center</a>
+          <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}&event_type=antiraid_triggered_ban'>Triggered Logs</a>
+        </div>
+
+        <div class='grid'>
+          <div class='card'><div class='muted'>Audit Events</div><div class='stat'>{int(totals["events"] or 0):,}</div></div>
+          <div class='card'><div class='muted'>Admins Watched</div><div class='stat'>{int(totals["admins"] or 0):,}</div></div>
+          <div class='card kpi-bad'><div class='muted'>Triggered</div><div class='stat'>{int(totals["triggered"] or 0):,}</div></div>
+          <div class='card kpi-info'><div class='muted'>Duplicates Blocked</div><div class='stat'>{int(totals["duplicates"] or 0):,}</div></div>
+          <div class='card kpi-good'><div class='muted'>Trusted Ignored</div><div class='stat'>{int(totals["trusted"] or 0):,}</div></div>
+          <div class='card kpi-warn'><div class='muted'>Total Risk</div><div class='stat'>{int(totals["risk"] or 0):,}</div></div>
+        </div>
+
+        <div class='card'>
+          <h3>Risky Admins</h3>
+          <table>
+            <tr>
+              <th>Admin</th><th>Risk</th><th>Events</th><th>Triggered</th><th>Duplicates</th><th>Trusted</th><th>24h</th><th>Last Seen</th><th></th>
+            </tr>
+            {admin_rows}
+          </table>
+        </div>
+
+        <div class='card'>
+          <h3>Actions Summary</h3>
+          <table>
+            <tr><th>Action</th><th>Events</th><th>Triggered</th><th>Duplicates</th><th>Risk</th><th></th></tr>
+            {action_rows}
+          </table>
+        </div>
+
+        <div class='card'>
+          <h3>Recent Admin Audit Events</h3>
+          <table>
+            <tr>
+              <th>Status / Time</th><th>Executor</th><th>Action</th><th>Target</th><th>Count</th><th>Reason</th><th>Punishment</th><th>Risk</th>
+            </tr>
+            {event_rows}
+          </table>
+        </div>
+        """
+        return page("Admin Audit", body, g)
+
+
     @app.route("/dashboard/security")
     def security_page():
         d = require_login()
@@ -2428,6 +2677,7 @@ DASHBOARD_BASE_URL</pre>
           <h3>Security Issues / Recommendations</h3>
           <ul>{issues}</ul>
           <a class='btn' href='/dashboard/protection?guild_id={g}'>Open Protection Controls</a>
+          <a class='btn' style='background:#7c3aed' href='/dashboard/admin-audit?guild_id={g}'>Open Admin Audit</a>
           <a class='btn' style='background:#334155' href='/dashboard/logs?guild_id={g}'>Open Logs</a>
         </div>
 
