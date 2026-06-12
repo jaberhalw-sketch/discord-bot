@@ -307,6 +307,38 @@ def init_db():
         amount INTEGER DEFAULT 0,
         created_at INTEGER NOT NULL
     )""")
+
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_image_settings (
+        guild_id INTEGER PRIMARY KEY,
+        enabled INTEGER DEFAULT 1,
+        image_channel_id INTEGER DEFAULT 0,
+        log_channel_id INTEGER DEFAULT 0,
+        daily_limit_per_user INTEGER DEFAULT 5,
+        daily_limit_server INTEGER DEFAULT 30,
+        cooldown_seconds INTEGER DEFAULT 60,
+        image_size TEXT DEFAULT '1024x1024',
+        image_quality TEXT DEFAULT 'medium',
+        image_model TEXT DEFAULT 'gpt-image-1',
+        allowed_role_ids TEXT DEFAULT '',
+        block_bad_prompts INTEGER DEFAULT 1,
+        updated_at INTEGER DEFAULT 0
+    )""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_image_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        user_name TEXT DEFAULT '',
+        channel_id INTEGER DEFAULT 0,
+        prompt TEXT DEFAULT '',
+        action_type TEXT DEFAULT 'generate',
+        image_model TEXT DEFAULT 'gpt-image-1',
+        image_size TEXT DEFAULT '1024x1024',
+        image_quality TEXT DEFAULT 'medium',
+        status TEXT DEFAULT 'ok',
+        error_message TEXT DEFAULT '',
+        created_at INTEGER NOT NULL
+    )""")
+
     cur.execute("""CREATE TABLE IF NOT EXISTS runtime_errors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         source TEXT DEFAULT '',
@@ -322,5 +354,7 @@ def init_db():
     cur.execute("CREATE INDEX IF NOT EXISTS idx_warnings_guild_user ON warnings(guild_id, user_id, status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_logs_guild_time ON log_events(guild_id, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_live_guild_time ON live_activity(guild_id, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_image_logs_guild_time ON ai_image_logs(guild_id, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_image_logs_user_time ON ai_image_logs(guild_id, user_id, created_at DESC)")
     conn.commit()
     conn.close()
