@@ -4,6 +4,7 @@ from nmcore.db import db
 
 
 _actions = defaultdict(deque)
+_recent_action_keys = {}
 
 
 DEFAULTS = {
@@ -169,6 +170,44 @@ def feature_enabled(settings, action_type):
         return False
 
     return bool(int(settings.get("enabled", 1) or 0)) and bool(int(settings.get(key, 1) or 0))
+
+
+def is_duplicate_action(guild_id:int, user_id:int, action_type:str, target_key:str="", seconds:int=10) -> bool:
+    """
+    Prevent the same Discord audit-log action from being counted twice.
+
+    Example fixed case:
+    - A ban can trigger on_member_remove and on_member_ban.
+    - Without dedupe, one ban can become Count 1/2 then Count 2/2.
+
+    Key format:
+    guild + executor + action_type + target
+    """
+    now = time.time()
+    seconds = max(3, int(seconds or 10))
+
+    # Light cleanup so memory does not grow forever.
+    expire_after = seconds * 6
+    for key, last in list(_recent_action_keys.items()):
+        try:
+            if now - float(last) > expire_after:
+                _recent_action_keys.pop(key, None)
+        except Exception:
+            _recent_action_keys.pop(key, None)
+
+    key = (
+        int(guild_id or 0),
+        int(user_id or 0),
+        str(action_type or ""),
+        str(target_key or ""),
+    )
+
+    last = _recent_action_keys.get(key)
+    if last and now - float(last) <= seconds:
+        return True
+
+    _recent_action_keys[key] = now
+    return False
 
 
 def record_action(guild_id:int, user_id:int, action_type:str, settings:dict):
