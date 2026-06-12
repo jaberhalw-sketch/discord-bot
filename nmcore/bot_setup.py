@@ -116,7 +116,7 @@ async def get_latest_audit(guild, action, target_id=None):
     return None
 
 
-async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason="", dedupe_key=None):
+async def handle_antiraid_action(bot, guild, action_type, executor, target_text, reason="", dedupe_key=None, target_id=0):
     try:
         settings = antiraid.get_settings(guild.id)
 
@@ -126,15 +126,66 @@ async def handle_antiraid_action(bot, guild, action_type, executor, target_text,
         if not executor or executor.bot:
             return
 
+        try:
+            if not int(target_id or 0):
+                for part in str(dedupe_key or "").replace(":", " ").split():
+                    if str(part).isdigit():
+                        target_id = int(part)
+                        break
+        except Exception:
+            target_id = 0
+
         member = guild.get_member(int(executor.id))
         if antiraid.is_trusted(settings, member):
+            antiraid.log_admin_event(
+                guild.id,
+                action_type,
+                executor.id,
+                str(executor),
+                int(target_id or 0),
+                target_text,
+                reason,
+                trusted=True,
+                metadata={"note": "trusted_admin_ignored"},
+            )
             return
 
         dedupe_key = str(dedupe_key or target_text or "")
         if antiraid.is_duplicate_action(guild.id, executor.id, action_type, dedupe_key):
+            antiraid.log_admin_event(
+                guild.id,
+                action_type,
+                executor.id,
+                str(executor),
+                int(target_id or 0),
+                target_text,
+                reason,
+                duplicate=True,
+                metadata={"dedupe_key": dedupe_key},
+            )
             return
 
         state = antiraid.record_action(guild.id, executor.id, action_type, settings)
+        punishment = ""
+
+        if state.get("triggered"):
+            punishment = await antiraid.punish_member(member, settings)
+
+        antiraid.log_admin_event(
+            guild.id,
+            action_type,
+            executor.id,
+            str(executor),
+            int(target_id or 0),
+            target_text,
+            reason,
+            count=state.get("count", 0),
+            threshold=state.get("threshold", 0),
+            window=state.get("window", 0),
+            triggered=bool(state.get("triggered")),
+            punishment=punishment,
+            metadata={"dedupe_key": dedupe_key},
+        )
 
         log_event(
             guild.id,
@@ -147,21 +198,23 @@ async def handle_antiraid_action(bot, guild, action_type, executor, target_text,
             f"Target={target_text}, Count={state['count']}/{state['threshold']}, Reason={reason}"
         )
 
+        watched_text = (
+            f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)" + chr(10) +
+            f"Target: {target_text}" + chr(10) +
+            f"Count: `{state['count']}/{state['threshold']}` in `{state['window']}s`" + chr(10) +
+            f"Reason: `{reason or '-'}`"
+        )
+
         await send_log(
             bot,
             guild,
             "server",
             f"🛡️ Anti-Raid: {action_type}",
-            f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
-            f"Target: {target_text}\n"
-            f"Count: `{state['count']}/{state['threshold']}` in `{state['window']}s`\n"
-            f"Reason: `{reason or '-'}`",
+            watched_text,
             "warn"
         )
 
         if state.get("triggered"):
-            punishment = await antiraid.punish_member(member, settings)
-
             log_event(
                 guild.id,
                 f"antiraid_triggered_{action_type}",
@@ -173,14 +226,18 @@ async def handle_antiraid_action(bot, guild, action_type, executor, target_text,
                 f"Target={target_text}, Punishment={punishment}"
             )
 
+            triggered_text = (
+                f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)" + chr(10) +
+                f"Target: {target_text}" + chr(10) +
+                f"Punishment: `{punishment}`"
+            )
+
             await send_log(
                 bot,
                 guild,
                 "server",
                 f"🚨 Anti-Raid Triggered: {action_type}",
-                f"Executor: {executor.mention if hasattr(executor, 'mention') else executor} (`{executor.id}`)\n"
-                f"Target: {target_text}\n"
-                f"Punishment: `{punishment}`",
+                triggered_text,
                 "bad"
             )
     except Exception as e:
