@@ -69,6 +69,7 @@ def page(title, body, guild_id=0):
             ("🛒 Real Estate Shop",f"/dashboard/shop{q}"),
             ("🏘️ Real Estate Admin",f"/dashboard/real-estate{q}"),
             ("🏢 Companies",f"/dashboard/companies{q}"),
+            ("🖼️ AI Images",f"/dashboard/ai{q}"),
         ]),
         ("Community", [
             ("📊 Levels",f"/dashboard/levels{q}"),
