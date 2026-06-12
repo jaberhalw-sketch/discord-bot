@@ -15,12 +15,15 @@ def dashboard_logo_url():
     """
     return os.getenv("DASHBOARD_LOGO_URL", "").strip()
 
+
 def coin(guild_id, amount):
     return f"**{int(amount):,}** {get_coin_name(guild_id)}"
+
 
 def money_delta(guild_id, amount):
     sign="+" if int(amount)>=0 else ""
     return f"**{sign}{int(amount):,}** {get_coin_name(guild_id)}"
+
 
 def embed(title, desc="", color="info", member=None):
     e=discord.Embed(title=title, description=desc, color=COLORS.get(color, COLORS["info"]), timestamp=discord.utils.utcnow())
@@ -29,6 +32,7 @@ def embed(title, desc="", color="info", member=None):
         e.set_thumbnail(url=member.display_avatar.url)
     e.set_footer(text=f"{BOT_BRAND} • V9 Unified")
     return e
+
 
 def success(title, desc="", member=None):
     return embed(title, desc, "ok", member)
@@ -40,7 +44,7 @@ def error(title, desc="", member=None):
 
 def page(title, body, guild_id=0):
     q=f"?guild_id={int(guild_id)}" if guild_id else ""
-    refresh_titles = {"Live Activity": 8, "Logs": 15, "Warnings": 20, "Money Tracker": 20}
+    refresh_titles = {"Live Activity": 8, "Logs": 15, "Warnings": 20, "Money Tracker": 20, "Admin Audit": 20}
     refresh_meta = f"<meta http-equiv='refresh' content='{refresh_titles.get(str(title), 0)}'>" if str(title) in refresh_titles else ""
     logo_url = dashboard_logo_url()
     logo_html = f"<img class='brand-logo' src='{escape(logo_url)}' alt='NM logo'>" if logo_url else "<div class='brand-logo-fallback'>NM</div>"
@@ -77,6 +81,7 @@ def page(title, body, guild_id=0):
             ("⚠️ Warnings",f"/dashboard/warnings{q}"),
             ("🛡️ Protection",f"/dashboard/protection{q}"),
             ("🧨 Security",f"/dashboard/security{q}"),
+            ("🛡️ Admin Audit",f"/dashboard/admin-audit{q}"),
             ("📜 Logs",f"/dashboard/logs{q}"),
             ("🟢 Live Activity",f"/dashboard/live{q}"),
         ]),
