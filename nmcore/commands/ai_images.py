@@ -305,7 +305,16 @@ async def generate_image_command(ctx, prompt: str):
             await ctx.reply(embed=embed("📛 Server Limit", "السيرفر وصل الحد اليومي لطلبات الصور.", "bad", ctx.author))
             return
 
-    pass  # typing indicator disabled for compatibility
+    loading_msg = None
+    try:
+        loading_msg = await ctx.reply(embed=embed(
+            "⏳ جاري توليد الصورة...",
+            "طلبك وصل. انتظر شوي، الصورة قاعدة تنولد الآن.",
+            "warn",
+            ctx.author
+        ))
+    except Exception:
+        loading_msg = None
 
     try:
         raw = openai_generate(prompt, settings)
@@ -330,6 +339,17 @@ async def generate_image_command(ctx, prompt: str):
         }
 
         await ctx.reply(embed=e, file=file, view=AIImageView(request_id))
+        if loading_msg:
+            try:
+                await loading_msg.edit(embed=embed(
+                    "✅ تم توليد الصورة",
+                    "الصورة جاهزة تحت.",
+                    "ok",
+                    ctx.author
+                ))
+            except Exception:
+                pass
+
         log_ai(ctx.guild.id, ctx.author.id, str(ctx.author), ctx.channel.id, prompt, "generate", settings, "ok")
         log_event(ctx.guild.id, "ai_image", ctx.author.id, ctx.author.display_name, ctx.channel.id, ctx.channel.name, "AI Image Generated", prompt[:600])
 
@@ -341,7 +361,13 @@ async def generate_image_command(ctx, prompt: str):
 
     except Exception as ex:
         log_ai(ctx.guild.id, ctx.author.id, str(ctx.author), ctx.channel.id, prompt, "generate", settings, "error", str(ex))
-        await ctx.reply(embed=embed("❌ AI Image Failed", str(ex), "bad", ctx.author))
+        if loading_msg:
+            try:
+                await loading_msg.edit(embed=embed("❌ AI Image Failed", str(ex), "bad", ctx.author))
+            except Exception:
+                await ctx.reply(embed=embed("❌ AI Image Failed", str(ex), "bad", ctx.author))
+        else:
+            await ctx.reply(embed=embed("❌ AI Image Failed", str(ex), "bad", ctx.author))
 
 
 async def _safe_generate_wrapper(ctx, prompt: str):
@@ -425,4 +451,3 @@ def setup(bot: commands.Bot):
             f"Size: `{s.get('image_size')}`"
         )
         await ctx.reply(embed=embed("🖼️ AI Images Status", desc, "info", ctx.author))
- 
