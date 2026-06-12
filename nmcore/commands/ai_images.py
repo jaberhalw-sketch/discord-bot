@@ -344,16 +344,49 @@ async def generate_image_command(ctx, prompt: str):
         await ctx.reply(embed=embed("❌ AI Image Failed", str(ex), "bad", ctx.author))
 
 
+async def _safe_generate_wrapper(ctx, prompt: str):
+    try:
+        await generate_image_command(ctx, prompt)
+    except Exception as ex:
+        msg = f"{type(ex).__name__}: {str(ex)[:1200]}"
+        try:
+            log_event(
+                ctx.guild.id if ctx.guild else 0,
+                "ai_image_command_error",
+                ctx.author.id if ctx.author else 0,
+                str(ctx.author) if ctx.author else "",
+                ctx.channel.id if ctx.channel else 0,
+                str(ctx.channel) if ctx.channel else "",
+                "AI image command error",
+                msg
+            )
+        except Exception:
+            pass
+
+        try:
+            await ctx.reply(embed=embed(
+                "❌ AI Image Error",
+                f"طلع خطأ داخل أمر الصور:\n```text\n{msg}\n```\nارسل لي هذا الخطأ لو ما كان واضح.",
+                "bad",
+                ctx.author
+            ))
+        except Exception:
+            try:
+                await ctx.send(f"❌ AI Image Error: `{msg}`")
+            except Exception:
+                pass
+
+
 def setup(bot: commands.Bot):
     ensure_schema()
 
     @bot.command(name="صورة")
     async def ai_image_ar(ctx, *, prompt: str = ""):
-        await generate_image_command(ctx, prompt)
+        await _safe_generate_wrapper(ctx, prompt)
 
     @bot.command(name="img")
     async def ai_image_en(ctx, *, prompt: str = ""):
-        await generate_image_command(ctx, prompt)
+        await _safe_generate_wrapper(ctx, prompt)
 
     @bot.command(name="ai_روم")
     async def ai_set_channel(ctx, channel_id: int = 0):
